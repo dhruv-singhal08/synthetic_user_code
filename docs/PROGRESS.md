@@ -205,3 +205,8 @@
 - Gate (local venv, Amex pins): ruff/format pass; mypy (66 files) pass; pytest -W error 365 passed, 2 deselected; `pip check` clean. Same in a fresh scratch venv locked from PyPI (minus safechain).
 - Live: Gemini smoke-llm OK on the downgraded stack. Offline `run` OK.
 - NOT verified: `poetry lock` against Artifactory (Amex only); whether Artifactory carries fastapi 0.143 / uvicorn 0.54 / python-multipart 0.0.32 (may 403 if quarantined); real SafeChain call.
+
+## Amex runbook (2026-10-16) - user request
+- `docs/RUN_ON_AMEX.md`: copy-paste PowerShell for Python check, `poetry lock/install`, .env + SafeChain YAML, verify (pytest, smoke-llm, offline run), start the UI (`serve --config config/app.safechain.yaml`), what to send back on failure. Linked from README.
+- Fix: CLI/integration tests now also clear LLM_PROVIDER / SAFECHAIN_MODEL_ID / SAFECHAIN_CONFIG_PATH (10 tests failed when those were set in the shell).
+- Verified with a fake safechain package (mimics CONFIG_PATH YAML, model ids, CIBIS env): smoke-llm OK; CLI `run` incl. index exit 0; web API all 5 steps 200; `serve --config config/app.safechain.yaml` serves the UI (HTTP 200). Gate: ruff/format/mypy pass; pytest -W error 365 passed with and without SafeChain env vars.

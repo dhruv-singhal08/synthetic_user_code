@@ -17,7 +17,16 @@ SECRET = "sk-must-never-be-printed"
 def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Keep the repo .env (real keys) out of CLI tests.
     monkeypatch.chdir(tmp_path)
-    for var in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GEMINI_MODEL", "CONFIG_PATH", "LOG_LEVEL"):
+    for var in (
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "LLM_PROVIDER",
+        "SAFECHAIN_MODEL_ID",
+        "SAFECHAIN_CONFIG_PATH",
+        "CONFIG_PATH",
+        "LOG_LEVEL",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 

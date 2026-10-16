@@ -230,6 +230,8 @@ Until a real product client exists, you supply what the product said:
 changes the provider, the matching model variable (`GEMINI_MODEL` / `SAFECHAIN_MODEL_ID`) must be
 set too. Check connectivity with `synthetic-user smoke-llm`.
 
+**Amex laptop step-by-step (install, verify, start the UI):** [docs/RUN_ON_AMEX.md](docs/RUN_ON_AMEX.md).
+
 **SafeChain setup (Amex laptop):**
 
 1. `poetry lock && poetry install` (safechain 1.5.0 comes from Artifactory; see [Install](#install)).

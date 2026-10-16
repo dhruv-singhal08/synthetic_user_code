@@ -18,7 +18,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture
 def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
-    for var in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GEMINI_MODEL", "CONFIG_PATH", "LOG_LEVEL"):
+    for var in (
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "LLM_PROVIDER",
+        "SAFECHAIN_MODEL_ID",
+        "SAFECHAIN_CONFIG_PATH",
+        "CONFIG_PATH",
+        "LOG_LEVEL",
+    ):
         monkeypatch.delenv(var, raising=False)
     data = yaml.safe_load((REPO_ROOT / "config" / "app.yaml").read_text(encoding="utf-8"))
     data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")

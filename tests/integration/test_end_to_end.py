@@ -35,7 +35,16 @@ RUN_ID = "RUN_20261014_120000_abcd"
 def fake_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """config/app.fake.yaml with every path made absolute and artifacts in tmp_path."""
     monkeypatch.chdir(tmp_path)
-    for var in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GEMINI_MODEL", "CONFIG_PATH", "LOG_LEVEL"):
+    for var in (
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "LLM_PROVIDER",
+        "SAFECHAIN_MODEL_ID",
+        "SAFECHAIN_CONFIG_PATH",
+        "CONFIG_PATH",
+        "LOG_LEVEL",
+    ):
         monkeypatch.delenv(var, raising=False)
     data = yaml.safe_load((REPO_ROOT / "config" / "app.fake.yaml").read_text(encoding="utf-8"))
     data["llm"]["fake_script_path"] = str(REPO_ROOT / data["llm"]["fake_script_path"])

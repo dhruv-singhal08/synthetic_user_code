@@ -1,0 +1,45 @@
+{
+  "name": "missing_date_filter",
+  "description": "No filter for the last three months.",
+  "execution": {
+    "outcome": "sql_generated",
+    "sql": "SELECT e.full_name, c.currency_code, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.employee_id = e.employee_id\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+  },
+  "llm_responses": [
+    {
+      "checks": {
+        "intent_alignment": "pass",
+        "table_selection": "pass",
+        "column_selection": "pass",
+        "join_correctness": "pass",
+        "filter_correctness": "fail",
+        "aggregation_correctness": "pass",
+        "sql_syntax": "pass",
+        "semantic_considerations": "pass"
+      },
+      "findings": [
+        {
+          "category": "filter_correctness",
+          "description": "no date filter for the requested period",
+          "expected_behavior": "answer the question as asked",
+          "observed_behavior": "no date filter for the requested period",
+          "sql_evidence": "GROUP BY e.full_name, c.currency_code",
+          "severity": "medium",
+          "evidence_status": "supported",
+          "confidence": 0.8
+        }
+      ],
+      "cheat_sheet_conflicts": [],
+      "verdict": "fail"
+    }
+  ],
+  "expected": {
+    "verdict": "fail",
+    "evaluation_status": "evaluated",
+    "llm_calls": 1,
+    "finding_categories": [
+      "filter_correctness"
+    ],
+    "bug_candidates": 1
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "name": "wrong_metric_column",
+  "description": "Sums transaction_id instead of amount.",
+  "execution": {
+    "outcome": "sql_generated",
+    "sql": "SELECT e.full_name, c.currency_code, SUM(c.transaction_id) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.employee_id = e.employee_id\nWHERE c.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+  },
+  "llm_responses": [
+    {
+      "checks": {
+        "intent_alignment": "pass",
+        "table_selection": "pass",
+        "column_selection": "fail",
+        "join_correctness": "pass",
+        "filter_correctness": "pass",
+        "aggregation_correctness": "pass",
+        "sql_syntax": "pass",
+        "semantic_considerations": "pass"
+      },
+      "findings": [
+        {
+          "category": "column_selection",
+          "description": "sums the transaction id instead of the amount",
+          "expected_behavior": "answer the question as asked",
+          "observed_behavior": "sums the transaction id instead of the amount",
+          "sql_evidence": "SUM(c.transaction_id)",
+          "severity": "high",
+          "evidence_status": "supported",
+          "confidence": 0.8
+        }
+      ],
+      "cheat_sheet_conflicts": [],
+      "verdict": "fail"
+    }
+  ],
+  "expected": {
+    "verdict": "fail",
+    "evaluation_status": "evaluated",
+    "llm_calls": 1,
+    "finding_categories": [
+      "column_selection"
+    ],
+    "bug_candidates": 1
+  }
+}

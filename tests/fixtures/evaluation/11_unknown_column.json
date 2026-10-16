@@ -1,0 +1,35 @@
+{
+  "name": "unknown_column",
+  "description": "Column that does not exist on a catalog table; LLM pass cannot stand.",
+  "execution": {
+    "outcome": "sql_generated",
+    "sql": "SELECT e.full_name, c.currency_code, SUM(c.amount_usd) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.employee_id = e.employee_id\nWHERE c.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+  },
+  "llm_responses": [
+    {
+      "checks": {
+        "intent_alignment": "pass",
+        "table_selection": "pass",
+        "column_selection": "pass",
+        "join_correctness": "pass",
+        "filter_correctness": "pass",
+        "aggregation_correctness": "pass",
+        "sql_syntax": "pass",
+        "semantic_considerations": "pass"
+      },
+      "findings": [],
+      "cheat_sheet_conflicts": [],
+      "verdict": "pass"
+    }
+  ],
+  "expected": {
+    "verdict": "fail",
+    "evaluation_status": "evaluated",
+    "llm_calls": 1,
+    "finding_categories": [
+      "column_selection"
+    ],
+    "bug_candidates": 1,
+    "llm_verdict": "pass"
+  }
+}

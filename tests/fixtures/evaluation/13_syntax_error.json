@@ -1,0 +1,19 @@
+{
+  "name": "syntax_error",
+  "description": "Unparseable SQL: decided without calling the LLM.",
+  "execution": {
+    "outcome": "sql_generated",
+    "sql": "SELEC e.full_name FROM card_transactions"
+  },
+  "llm_responses": [],
+  "expected": {
+    "verdict": "fail",
+    "evaluation_status": "evaluated",
+    "llm_calls": 0,
+    "finding_categories": [
+      "syntax_error"
+    ],
+    "bug_candidates": 1,
+    "llm_verdict": null
+  }
+}

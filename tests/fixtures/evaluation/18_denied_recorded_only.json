@@ -1,0 +1,16 @@
+{
+  "name": "denied_recorded_only",
+  "description": "denied is recorded, not judged.",
+  "execution": {
+    "outcome": "denied",
+    "message": "I cannot answer that."
+  },
+  "llm_responses": [],
+  "expected": {
+    "verdict": null,
+    "evaluation_status": "recorded_only",
+    "llm_calls": 0,
+    "finding_categories": [],
+    "bug_candidates": 0
+  }
+}

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Synthetic User</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>Synthetic User</h1>
+    <p class="subtitle">Tests an NL2SQL product with a synthetic business user</p>
+  </div>
+  <div id="config-badge" class="badge muted">loading…</div>
+</header>
+
+<main>
+  <!-- 1. Inputs --------------------------------------------------------------------------->
+  <section class="card" id="inputs-card">
+    <div class="card-head">
+      <h2><span class="num">1</span> Inputs</h2>
+      <p class="hint">Upload YAML files or keep the samples. The preview shows exactly what will be used.</p>
+    </div>
+
+    <div class="inputs-grid">
+      <div class="input-col" data-kind="persona">
+        <h3>Persona</h3>
+        <div class="file-row">
+          <label class="btn small">Upload YAML<input type="file" accept=".yaml,.yml" hidden></label>
+          <button class="btn small ghost reset" type="button">Use sample</button>
+        </div>
+        <div class="source"></div>
+        <div class="preview"></div>
+        <label class="field-label" for="persona-queries">Sample queries for this persona (optional, one per line)</label>
+        <textarea id="persona-queries" rows="4" placeholder="e.g. Which departments spent the most on cards last quarter?"></textarea>
+        <p class="hint">Used only to mimic the user's style; generated questions never copy them.</p>
+      </div>
+
+      <div class="input-col" data-kind="product">
+        <h3>Product description</h3>
+        <div class="file-row">
+          <label class="btn small">Upload YAML<input type="file" accept=".yaml,.yml" hidden></label>
+          <button class="btn small ghost reset" type="button">Use sample</button>
+        </div>
+        <div class="source"></div>
+        <div class="preview"></div>
+      </div>
+
+      <div class="input-col" data-kind="catalog">
+        <h3>Catalog</h3>
+        <div class="file-row">
+          <label class="btn small">Upload YAML<input type="file" accept=".yaml,.yml" hidden></label>
+          <button class="btn small ghost reset" type="button">Use sample</button>
+        </div>
+        <div class="source"></div>
+        <div class="preview"></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="create-run" class="btn primary" type="button">Start a run with these inputs</button>
+      <span id="run-label" class="muted"></span>
+    </div>
+  </section>
+
+  <!-- 2. Product connection --------------------------------------------------------------->
+  <section class="card" id="product-card">
+    <div class="card-head">
+      <h2><span class="num">2</span> Product connection <span class="badge warn">mock</span></h2>
+      <p class="hint">Real product connection is not implemented yet. Requesting the contract returns a
+        <b>mock</b> contract, and questions are then answered by a mock product (an LLM stand-in that writes SQL).
+        Without a contract, the configured fixture product is used.</p>
+    </div>
+    <div class="file-row">
+      <input id="product-url" type="url" placeholder="https://nl2sql.example.com" class="grow">
+      <button id="request-contract" class="btn" type="button" disabled>Request contract</button>
+    </div>
+    <div id="contract" class="preview"></div>
+  </section>
+
+  <!-- 3. Pipeline ------------------------------------------------------------------------->
+  <section class="card" id="pipeline-card">
+    <div class="card-head">
+      <h2><span class="num">3</span> Pipeline</h2>
+      <p class="hint">Run the steps in order. Re-running a step regenerates everything after it.</p>
+    </div>
+    <div class="steps">
+      <div class="step" data-step="index">
+        <div class="step-title">Build reference index</div>
+        <div class="step-body muted">LLM describes each catalog table (reused per catalog version)</div>
+        <button class="btn step-btn" type="button" disabled>Run</button>
+        <span class="pill">pending</span>
+      </div>
+      <div class="step" data-step="scenarios">
+        <div class="step-title">Generate scenarios + cheat sheets</div>
+        <div class="step-body"><label>Count <input class="count" type="number" min="1" max="50" id="scenario-count"></label></div>
+        <button class="btn step-btn" type="button" disabled>Run</button>
+        <span class="pill">pending</span>
+      </div>
+      <div class="step" data-step="questions">
+        <div class="step-title">Generate questions</div>
+        <div class="step-body"><label>Per scenario <input class="count" type="number" min="1" max="50" id="question-count"></label></div>
+        <button class="btn step-btn" type="button" disabled>Run</button>
+        <span class="pill">pending</span>
+      </div>
+      <div class="step" data-step="execute">
+        <div class="step-title">Run questions on product</div>
+        <div class="step-body muted" id="execute-target">fixture product</div>
+        <button class="btn step-btn" type="button" disabled>Run</button>
+        <span class="pill">pending</span>
+      </div>
+      <div class="step" data-step="evaluate">
+        <div class="step-title">Evaluate</div>
+        <div class="step-body muted">Deterministic SQL rules + LLM review; bug candidates</div>
+        <button class="btn step-btn" type="button" disabled>Run</button>
+        <span class="pill">pending</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="run-all" class="btn primary" type="button" disabled>Run all remaining steps</button>
+      <span id="busy" class="muted"></span>
+    </div>
+    <div id="log" class="log"></div>
+  </section>
+
+  <!-- 4. Results -------------------------------------------------------------------------->
+  <section class="card" id="results-card">
+    <div class="card-head">
+      <h2><span class="num">4</span> Results <span class="muted small">(one row per question - the same table as results.csv)</span></h2>
+    </div>
+    <div class="toolbar">
+      <a id="download-csv" class="btn small disabled" href="#">Download results.csv</a>
+      <span class="muted small">Show:</span>
+      <label><input type="checkbox" data-group="scenario" checked> Scenario</label>
+      <label><input type="checkbox" data-group="cheat"> Cheat sheet</label>
+      <label><input type="checkbox" data-group="question" checked> Question</label>
+      <label><input type="checkbox" data-group="execution" checked> Product</label>
+      <label><input type="checkbox" data-group="evaluation" checked> Evaluation</label>
+    </div>
+    <div id="summary" class="summary"></div>
+    <div class="table-wrap"><table id="results"><thead></thead><tbody></tbody></table></div>
+    <details id="rejected-box">
+      <summary>Rejected scenarios / questions</summary>
+      <div id="rejected"></div>
+    </details>
+    <details>
+      <summary>Run artifacts (JSON downloads)</summary>
+      <div id="artifacts" class="artifact-list"></div>
+    </details>
+  </section>
+</main>
+
+<div id="drawer" class="drawer hidden">
+  <div class="drawer-head"><b id="drawer-title">Row</b><button id="drawer-close" class="btn small ghost" type="button">Close</button></div>
+  <div id="drawer-body"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+{
+  "product_id": "sample_nl2sql",
+  "product_version": "fixture-1",
+  "rules": [
+    {
+      "contains": [
+        "top",
+        "spenders"
+      ],
+      "response": {
+        "outcome": "sql_generated",
+        "sql": "SELECT e.full_name, c.currency_code, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.merchant_id = e.employee_id\nWHERE c.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+      }
+    },
+    {
+      "contains": [
+        "monthly"
+      ],
+      "response": {
+        "outcome": "clarification",
+        "message": "Should amounts be shown per currency, or converted to one currency?"
+      }
+    },
+    {
+      "contains": [
+        "forecast"
+      ],
+      "response": {
+        "outcome": "denied",
+        "message": "Forecasting is not supported yet."
+      }
+    }
+  ],
+  "default": {
+    "outcome": "error",
+    "error_type": "NoFixtureMatch",
+    "message": "No fixture rule matched this question; add a rule to the product fixture."
+  }
+}

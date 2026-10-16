@@ -1,0 +1,100 @@
+# Sample reference catalog (authoritative source of tables, columns, relationships).
+# Intentional properties for tests:
+#   - card_transactions has currency_code and merchant_category
+#   - employees has department_id
+#   - one verified relationship and one "unknown" relationship
+#   - merchants has missing descriptions (table and columns)
+catalog_id: sample_card_spend
+catalog_version: "1.0"
+tables:
+  - name: card_transactions
+    description: One row per corporate card transaction.
+    grain: one row per transaction
+    primary_key: [transaction_id]
+    columns:
+      - name: transaction_id
+        data_type: STRING
+        description: Unique transaction identifier.
+        nullable: false
+      - name: employee_id
+        data_type: STRING
+        description: Cardholder employee.
+        nullable: false
+      - name: merchant_id
+        data_type: STRING
+        description: Merchant where the transaction occurred.
+        nullable: true
+      - name: transaction_date
+        data_type: DATE
+        description: Date the transaction posted.
+        nullable: false
+      - name: amount
+        data_type: NUMERIC
+        description: Transaction amount in the transaction currency (see currency_code).
+        nullable: false
+      - name: currency_code
+        data_type: STRING
+        description: ISO 4217 currency of amount. Amounts in different currencies must not be summed directly.
+        nullable: false
+        allowed_values: [USD, EUR, GBP, INR]
+      - name: merchant_category
+        data_type: STRING
+        description: Merchant category as reported on the transaction.
+        nullable: true
+        allowed_values: [travel, dining, software, office_supplies, other]
+  - name: employees
+    description: One row per employee.
+    grain: one row per employee
+    primary_key: [employee_id]
+    columns:
+      - name: employee_id
+        data_type: STRING
+        description: Unique employee identifier.
+        nullable: false
+      - name: full_name
+        data_type: STRING
+        description: Employee full name.
+        nullable: false
+      - name: department_id
+        data_type: STRING
+        description: Department the employee belongs to.
+        nullable: true
+  - name: departments
+    description: One row per department.
+    grain: one row per department
+    primary_key: [department_id]
+    columns:
+      - name: department_id
+        data_type: STRING
+        description: Unique department identifier.
+        nullable: false
+      - name: department_name
+        data_type: STRING
+        description: Department display name.
+        nullable: false
+      - name: cost_center
+        data_type: STRING
+        description: Finance cost center code.
+        nullable: true
+  - name: merchants
+    primary_key: [merchant_id]
+    columns:
+      - name: merchant_id
+        data_type: STRING
+      - name: merchant_name
+        data_type: STRING
+      - name: country_code
+        data_type: STRING
+relationships:
+  - source_table: card_transactions
+    source_column: employee_id
+    target_table: employees
+    target_column: employee_id
+    cardinality: many_to_one
+    verification: verified
+  - source_table: employees
+    source_column: department_id
+    target_table: departments
+    target_column: department_id
+    cardinality: unknown
+    verification: unknown

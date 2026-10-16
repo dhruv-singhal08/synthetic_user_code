@@ -1,0 +1,41 @@
+# REAL LLM config: Gemini. Needs GOOGLE_API_KEY (or GEMINI_API_KEY) and GEMINI_MODEL in .env
+# (GEMINI_MODEL overrides llm.model). Run: synthetic-user serve --config config/app.gemini.yaml
+# See config/app.yaml for documentation of every key.
+
+llm:
+  provider: gemini
+  model: set-GEMINI_MODEL-in-.env
+  temperature: null
+  timeout_seconds: 120
+  max_validation_retries: 2
+  max_concurrency: 4
+  fake_script_path: null
+product:
+  client: fixture
+  fixture_path: ./data/fixtures/product_responses/sample_responses.json
+  timeout_seconds: 30
+sql:
+  dialect: bigquery
+generation:
+  scenario:
+    scenario_count: 3
+    allow_multi_table: true
+    include_unsupported_scenarios: true
+    diversity_preference: balanced
+    max_topup_rounds: 1
+  question:
+    question_count: 1
+    ambiguity_level: low
+    language: en
+    allow_vague_questions: false
+    reject_schema_leaks: true
+reference_index:
+  max_tables_per_call: 20
+paths:
+  artifacts_dir: ./artifacts
+inputs:
+  persona_path: ./data/personas/finance_controller.yaml
+  product_path: ./data/products/sample_product.yaml
+  catalog_path: ./data/references/sample_catalog.yaml
+  benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl
+  benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json

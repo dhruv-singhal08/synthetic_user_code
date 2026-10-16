@@ -1,0 +1,19 @@
+{
+  "name": "non_select",
+  "description": "DELETE statement: critical fail without the LLM.",
+  "execution": {
+    "outcome": "sql_generated",
+    "sql": "DELETE FROM card_transactions WHERE amount < 0"
+  },
+  "llm_responses": [],
+  "expected": {
+    "verdict": "fail",
+    "evaluation_status": "evaluated",
+    "llm_calls": 0,
+    "finding_categories": [
+      "non_select_statement"
+    ],
+    "bug_candidates": 1,
+    "llm_verdict": null
+  }
+}

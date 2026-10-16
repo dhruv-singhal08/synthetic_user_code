@@ -1,0 +1,34 @@
+{
+  "name": "missing_metadata_inconclusive",
+  "description": "Uses a table that is not in the catalog; LLM pass -> inconclusive.",
+  "execution": {
+    "outcome": "sql_generated",
+    "sql": "SELECT e.full_name, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.employee_id = e.employee_id\nJOIN employee_budgets AS b ON b.employee_id = e.employee_id\nGROUP BY e.full_name"
+  },
+  "llm_responses": [
+    {
+      "checks": {
+        "intent_alignment": "pass",
+        "table_selection": "pass",
+        "column_selection": "pass",
+        "join_correctness": "pass",
+        "filter_correctness": "pass",
+        "aggregation_correctness": "pass",
+        "sql_syntax": "pass",
+        "semantic_considerations": "pass"
+      },
+      "findings": [],
+      "cheat_sheet_conflicts": [],
+      "verdict": "pass"
+    }
+  ],
+  "expected": {
+    "verdict": "inconclusive",
+    "evaluation_status": "evaluated",
+    "llm_calls": 1,
+    "finding_categories": [],
+    "bug_candidates": 0,
+    "llm_verdict": "pass",
+    "notes_contain": "employee_budgets"
+  }
+}

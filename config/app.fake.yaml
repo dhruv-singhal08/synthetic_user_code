@@ -1,0 +1,42 @@
+# OFFLINE config: scripted fake LLM + fixture product. Run:
+#   synthetic-user run --config config/app.fake.yaml
+# Artifacts go to ./artifacts/offline so fake indexes never mix with real ones.
+# See config/app.yaml for documentation of every key.
+
+llm:
+  provider: fake
+  model: fake-scripted
+  temperature: null
+  timeout_seconds: 60
+  max_validation_retries: 2
+  max_concurrency: 4
+  fake_script_path: ./tests/fixtures/fake_llm_script.json
+product:
+  client: fixture
+  fixture_path: ./data/fixtures/product_responses/sample_responses.json
+  timeout_seconds: 30
+sql:
+  dialect: bigquery
+generation:
+  scenario:
+    scenario_count: 3
+    allow_multi_table: true
+    include_unsupported_scenarios: true
+    diversity_preference: balanced
+    max_topup_rounds: 0
+  question:
+    question_count: 1
+    ambiguity_level: low
+    language: en
+    allow_vague_questions: false
+    reject_schema_leaks: true
+reference_index:
+  max_tables_per_call: 20
+paths:
+  artifacts_dir: ./artifacts/offline
+inputs:
+  persona_path: ./data/personas/finance_controller.yaml
+  product_path: ./data/products/sample_product.yaml
+  catalog_path: ./data/references/sample_catalog.yaml
+  benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl
+  benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json

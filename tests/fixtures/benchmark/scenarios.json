@@ -1,0 +1,111 @@
+[
+  {
+    "id": "SCN_001",
+    "persona_id": "finance_controller",
+    "product_id": "sample_nl2sql",
+    "reference_index_id": "IDX_20261013_120000_0001",
+    "business_goal": "Identify which employees drive the most corporate card spend so finance can review outliers",
+    "title": "Top spenders by employee",
+    "task_type": "ranking",
+    "capability": "supported",
+    "capability_rationale": "Product supports 'ranking and top-N' and 'joins over documented relationships'",
+    "cheat_sheet": {
+      "tables": [
+        "card_transactions",
+        "employees"
+      ],
+      "columns": [
+        "card_transactions.amount",
+        "card_transactions.currency_code",
+        "employees.full_name"
+      ],
+      "relationships": [
+        {
+          "source": "card_transactions.employee_id",
+          "target": "employees.employee_id",
+          "verification": "verified"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "total_spend",
+          "definition": "sum of amount within one currency",
+          "columns": [
+            "card_transactions.amount"
+          ]
+        }
+      ],
+      "dimensions": [
+        "employees.full_name",
+        "card_transactions.currency_code"
+      ],
+      "operations": [
+        "join",
+        "group by",
+        "sum",
+        "order by desc",
+        "limit"
+      ],
+      "optional_filters": [
+        "transaction_date range"
+      ],
+      "semantic_considerations": [
+        "amounts are in mixed currencies"
+      ]
+    },
+    "question_guidance": {
+      "intent": "rank employees by total card spend",
+      "expected_ambiguity": "medium",
+      "phrasing_hints": [],
+      "terms_to_avoid": []
+    },
+    "signature": "benchmark-1"
+  },
+  {
+    "id": "SCN_002",
+    "persona_id": "finance_controller",
+    "product_id": "sample_nl2sql",
+    "reference_index_id": "IDX_20261013_120000_0001",
+    "business_goal": "Track how monthly card spend per merchant category evolves to spot budget drift",
+    "title": "Monthly spend trend by merchant category",
+    "task_type": "trend",
+    "capability": "supported",
+    "capability_rationale": "Product supports 'single-table aggregation' and 'filtering by date range'",
+    "cheat_sheet": {
+      "tables": [
+        "card_transactions"
+      ],
+      "columns": [
+        "card_transactions.amount",
+        "card_transactions.transaction_date",
+        "card_transactions.merchant_category"
+      ],
+      "relationships": [],
+      "metrics": [
+        {
+          "name": "total_spend",
+          "definition": "sum of amount per month",
+          "columns": [
+            "card_transactions.amount"
+          ]
+        }
+      ],
+      "dimensions": [
+        "card_transactions.merchant_category"
+      ],
+      "operations": [
+        "group by month",
+        "sum"
+      ],
+      "optional_filters": [],
+      "semantic_considerations": []
+    },
+    "question_guidance": {
+      "intent": "monthly spend trend by category",
+      "expected_ambiguity": "low",
+      "phrasing_hints": [],
+      "terms_to_avoid": []
+    },
+    "signature": "benchmark-2"
+  }
+]

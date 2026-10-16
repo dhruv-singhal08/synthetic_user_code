@@ -1,0 +1,33 @@
+{
+  "name": "cte",
+  "description": "CTE form; the CTE name must not be treated as an unknown table.",
+  "execution": {
+    "outcome": "sql_generated",
+    "sql": "WITH spend AS (\n  SELECT employee_id, currency_code, SUM(amount) AS total_spend\n  FROM card_transactions\n  WHERE transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\n  GROUP BY employee_id, currency_code\n)\nSELECT e.full_name, s.currency_code, s.total_spend\nFROM spend AS s\nJOIN employees AS e ON s.employee_id = e.employee_id\nORDER BY s.total_spend DESC\nLIMIT 10"
+  },
+  "llm_responses": [
+    {
+      "checks": {
+        "intent_alignment": "pass",
+        "table_selection": "pass",
+        "column_selection": "pass",
+        "join_correctness": "pass",
+        "filter_correctness": "pass",
+        "aggregation_correctness": "pass",
+        "sql_syntax": "pass",
+        "semantic_considerations": "pass"
+      },
+      "findings": [],
+      "cheat_sheet_conflicts": [],
+      "verdict": "pass"
+    }
+  ],
+  "expected": {
+    "verdict": "pass",
+    "evaluation_status": "evaluated",
+    "llm_calls": 1,
+    "finding_categories": [],
+    "bug_candidates": 0,
+    "llm_verdict": "pass"
+  }
+}

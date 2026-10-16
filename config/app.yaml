@@ -1,0 +1,51 @@
+# Synthetic User settings.
+# Path order: --config > CONFIG_PATH env var > ./config/app.yaml
+# Secrets (GOOGLE_API_KEY) come ONLY from the environment / .env, never from this file.
+# Relative paths are resolved against the current working directory (run from repo root).
+
+llm:
+  provider: fake              # gemini | safechain | fake
+  model: fake                 # provider model name; set when switching provider
+  temperature: null           # null = provider default; otherwise 0.0-2.0
+  timeout_seconds: 60         # per LLM call
+  max_validation_retries: 2   # bounded retries in llm/structured.py
+  max_concurrency: 4          # max in-flight LLM calls
+  fake_script_path: null      # provider fake only: JSON rule script (see config/app.fake.yaml)
+  safechain_config_path: null # provider safechain only: SafeChain's YAML (idaas + models)
+# Env overrides: LLM_PROVIDER (provider), GEMINI_MODEL / SAFECHAIN_MODEL_ID (model of the active
+# provider; required when LLM_PROVIDER switches provider), SAFECHAIN_CONFIG_PATH.
+
+product:
+  client: fixture             # fixture (real product API deferred)
+  fixture_path: ./data/fixtures/product_responses/sample_responses.json
+  timeout_seconds: 30         # per product call
+
+sql:
+  dialect: bigquery           # sqlglot dialect; Spanner has no sqlglot dialect
+
+generation:
+  scenario:
+    scenario_count: 10                  # scenarios per run
+    allow_multi_table: true             # allow scenarios that need joins
+    include_unsupported_scenarios: true # include scenarios the product should refuse
+    diversity_preference: balanced      # free text hint to the scenario generator
+    max_topup_rounds: 1                 # extra calls if fewer scenarios accepted than requested
+  question:
+    question_count: 1                   # questions per scenario
+    ambiguity_level: low                # low | medium | high
+    language: en
+    allow_vague_questions: false
+    reject_schema_leaks: true           # reject questions that name tables/columns
+
+reference_index:
+  max_tables_per_call: 20         # catalog tables per LLM call; more -> batched
+
+paths:
+  artifacts_dir: ./artifacts
+
+inputs:
+  persona_path: ./data/personas/finance_controller.yaml
+  product_path: ./data/products/sample_product.yaml
+  catalog_path: ./data/references/sample_catalog.yaml
+  benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl   # benchmark-evaluator
+  benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json

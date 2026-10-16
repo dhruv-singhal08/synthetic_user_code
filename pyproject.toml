@@ -1,0 +1,85 @@
+[tool.poetry]
+name = "synthetic-user"
+version = "0.1.0"
+description = "Synthetic User that tests an NL2SQL product."
+authors = ["synthetic-user maintainers"]
+packages = [{ include = "synthetic_user", from = "src" }]
+
+# Versions follow the Amex SafeChain environment (safechain 1.5.0 needs langchain-core 0.3.81);
+# do not bump them without re-testing there (D119).
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+safechain = "1.5.0"
+langchain-core = "0.3.81"
+aiohttp = "3.13.1"
+python-dotenv = "^1.0"
+pyyaml = "^6.0"
+pydantic = "^2.7"
+sqlglot = ">=25.0"
+typer = ">=0.12"
+fastapi = "^0.143.0"
+uvicorn = "^0.54.0"
+python-multipart = "^0.0.32"
+
+[tool.poetry.group.gemini]
+optional = true
+
+[tool.poetry.group.gemini.dependencies]
+# 2.x is the line built on langchain-core 0.3.
+langchain-google-genai = "^2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-asyncio = "^0.24"
+ruff = "^0.9"
+mypy = "^1.13"
+types-PyYAML = ">=6.0"
+ipykernel = "^7.4.0"
+nbclient = "^0.11.0"
+nbformat = "^5.11.1"
+httpx = "^0.28.1"
+
+[tool.poetry.scripts]
+synthetic-user = "synthetic_user.cli:app"
+
+[[tool.poetry.source]]
+name = "artifactory"
+url = "https://artifactory.aexp.com/api/pypi/pypi/simple"
+priority = "primary"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[[tool.mypy.overrides]]
+# Optional provider SDKs: imported lazily in llm/*_adapter.py, may not be installed.
+module = ["langchain_google_genai", "langchain_google_genai.*", "safechain", "safechain.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = [
+    "live: real-provider tests; skipped by default, run with `-m live`",
+]

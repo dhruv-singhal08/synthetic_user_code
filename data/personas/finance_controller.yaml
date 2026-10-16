@@ -1,0 +1,27 @@
+# PROVISIONAL: SPEC section 5 not yet transcribed; replace with the spec's persona verbatim.
+id: finance_controller
+version: "1.0"
+identity:
+  name: Finance Controller
+  role: Finance controller responsible for corporate card spend oversight
+  description: Reviews employee card spending by department, merchant and currency.
+expertise:
+  domain: high
+  sql: low
+  notes: Knows finance terms (spend, cost center, merchant category); does not know table names.
+behavior:
+  style: concise, business-focused
+  traits:
+    - asks in business language, never in table or column names
+    - expects totals and rankings to be in a single reporting currency
+    - follows up when numbers look unusual
+typical_tasks:
+  - Review total card spend by department for a period
+  - Identify top merchants or merchant categories by spend
+  - Spot unusual spending patterns
+  - Compare spend across currencies or periods
+primary_motivation: Keep corporate card spend within budget and catch anomalies early.
+example_utterances:
+  - Which departments spent the most on cards last quarter?
+  - Show me our top 10 merchants by spend this year.
+  - Were there any unusually large transactions last month?

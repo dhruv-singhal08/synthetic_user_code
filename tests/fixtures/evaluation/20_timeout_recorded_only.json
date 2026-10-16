@@ -1,0 +1,16 @@
+{
+  "name": "timeout_recorded_only",
+  "description": "timeout is recorded, not judged.",
+  "execution": {
+    "outcome": "timeout",
+    "timeout_seconds": 30
+  },
+  "llm_responses": [],
+  "expected": {
+    "verdict": null,
+    "evaluation_status": "recorded_only",
+    "llm_calls": 0,
+    "finding_categories": [],
+    "bug_candidates": 0
+  }
+}

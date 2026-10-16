@@ -1,0 +1,25 @@
+{
+  "name": "unnecessary_clarification",
+  "description": "Asks for something the question already states.",
+  "execution": {
+    "outcome": "clarification",
+    "message": "Do you want to see card spending by employee?"
+  },
+  "llm_responses": [
+    {
+      "relevance": "irrelevant",
+      "necessity": "unnecessary",
+      "asks_for_given_info": true,
+      "reason": "The user already asked for top card spenders by employee."
+    }
+  ],
+  "expected": {
+    "verdict": "fail",
+    "evaluation_status": "evaluated",
+    "llm_calls": 1,
+    "finding_categories": [
+      "clarification"
+    ],
+    "bug_candidates": 1
+  }
+}

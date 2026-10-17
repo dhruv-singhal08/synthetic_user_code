@@ -1,9 +1,9 @@
 # PROVISIONAL: SPEC section 5 not yet transcribed; replace with the spec's product verbatim.
 product_id: sample_nl2sql
 product_version: "0.1.0"
-spec_version: "1.0"
 name: Sample NL2SQL Assistant
 description: Answers business questions about corporate card spend by generating SQL.
+product_type: nl2sql
 supported:
   - single-table aggregation
   - filtering by date range
@@ -19,3 +19,6 @@ user_visible_capabilities:
   - ask questions in plain English
   - receive generated SQL
   - receive clarification questions when the request is ambiguous
+response_artifacts_expected:
+  - sql
+  - text

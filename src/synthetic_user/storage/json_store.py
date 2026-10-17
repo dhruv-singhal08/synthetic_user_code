@@ -1,13 +1,8 @@
-"""JSON artifact store with atomic writes and typed reads.
-
-Reusable reference indexes live at
-``<base_dir>/reference_indexes/<catalog_id>_v<catalog_version>/<index_id>.json``.
-"""
+"""JSON artifact store with atomic writes and typed reads."""
 
 from __future__ import annotations
 
 import os
-import re
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,13 +15,9 @@ from synthetic_user.core.exceptions import (
     ArtifactNotFoundError,
     format_validation_error,
 )
-from synthetic_user.models.reference import ReferenceIndex
 
 T = TypeVar("T")
 ModelT = TypeVar("ModelT", bound=BaseModel)
-
-REFERENCE_INDEXES_DIR = "reference_indexes"
-_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class JsonArtifactStore:
@@ -89,56 +80,6 @@ class JsonArtifactStore:
     def delete(self, relative: str | Path) -> None:
         """Remove an artifact if present (used to drop stale downstream run artifacts)."""
         self.path_for(relative).unlink(missing_ok=True)
-
-    # --- reusable reference indexes ------------------------------------------------------
-
-    def reference_index_path(self, catalog_id: str, catalog_version: str, index_id: str) -> Path:
-        return self.path_for(
-            Path(REFERENCE_INDEXES_DIR)
-            / _index_dir_name(catalog_id, catalog_version)
-            / f"{_safe(index_id, 'index_id')}.json"
-        )
-
-    def write_reference_index(self, index: ReferenceIndex) -> Path:
-        path = self.reference_index_path(
-            index.source_catalog_id, index.source_catalog_version, index.index_id
-        )
-        return self.write_model(path.relative_to(self.base_dir), index)
-
-    def read_reference_index(
-        self, catalog_id: str, catalog_version: str, index_id: str
-    ) -> ReferenceIndex:
-        path = self.reference_index_path(catalog_id, catalog_version, index_id)
-        index = self.read_model(path.relative_to(self.base_dir), ReferenceIndex)
-        if (index.source_catalog_id, index.source_catalog_version, index.index_id) != (
-            catalog_id,
-            catalog_version,
-            index_id,
-        ):
-            raise ArtifactIntegrityError(
-                f"Reference index {path} does not match its location "
-                f"({index.source_catalog_id} v{index.source_catalog_version} {index.index_id})"
-            )
-        return index
-
-    def list_reference_indexes(self, catalog_id: str, catalog_version: str) -> list[str]:
-        """Index ids stored for this catalog version, sorted."""
-        directory = self.path_for(
-            Path(REFERENCE_INDEXES_DIR) / _index_dir_name(catalog_id, catalog_version)
-        )
-        if not directory.is_dir():
-            return []
-        return sorted(p.stem for p in directory.glob("*.json"))
-
-
-def _index_dir_name(catalog_id: str, catalog_version: str) -> str:
-    return f"{_safe(catalog_id, 'catalog_id')}_v{_safe(catalog_version, 'catalog_version')}"
-
-
-def _safe(value: str, name: str) -> str:
-    if not _SAFE_COMPONENT.fullmatch(value) or ".." in value:
-        raise ValueError(f"{name} is not safe for use in a path: {value!r}")
-    return value
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

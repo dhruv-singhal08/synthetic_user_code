@@ -12,9 +12,14 @@ llm:
   max_concurrency: 4
   fake_script_path: ./tests/fixtures/fake_llm_script.json
 product:
-  client: fixture
-  fixture_path: ./data/fixtures/product_responses/sample_responses.json
   timeout_seconds: 30
+product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
+  type: fixture             # fixture | http_json | python
+  options:
+    path: ./data/fixtures/product_responses/sample_responses.json
+evaluation:
+  plugins: [sql]            # artifact plugins for grounded evaluation (sql = SQL plugin)
+
 sql:
   dialect: bigquery
 generation:
@@ -30,13 +35,12 @@ generation:
     language: en
     allow_vague_questions: false
     reject_schema_leaks: true
-reference_index:
-  max_tables_per_call: 20
 paths:
   artifacts_dir: ./artifacts/offline
 inputs:
   persona_path: ./data/personas/finance_controller.yaml
   product_path: ./data/products/sample_product.yaml
-  catalog_path: ./data/references/sample_catalog.yaml
+  reference_index_file: ./data/references/sample_card_spend_index.json   # pre-built index; omit -> ungrounded
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json
+  benchmark_product_paths: [./data/products/sample_product.yaml, ./data/products/sample_chatbot.yaml]

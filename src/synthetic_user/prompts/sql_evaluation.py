@@ -1,14 +1,16 @@
-"""Prompt for Node 5 Stage B: LLM review of product-generated SQL against metadata."""
+"""Prompt for the SQL plugin, Stage B: LLM review of product SQL against the reference snapshot.
+
+Stage A (static SQLGlot analysis) is passed in as JSON."""
 
 from __future__ import annotations
 
 import json
 
-from synthetic_user.models.evaluation import SqlAnalysis, SqlEvaluationDraft
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import ReferenceSnapshot
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.nodes.evaluators.plugins.sql.models import SqlAnalysis, SqlEvaluationDraft
 from synthetic_user.prompts.evaluation_context import evaluation_context
 
 SYSTEM = (
@@ -29,7 +31,7 @@ def build_sql_evaluation_prompt(
     analysis = (
         json.dumps(sql_analysis.model_dump(mode="json"), indent=2)
         if sql_analysis is not None
-        else "Not available (no static analysis was run)."
+        else "Not available."
     )
     schema = json.dumps(SqlEvaluationDraft.model_json_schema(), indent=2)
     user = f"""## TASK
@@ -48,8 +50,12 @@ Static SQL analysis (JSON):
 {analysis}
 
 ## CONSTRAINTS
-- The snapshot is authoritative. The cheat sheet is only a reference path: alternative SQL
-  that correctly answers the question is acceptable and must not fail for differing from it.
+- The snapshot is authoritative. The cheat sheet is only a reference path, NOT required
+  SQL: equivalent SQL (other joins, CTEs, aliases or functions that answer the question
+  correctly) is acceptable and must not fail for differing from it.
+- The static analysis is reliable for structure (tables, columns, joins, filters, date
+  expressions, aggregations, grouping); unknown_columns and unverifiable_tables are already
+  decided by code.
 - Do not report a "missing join" when the table already used has the needed dimension.
 - checks: pass | fail | inconclusive | not_applicable for each. Use not_applicable when a
   check does not apply (e.g. join_correctness with no joins, aggregation_correctness with

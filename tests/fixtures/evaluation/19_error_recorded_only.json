@@ -1,7 +1,7 @@
 {
   "name": "error_recorded_only",
   "description": "error is recorded, not judged.",
-  "execution": {
+  "response": {
     "outcome": "error",
     "error_type": "InternalError",
     "message": "boom"

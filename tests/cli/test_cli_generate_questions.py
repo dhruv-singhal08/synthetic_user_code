@@ -13,7 +13,7 @@ from synthetic_user import cli
 from synthetic_user.cli import app
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.reference import ReferenceIndex
-from synthetic_user.models.run import RunManifest
+from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact, save_run_manifest
@@ -38,7 +38,14 @@ def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.delenv(var, raising=False)
     data = yaml.safe_load((REPO_ROOT / "config" / "app.yaml").read_text(encoding="utf-8"))
     data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
-    data["inputs"] = {key: str(REPO_ROOT / value) for key, value in data["inputs"].items()}
+    data["inputs"] = {
+        key: (
+            [str(REPO_ROOT / x) for x in value]
+            if isinstance(value, list)
+            else str(REPO_ROOT / value)
+        )
+        for key, value in data["inputs"].items()
+    }
     path = tmp_path / "app.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
@@ -56,6 +63,7 @@ def _seed_run(
             created_at=datetime(2026, 10, 13, tzinfo=UTC),
             persona_id=persona_id,
             product_id="sample_nl2sql",
+            mode=GenerationMode.GROUNDED,
             catalog_id="sample_card_spend",
             catalog_version="1.0",
             reference_index_id=index.index_id,

@@ -1,0 +1,552 @@
+{
+  "index_id": "REFIDX_CF_001_SAMPLE",
+  "index_version": "0.1.0",
+  "source_catalog_id": "db_columns_cf_desc",
+  "source_catalog_version": "unspecified",
+  "generated_at": "2026-10-14T11:57:23.509467+00:00",
+  "generation_mode": "sample_subset_of_reference_index_v1",
+  "llm_provider": null,
+  "llm_model": null,
+  "source_files": [
+    {
+      "name": "db_columns_cf_desc.csv",
+      "role": "schema_and_column_metadata"
+    },
+    {
+      "name": "table_mappings.json",
+      "role": "domain_rules_and_calculated_fields"
+    }
+  ],
+  "scope": {
+    "table_count": 4,
+    "column_count": 16,
+    "tables": [
+      "v_cf_airline_final_cdh",
+      "v_exch_rt",
+      "v_interim_delinquency_details",
+      "v_card_members_details"
+    ]
+  },
+  "tables": [
+    {
+      "name": "v_cf_airline_final_cdh",
+      "business_domain": "airline",
+      "business_purpose": "This table contains data about commercial transactions that occurred on airlines. The table has transaction details, cardmember info, merchant info and carb [TRUNCATED IN SCREENSHOT]",
+      "grain": "airline commercial transaction segment record",
+      "grain_status": "inferred",
+      "key_entities": [
+        "cardmember",
+        "airline",
+        "route"
+      ],
+      "primary_key_columns": [
+        "trans_seq_no"
+      ],
+      "important_columns": [
+        "trans_seq_no",
+        "card_mkt_rgn_nm",
+        "validating_airline",
+        "miles",
+        "spend",
+        "yr_mo_no",
+        "ghg_emissions_based_on_epa_kgco2e"
+      ],
+      "metrics": [
+        {
+          "name": "miles",
+          "description": "Miles between origin and destination airport",
+          "aggregation_guidance": "not_specified"
+        },
+        {
+          "name": "spend",
+          "description": "Transaction Amount in USD",
+          "aggregation_guidance": "not_specified"
+        },
+        {
+          "name": "ghg_emissions_based_on_epa_kgco2e",
+          "description": "Greenhouse Gas Emissions as per EPA factor",
+          "aggregation_guidance": "not_specified"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "card_mkt_rgn_nm",
+          "description": "Card Region/continent region to which the cardmember belongs to",
+          "allowed_values_raw": "AFRICA, EUROPE, LATIN AMERICA, ASIA/PACIFIC, MIDEAST, OTHER, NORTH AMERICA",
+          "declared_cardinality": 7
+        },
+        {
+          "name": "validating_airline",
+          "description": "Name of the validating airline. Use this as the default airline column.",
+          "allowed_values_raw": null,
+          "declared_cardinality": 660
+        }
+      ],
+      "time_columns": [
+        {
+          "name": "yr_mo_no",
+          "description": "Billing month in YYYYMM format",
+          "data_type": "STRING(MAX)"
+        }
+      ],
+      "relationships": [
+        {
+          "source_table": "v_cf_airline_final_cdh",
+          "source_column": "yr_mo_no",
+          "target_table": "v_exch_rt",
+          "target_column": "bill_cycle_yr_mo_no",
+          "cardinality": "unknown",
+          "verification": "verified",
+          "source": "db_columns_cf_desc.csv foreign_key"
+        }
+      ],
+      "calculated_fields": [
+        "cost per mile (CPM) for airlines =  SUM(spend)/SUM(miles)"
+      ],
+      "business_rules": [
+        "This table contains data from 202308 bill year-month to 202607 bill year-month.",
+        "The default currency is USD. If the user wants the amount in another currency, they should specify it in their query.",
+        "If the user requests carbon footprint/greenhouse gas emissions without specifying a methodology, return both EPA and DEFRA results. DEFRA and EPA carbon emissions are cal [TRUNCATED IN SCREENSHOT]"
+      ],
+      "sensitive_columns": [],
+      "columns": [
+        {
+          "name": "trans_seq_no",
+          "data_type": "FLOAT64",
+          "description": "Transaction Sequence Number",
+          "primary_key": true,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "key"
+          ]
+        },
+        {
+          "name": "card_mkt_rgn_nm",
+          "data_type": "STRING(MAX)",
+          "description": "Card Region/continent region to which the cardmember belongs to",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": true,
+          "pii": false,
+          "categorical_values_raw": "AFRICA, EUROPE, LATIN AMERICA, ASIA/PACIFIC, MIDEAST, OTHER, NORTH AMERICA",
+          "declared_cardinality": 7,
+          "semantic_roles": [
+            "dimension"
+          ]
+        },
+        {
+          "name": "validating_airline",
+          "data_type": "STRING(MAX)",
+          "description": "Name of the validating airline. Use this as the default airline column.",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": true,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 660,
+          "semantic_roles": [
+            "dimension"
+          ]
+        },
+        {
+          "name": "miles",
+          "data_type": "INT64",
+          "description": "Miles between origin and destination airport",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "metric"
+          ]
+        },
+        {
+          "name": "spend",
+          "data_type": "FLOAT64",
+          "description": "Transaction Amount in USD",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "metric"
+          ]
+        },
+        {
+          "name": "yr_mo_no",
+          "data_type": "STRING(MAX)",
+          "description": "Billing month in YYYYMM format",
+          "primary_key": false,
+          "foreign_key_raw": "[{\"table\":\"v_exch_rt\", \"column\":\"bill_cycle_yr_mo_no\"}]",
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "foreign_key",
+            "time"
+          ]
+        },
+        {
+          "name": "ghg_emissions_based_on_epa_kgco2e",
+          "data_type": "FLOAT64",
+          "description": "Greenhouse Gas Emissions as per EPA factor",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "metric"
+          ]
+        }
+      ],
+      "column_count": 7
+    },
+    {
+      "name": "v_exch_rt",
+      "business_domain": "currency_exchange_rate",
+      "business_purpose": "This table contains exchange rates for various currencies for each bill cycle year and month.Exchange rate should be multiplied by US dolla [TRUNCATED IN SCREENSHOT]",
+      "grain": "billing year-month and ISO currency code",
+      "grain_status": "inferred_from_table_description_and_columns",
+      "key_entities": [],
+      "primary_key_columns": [],
+      "important_columns": [
+        "bill_cycle_yr_mo_no",
+        "iso_curr_cd",
+        "gl_rt"
+      ],
+      "metrics": [
+        {
+          "name": "gl_rt",
+          "description": "global exchange rate for country that should be multiplied by US dollar amount to get the amount in  corresponding currency.",
+          "aggregation_guidance": "not_specified"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "iso_curr_cd",
+          "description": "ISO currency code of country",
+          "allowed_values_raw": "AUD,CAD,EUR,GBP,INR,JPY,SGD,USD",
+          "declared_cardinality": 90
+        }
+      ],
+      "time_columns": [
+        {
+          "name": "bill_cycle_yr_mo_no",
+          "description": "Billing cycle year and month  for cards in YYYYMM format",
+          "data_type": "INT64"
+        }
+      ],
+      "relationships": [
+        {
+          "source_table": "v_cf_airline_final_cdh",
+          "source_column": "yr_mo_no",
+          "target_table": "v_exch_rt",
+          "target_column": "bill_cycle_yr_mo_no",
+          "cardinality": "unknown",
+          "verification": "verified",
+          "source": "db_columns_cf_desc.csv foreign_key"
+        }
+      ],
+      "calculated_fields": [],
+      "business_rules": [
+        "The exchange rate is provided for each bill cycle year and month."
+      ],
+      "sensitive_columns": [],
+      "columns": [
+        {
+          "name": "bill_cycle_yr_mo_no",
+          "data_type": "INT64",
+          "description": "Billing cycle year and month  for cards in YYYYMM format",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "time"
+          ]
+        },
+        {
+          "name": "iso_curr_cd",
+          "data_type": "STRING(MAX)",
+          "description": "ISO currency code of country",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": true,
+          "pii": false,
+          "categorical_values_raw": "AUD,CAD,EUR,GBP,INR,JPY,SGD,USD",
+          "declared_cardinality": 90,
+          "semantic_roles": [
+            "dimension"
+          ]
+        },
+        {
+          "name": "gl_rt",
+          "data_type": "FLOAT64",
+          "description": "global exchange rate for country that should be multiplied by US dollar amount to get the amount in  corresponding currency.",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "metric"
+          ]
+        }
+      ],
+      "column_count": 3
+    },
+    {
+      "name": "v_interim_delinquency_details",
+      "business_domain": "interim_delinquency",
+      "business_purpose": "This table contains data about cardmembers and their interim delinquency metrics including 30,60,90,120 and 150 day aged interim delinquent bal [TRUNCATED IN SCREENSHOT]",
+      "grain": "cardmember snapshot as of the latest refresh",
+      "grain_status": "documented_in_mapping",
+      "key_entities": [
+        "cardmember"
+      ],
+      "primary_key_columns": [
+        "cm13"
+      ],
+      "important_columns": [
+        "cm13",
+        "bill_age_abbr_tx",
+        "total_bal_due_usd_am"
+      ],
+      "metrics": [
+        {
+          "name": "total_bal_due_usd_am",
+          "description": "Total delinquent amount across all aging buckets (30-59, 60-89, 90-119, 120-149, 150+ days) of cardmember which is past due in USD(United States Dollar) as o [TRUNCATED IN SCREENSHOT]",
+          "aggregation_guidance": "not_specified"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "bill_age_abbr_tx",
+          "description": "description of the bill age number/code in an abbreviated manner in text.",
+          "allowed_values_raw": "120+ DAYS,30 DAYS,60 DAYS,90 DAYS,NO ACTIVITY",
+          "declared_cardinality": 5
+        }
+      ],
+      "time_columns": [],
+      "relationships": [
+        {
+          "source_table": "v_interim_delinquency_details",
+          "source_column": "cm13",
+          "target_table": "v_card_members_details",
+          "target_column": "cm13",
+          "cardinality": "unknown",
+          "verification": "verified",
+          "source": "db_columns_cf_desc.csv foreign_key"
+        }
+      ],
+      "calculated_fields": [
+        "delinquent accounts = accounts with total delinquent balance > 0"
+      ],
+      "business_rules": [
+        "This table contains snapshot of the delinquency data as of the last refresh date - the data refreshes daily for this table. The data is available at the granularity of card m [TRUNCATED IN SCREENSHOT]",
+        "The default currency for any past due amount/delinquent amount is USD instead of billed currency. If the user wants the amount in another currency, they should specify it in [TRUNCATED IN SCREENSHOT]"
+      ],
+      "sensitive_columns": [
+        "cm13"
+      ],
+      "columns": [
+        {
+          "name": "cm13",
+          "data_type": "STRING(MAX)",
+          "description": "Encrypted CM13 (13 digits of a card account number) -Also a unique card account/cardmember ID",
+          "primary_key": true,
+          "foreign_key_raw": "[{\"table\":\"v_card_members_details\", \"column\":\"cm13\"}]",
+          "categorical": false,
+          "pii": true,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "key",
+            "foreign_key",
+            "sensitive"
+          ]
+        },
+        {
+          "name": "bill_age_abbr_tx",
+          "data_type": "STRING(MAX)",
+          "description": "description of the bill age number/code in an abbreviated manner in text.",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": true,
+          "pii": false,
+          "categorical_values_raw": "120+ DAYS,30 DAYS,60 DAYS,90 DAYS,NO ACTIVITY",
+          "declared_cardinality": 5,
+          "semantic_roles": [
+            "dimension"
+          ]
+        },
+        {
+          "name": "total_bal_due_usd_am",
+          "data_type": "FLOAT64",
+          "description": "Total delinquent amount across all aging buckets (30-59, 60-89, 90-119, 120-149, 150+ days) of cardmember which is past due in USD(United States Dollar) as o [TRUNCATED IN SCREENSHOT]",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "metric"
+          ]
+        }
+      ],
+      "column_count": 3
+    },
+    {
+      "name": "v_card_members_details",
+      "business_domain": "cardmembers",
+      "business_purpose": "This table contains data about all cardmembers that use commercial card products.",
+      "grain": "card account/cardmember record",
+      "grain_status": "documented_in_mapping",
+      "key_entities": [
+        "cardmember",
+        "product"
+      ],
+      "primary_key_columns": [
+        "cm15_masked"
+      ],
+      "important_columns": [
+        "cm15_masked",
+        "acct_sta_in"
+      ],
+      "metrics": [],
+      "dimensions": [
+        {
+          "name": "acct_sta_in",
+          "description": "Indicates if the card account is Active (A) or Cancelled (C)",
+          "allowed_values_raw": "A,C",
+          "declared_cardinality": 2
+        }
+      ],
+      "time_columns": [],
+      "relationships": [
+        {
+          "source_table": "v_interim_delinquency_details",
+          "source_column": "cm13",
+          "target_table": "v_card_members_details",
+          "target_column": "cm13",
+          "cardinality": "unknown",
+          "verification": "verified",
+          "source": "db_columns_cf_desc.csv foreign_key"
+        }
+      ],
+      "calculated_fields": [
+        "Number of cards/card accounts/accounts = count distinct cm15"
+      ],
+      "business_rules": [
+        "This table contains data at the granularity of card member level and contains data about all active or cancelled cards",
+        "If the user asks for number of cards, return count of active cards only and specifically mention it in columns alias, such as 'active_cards_count'."
+      ],
+      "sensitive_columns": [
+        "cm13",
+        "cm15_masked"
+      ],
+      "columns": [
+        {
+          "name": "cm13",
+          "data_type": "STRING(MAX)",
+          "description": "Encrypted CM13 (13 digits of a card account number) - Also a unique card account/cardmember ID",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": true,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "sensitive"
+          ]
+        },
+        {
+          "name": "cm15_masked",
+          "data_type": "STRING(MAX)",
+          "description": "Masked 15 digit card account number/CM15 (First and last four digits are visible)",
+          "primary_key": true,
+          "foreign_key_raw": null,
+          "categorical": false,
+          "pii": true,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0,
+          "semantic_roles": [
+            "key",
+            "sensitive"
+          ]
+        },
+        {
+          "name": "acct_sta_in",
+          "data_type": "STRING(MAX)",
+          "description": "Indicates if the card account is Active (A) or Cancelled (C)",
+          "primary_key": false,
+          "foreign_key_raw": null,
+          "categorical": true,
+          "pii": false,
+          "categorical_values_raw": "A,C",
+          "declared_cardinality": 2,
+          "semantic_roles": [
+            "dimension"
+          ]
+        }
+      ],
+      "column_count": 3
+    }
+  ],
+  "relationships": [
+    {
+      "source_table": "v_cf_airline_final_cdh",
+      "source_column": "yr_mo_no",
+      "target_table": "v_exch_rt",
+      "target_column": "bill_cycle_yr_mo_no",
+      "cardinality": "unknown",
+      "verification": "verified",
+      "source": "db_columns_cf_desc.csv foreign_key"
+    },
+    {
+      "source_table": "v_interim_delinquency_details",
+      "source_column": "cm13",
+      "target_table": "v_card_members_details",
+      "target_column": "cm13",
+      "cardinality": "unknown",
+      "verification": "verified",
+      "source": "db_columns_cf_desc.csv foreign_key"
+    }
+  ],
+  "global_semantic_rules": {
+    "currency": "Table-specific currency behavior is retained in each table business_rules array.",
+    "dates": "Table-specific date behavior is retained in each table business_rules array.",
+    "privacy": "Columns marked pii=true are listed in each table sensitive_columns array.",
+    "relationship_policy": "Only foreign keys explicitly present in the CSV are marked verified; no undocumented joins were promoted."
+  },
+  "uncertainties": [
+    {
+      "table": "v_cf_airline_final_cdh",
+      "field": "grain",
+      "value": "airline commercial transaction segment record",
+      "reason": "The source files do not explicitly declare a formal grain; value is a conservative inference."
+    }
+  ],
+  "integrity_report": {
+    "status": "passed",
+    "issues": [],
+    "notes": [
+      "Sample subset of reference_index_v1.json: 4 of 11 tables, selected columns and rules only. Long categorical lists are truncated. Replace with the full f [TRUNCATED IN SCREENSHOT]"
+    ]
+  }
+}

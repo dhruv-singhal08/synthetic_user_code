@@ -1,4 +1,7 @@
-"""Load input assets (persona, product, catalog) from YAML into validated models."""
+"""Load input assets (persona, product) from YAML into validated models.
+
+The reference index is JSON and has its own loader (references/loader.py).
+"""
 
 from __future__ import annotations
 
@@ -15,7 +18,6 @@ from synthetic_user.core.exceptions import (
 )
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceCatalog
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -55,10 +57,6 @@ def load_persona(path: Path) -> Persona:
 
 def load_product(path: Path) -> ProductDescription:
     return _load_model(path, ProductDescription, kind="Product file")
-
-
-def load_catalog(path: Path) -> ReferenceCatalog:
-    return _load_model(path, ReferenceCatalog, kind="Catalog file")
 
 
 def parse_asset(text: str, model: type[ModelT], *, kind: str, source: str) -> ModelT:

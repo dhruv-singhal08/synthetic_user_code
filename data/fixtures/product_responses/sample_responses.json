@@ -4,12 +4,37 @@
   "rules": [
     {
       "contains": [
+        "simulate",
+        "outage"
+      ],
+      "response": {
+        "outcome": "error",
+        "error_type": "ServiceUnavailable",
+        "message": "Simulated product outage."
+      }
+    },
+    {
+      "contains": [
+        "simulate",
+        "timeout"
+      ],
+      "response": {
+        "simulate_timeout": true
+      }
+    },
+    {
+      "contains": [
         "top",
         "spenders"
       ],
       "response": {
-        "outcome": "sql_generated",
-        "sql": "SELECT e.full_name, c.currency_code, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.merchant_id = e.employee_id\nWHERE c.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+        "outcome": "answered",
+        "artifacts": [
+          {
+            "kind": "sql",
+            "content": "SELECT e.full_name, c.currency_code, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.merchant_id = e.employee_id\nWHERE c.transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+          }
+        ]
       }
     },
     {

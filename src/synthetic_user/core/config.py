@@ -6,6 +6,7 @@ Config path order: ``--config`` > ``CONFIG_PATH`` env var > ``./config/app.yaml`
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
@@ -35,6 +36,8 @@ LLM_PROVIDER_ENV = "LLM_PROVIDER"  # overrides llm.provider
 SAFECHAIN_MODEL_ENV = "SAFECHAIN_MODEL_ID"  # SafeChain YAML models key, e.g. "1"
 # Not CONFIG_PATH: that is this app's config; the adapter hands this path to SafeChain (D117).
 SAFECHAIN_CONFIG_ENV = "SAFECHAIN_CONFIG_PATH"
+# A header value made only of ${ENV_VAR} references (safe to record in the manifest).
+_ENV_ONLY = re.compile(r"(?:[^$]*\$\{[A-Za-z_][A-Za-z0-9_]*\})+[^$]*")
 
 
 class LLMProvider(StrEnum):
@@ -43,8 +46,10 @@ class LLMProvider(StrEnum):
     FAKE = "fake"
 
 
-class ProductClientKind(StrEnum):
+class ProductAdapterType(StrEnum):
     FIXTURE = "fixture"
+    HTTP_JSON = "http_json"
+    PYTHON = "python"
 
 
 class _Section(BaseModel):
@@ -74,15 +79,21 @@ class LLMSettings(_Section):
 
 
 class ProductSettings(_Section):
-    client: ProductClientKind = ProductClientKind.FIXTURE
-    fixture_path: Path | None = None
-    timeout_seconds: float = Field(default=30.0, gt=0)
+    timeout_seconds: float = Field(default=30.0, gt=0)  # per product call (executor)
 
-    @model_validator(mode="after")
-    def _fixture_requires_path(self) -> Self:
-        if self.client is ProductClientKind.FIXTURE and self.fixture_path is None:
-            raise ValueError("product.fixture_path is required when product.client is 'fixture'")
-        return self
+
+class ProductAdapterSettings(_Section):
+    """Which adapter talks to the product. Options are validated by adapters/registry.py."""
+
+    type: ProductAdapterType
+    options: dict[str, Any] = Field(default_factory=dict)
+    # Set by load_config when product_adapter names a <product_id>.adapter.yaml file.
+    file: Path | None = None
+
+
+class EvaluationSettings(_Section):
+    # Artifact plugins for grounded evaluation (nodes/evaluators/plugins/registry.py).
+    plugins: list[str] = Field(default_factory=lambda: ["sql"])
 
 
 class SQLSettings(_Section):
@@ -120,10 +131,6 @@ class GenerationSettings(_Section):
     question: QuestionGenerationSettings = Field(default_factory=QuestionGenerationSettings)
 
 
-class ReferenceIndexSettings(_Section):
-    max_tables_per_call: int = Field(default=20, ge=1)
-
-
 class PathsSettings(_Section):
     artifacts_dir: Path
 
@@ -131,9 +138,12 @@ class PathsSettings(_Section):
 class InputsSettings(_Section):
     persona_path: Path
     product_path: Path
-    catalog_path: Path
+    # The user's pre-built reference index JSON. None -> ungrounded mode.
+    reference_index_file: Path | None = None
     benchmark_cases_path: Path | None = None
     benchmark_scenarios_path: Path | None = None
+    # Product descriptions for benchmark cases (by product_id). Empty -> product_path only.
+    benchmark_product_paths: list[Path] = Field(default_factory=list)
 
 
 class SecretsSettings(_Section):
@@ -142,10 +152,11 @@ class SecretsSettings(_Section):
 
 class AppConfig(_Section):
     llm: LLMSettings = Field(default_factory=LLMSettings)
-    product: ProductSettings
+    product: ProductSettings = Field(default_factory=ProductSettings)
+    product_adapter: ProductAdapterSettings
     sql: SQLSettings = Field(default_factory=SQLSettings)
+    evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
-    reference_index: ReferenceIndexSettings = Field(default_factory=ReferenceIndexSettings)
     paths: PathsSettings
     inputs: InputsSettings
     secrets: SecretsSettings = Field(default_factory=SecretsSettings)
@@ -160,8 +171,16 @@ class AppConfig(_Section):
         return self
 
     def effective_config(self) -> dict[str, Any]:
-        """JSON-safe settings for the run manifest. Never includes secrets."""
-        return self.model_dump(mode="json", exclude={"secrets"})
+        """JSON-safe settings for the run manifest. Never includes secrets: literal adapter
+        header values are redacted (``${ENV_VAR}`` templates are kept, they hold no secret)."""
+        dumped = self.model_dump(mode="json", exclude={"secrets"})
+        headers = dumped["product_adapter"]["options"].get("headers")
+        if isinstance(headers, dict):
+            dumped["product_adapter"]["options"]["headers"] = {
+                name: value if isinstance(value, str) and _ENV_ONLY.fullmatch(value) else "***"
+                for name, value in headers.items()
+            }
+        return dumped
 
 
 def resolve_config_path(cli_path: Path | None, env: Mapping[str, str]) -> Path:
@@ -181,11 +200,34 @@ def load_config(cli_path: Path | None = None, env: Mapping[str, str] | None = No
     raw = read_yaml_mapping(path, ConfigError, kind="Config file")
     if "secrets" in raw:
         raise ConfigError(f"{path}: secrets must come from the environment, not the config file")
-    data = {**_apply_env_overrides(raw, environ), "secrets": _secrets_from_env(environ)}
+    data = {
+        **_apply_env_overrides(raw, environ),
+        "secrets": _secrets_from_env(environ),
+    }
+    if isinstance(data.get("product_adapter"), str):
+        data["product_adapter"] = _read_adapter_file(Path(data["product_adapter"]))
     try:
         return AppConfig.model_validate(data)
     except ValidationError as exc:
         raise ConfigError(f"Invalid config {path}: {format_validation_error(exc)}") from exc
+
+
+def load_adapter_file(path: Path) -> ProductAdapterSettings:
+    """A ``<product_id>.adapter.yaml`` file (e.g. ``execute --adapter-config``) -> settings."""
+    try:
+        return ProductAdapterSettings.model_validate(_read_adapter_file(path))
+    except ValidationError as exc:
+        raise ConfigError(
+            f"Invalid product adapter file {path}: {format_validation_error(exc)}"
+        ) from exc
+
+
+def _read_adapter_file(path: Path) -> dict[str, Any]:
+    """``product_adapter: config/products/<product_id>.adapter.yaml`` -> {type, options, file}."""
+    raw = read_yaml_mapping(path, ConfigError, kind="Product adapter file")
+    if "file" in raw:
+        raise ConfigError(f"{path}: 'file' is set by the loader, not in the adapter file")
+    return {**raw, "file": str(path)}
 
 
 def _apply_env_overrides(raw: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:

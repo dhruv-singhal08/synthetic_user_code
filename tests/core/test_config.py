@@ -10,7 +10,7 @@ from synthetic_user.core.config import (
     DEFAULT_CONFIG_PATH,
     AmbiguityLevel,
     LLMProvider,
-    ProductClientKind,
+    ProductAdapterType,
     load_config,
     resolve_config_path,
 )
@@ -21,12 +21,11 @@ REPO_CONFIG = Path(__file__).resolve().parents[2] / "config" / "app.yaml"
 
 def _minimal() -> dict[str, Any]:
     return {
-        "product": {"client": "fixture", "fixture_path": "fixtures/responses.json"},
+        "product_adapter": {"type": "fixture", "options": {"path": "fixtures/responses.json"}},
         "paths": {"artifacts_dir": "artifacts"},
         "inputs": {
             "persona_path": "persona.yaml",
             "product_path": "product.yaml",
-            "catalog_path": "catalog.yaml",
         },
     }
 
@@ -44,7 +43,8 @@ def test_repo_config_loads_with_documented_defaults() -> None:
     cfg = load_config(REPO_CONFIG, env={})
     assert cfg.llm.provider is LLMProvider.FAKE
     assert cfg.llm.max_validation_retries == 2
-    assert cfg.product.client is ProductClientKind.FIXTURE
+    assert cfg.product_adapter.type is ProductAdapterType.FIXTURE
+    assert cfg.product.timeout_seconds == 30
     assert cfg.sql.dialect == "bigquery"
     assert cfg.generation.question.ambiguity_level is AmbiguityLevel.LOW
     assert cfg.secrets.google_api_key is None
@@ -55,7 +55,7 @@ def test_minimal_config_fills_section_defaults(tmp_path: Path) -> None:
     assert cfg.llm.provider is LLMProvider.FAKE
     assert cfg.llm.temperature is None
     assert cfg.generation.scenario.scenario_count == 10
-    assert cfg.inputs.catalog_path == Path("catalog.yaml")
+    assert cfg.inputs.reference_index_file is None  # optional: absent -> ungrounded
 
 
 # --- env override / path order ---------------------------------------------------------
@@ -224,10 +224,17 @@ def test_unknown_sql_dialect_is_rejected(tmp_path: Path) -> None:
         load_config(_write(tmp_path, data), env={})
 
 
-def test_fixture_client_requires_fixture_path(tmp_path: Path) -> None:
+def test_product_adapter_is_required(tmp_path: Path) -> None:
     data = _minimal()
-    data["product"] = {"client": "fixture"}
-    with pytest.raises(ConfigError, match="fixture_path"):
+    del data["product_adapter"]
+    with pytest.raises(ConfigError, match="product_adapter"):
+        load_config(_write(tmp_path, data), env={})
+
+
+def test_missing_product_adapter_file(tmp_path: Path) -> None:
+    data = _minimal()
+    data["product_adapter"] = str(tmp_path / "missing.adapter.yaml")
+    with pytest.raises(ConfigError, match="Product adapter file"):
         load_config(_write(tmp_path, data), env={})
 
 

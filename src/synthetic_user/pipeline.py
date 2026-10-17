@@ -1,5 +1,8 @@
 """The single orchestrator: index -> scenarios -> questions -> execute -> evaluate.
 
+The "index" step only validates the user's pre-built reference index (never generated here);
+without one the run is ungrounded.
+
 Run artifacts live in ``<artifacts_dir>/runs/<run_id>/``. Existing artifacts are reused;
 a step is regenerated only when asked (from_step / force_steps), when its files are missing,
 or when an earlier step was regenerated (regeneration always cascades downstream, and stale
@@ -9,6 +12,7 @@ are validated whenever artifacts are loaded.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
@@ -17,35 +21,36 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, JsonValue
 
 from synthetic_user import __version__
+from synthetic_user.adapters.base import ProductAdapter
 from synthetic_user.core.config import AppConfig
-from synthetic_user.core.exceptions import ArtifactIntegrityError, ArtifactNotFoundError
+from synthetic_user.core.exceptions import (
+    ArtifactIntegrityError,
+    ArtifactNotFoundError,
+)
 from synthetic_user.core.identifiers import SequentialIdGenerator, new_run_id
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
-from synthetic_user.models.execution import ExecutionResult
+from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
-from synthetic_user.models.reference import ReferenceCatalog, ReferenceIndex, ReferenceSnapshot
-from synthetic_user.models.run import RunManifest
+from synthetic_user.models.reference import ReferenceIndex, ReferenceSnapshot
+from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import RejectedScenario, Scenario
+from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.product_executor import ProductExecutor
 from synthetic_user.nodes.question_generator import QuestionGenerator
-from synthetic_user.nodes.reference_index import ReferenceIndexGenerator
 from synthetic_user.nodes.scenario_generator import ScenarioGenerator
-from synthetic_user.nodes.sql_evaluator import EvaluationCase, SqlEvaluator
-from synthetic_user.product.base import ProductClient
-from synthetic_user.references.reuse import IndexResult, load_or_build_reference_index
-from synthetic_user.references.snapshot import build_snapshot, snapshot_id_for
+from synthetic_user.references.integrity import validate_index
+from synthetic_user.references.snapshot import snapshots_for
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import MANIFEST, run_artifact
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
-_EXECUTIONS: TypeAdapter[list[ExecutionResult]] = TypeAdapter(list[ExecutionResult])
 
 
 class Step(StrEnum):
@@ -58,7 +63,7 @@ class Step(StrEnum):
 
 STEP_ORDER: tuple[Step, ...] = tuple(Step)
 
-# Manifest artifact key -> file name, per run step (the index lives outside the run folder).
+# Manifest artifact key -> file name, per run step (the index is an input, not an artifact).
 STEP_ARTIFACTS: dict[Step, dict[str, str]] = {
     Step.INDEX: {},
     Step.SCENARIOS: {
@@ -73,13 +78,29 @@ STEP_ARTIFACTS: dict[Step, dict[str, str]] = {
     Step.EXECUTE: {"executions": "executions.json"},
     Step.EVALUATE: {"evaluations": "evaluations.json", "bug_candidates": "bug_candidates.json"},
 }
+# Raw product responses (when the adapter supplies them): runs/<run_id>/raw/<execution_id>.json
+RAW_DIR = "raw"
+# Written only in grounded mode (ungrounded questions have no reference snapshot).
+OPTIONAL_ARTIFACTS = frozenset({"snapshots"})
 
 
 @dataclass(frozen=True)
 class RunInputs:
     persona: Persona
     product: ProductDescription
-    catalog: ReferenceCatalog
+    # The user's pre-built reference index; None -> ungrounded run.
+    reference_index: ReferenceIndex | None = None
+
+    @property
+    def mode(self) -> GenerationMode:
+        return GenerationMode.GROUNDED if self.reference_index else GenerationMode.UNGROUNDED
+
+
+@dataclass(frozen=True)
+class IndexStep:
+    mode: GenerationMode
+    index: ReferenceIndex | None
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -99,7 +120,7 @@ class QuestionStep:
 
 @dataclass(frozen=True)
 class ExecuteStep:
-    executions: list[ExecutionResult]
+    executions: list[ExecutionRecord]
     reused: bool
 
 
@@ -113,7 +134,8 @@ class EvaluateStep:
 class RunSummary(StrictModel):
     run_id: NonEmptyStr
     run_dir: NonEmptyStr
-    reference_index_id: NonEmptyStr
+    mode: GenerationMode
+    reference_index_id: NonEmptyStr | None
     steps_run: list[Step] = Field(default_factory=list)
     steps_reused: list[Step] = Field(default_factory=list)
     scenarios_accepted: int
@@ -134,7 +156,7 @@ def validate_run(
     scenarios: Sequence[Scenario],
     snapshots: Sequence[ReferenceSnapshot] = (),
     questions: Sequence[QuestionCase] = (),
-    executions: Sequence[ExecutionResult] = (),
+    executions: Sequence[ExecutionRecord] = (),
     evaluations: Sequence[EvaluationResult] = (),
 ) -> None:
     """Raise ArtifactIntegrityError if any cross-reference between run artifacts is broken."""
@@ -157,7 +179,11 @@ def validate_run(
     for q in questions:
         if q.scenario_id not in scenario_ids:
             problems.append(f"{q.question_id} -> unknown scenario {q.scenario_id}")
-        if snapshots and q.reference_snapshot_id not in snapshot_ids:
+        if (
+            snapshots
+            and q.reference_snapshot_id is not None
+            and (q.reference_snapshot_id not in snapshot_ids)
+        ):
             problems.append(f"{q.question_id} -> unknown snapshot {q.reference_snapshot_id}")
     for e in executions:
         if e.question_id not in question_by_id:
@@ -190,7 +216,7 @@ class SyntheticUserPipeline:
         self,
         settings: AppConfig,
         llm: LLMClient,
-        product_client: ProductClient,
+        product_adapter: ProductAdapter,
         store: JsonArtifactStore,
         *,
         logger: Logger,
@@ -198,33 +224,45 @@ class SyntheticUserPipeline:
     ) -> None:
         self._settings = settings
         self._llm = llm
-        self._product = product_client
+        self._product = product_adapter
         self._store = store
         self._log = logger
         self._ids = id_generators
 
+    async def aclose(self) -> None:
+        """Close the product adapter (callers that create a pipeline call this when done)."""
+        await self._product.aclose()
+
     # --- steps -------------------------------------------------------------------------
 
-    async def build_reference_index(
-        self, catalog: ReferenceCatalog, *, force: bool = False
-    ) -> IndexResult:
-        generator = ReferenceIndexGenerator(self._llm, self._settings, self._log)
-        return await load_or_build_reference_index(
-            catalog, self._store, generator.generate, force=force
-        )
+    def check_reference_index(self, inputs: RunInputs) -> IndexStep:
+        """Validate the pre-built index (warnings are logged, never fixed). No LLM."""
+        index = inputs.reference_index
+        warnings = validate_index(index) if index else []
+        if index is None:
+            self._log.info("No reference index: mode ungrounded")
+        else:
+            self._log.info(
+                "Reference index %s: %d tables, mode grounded",
+                index.versioned_id,
+                len(index.tables),
+            )
+        for warning in warnings:
+            self._log.warning("Reference index warning: %s", warning)
+        return IndexStep(inputs.mode, index, warnings)
 
     async def generate_scenarios(
         self,
         run_id: str,
         inputs: RunInputs,
-        index: ReferenceIndex,
         *,
         count: int | None = None,
         force: bool = False,
     ) -> ScenarioStep:
+        index = inputs.reference_index
         manifest = self._manifest_or_none(run_id)
         if not force and manifest is not None and self._has(run_id, Step.SCENARIOS):
-            self._check_manifest(manifest, inputs, index_id=index.index_id)
+            self._check_manifest(manifest, inputs, check_index=True)
             return ScenarioStep(
                 accepted=self._load_scenarios(run_id),
                 rejected=self._store.read_models(
@@ -248,9 +286,10 @@ class SyntheticUserPipeline:
                 created_at=manifest.created_at if manifest else datetime.now(UTC),
                 persona_id=inputs.persona.id,
                 product_id=inputs.product.product_id,
-                catalog_id=index.source_catalog_id,
-                catalog_version=index.source_catalog_version,
-                reference_index_id=index.index_id,
+                mode=inputs.mode,
+                catalog_id=index.source_catalog_id if index else None,
+                catalog_version=index.source_catalog_version if index else None,
+                reference_index_id=index.versioned_id if index else None,
                 llm_provider=self._llm.provider_name,
                 llm_model=self._llm.model_name,
                 pipeline_version=__version__,
@@ -268,7 +307,7 @@ class SyntheticUserPipeline:
         scenarios = self._load_scenarios(run_id)
         if not force and self._has(run_id, Step.QUESTIONS):
             questions = self._load_questions(run_id)
-            snapshots = self._load_snapshots(run_id, scenarios, inputs.catalog)
+            snapshots = self._load_snapshots(run_id, scenarios, inputs)
             validate_run(scenarios=scenarios, snapshots=snapshots, questions=questions)
             rejected = self._store.read_models(
                 self._file(run_id, "questions_rejected"), RejectedQuestion
@@ -279,16 +318,21 @@ class SyntheticUserPipeline:
             self._llm, self._settings, self._log, id_generator=self._ids()
         )
         result = await generator.generate(
-            inputs.persona, inputs.product, scenarios, inputs.catalog, count=count
+            inputs.persona, inputs.product, scenarios, inputs.reference_index, count=count
         )
-        self._store.write_models(
-            self._file(run_id, "snapshots"), result.snapshots, ReferenceSnapshot
-        )
+        skip: set[str] = set()
+        if result.snapshots:
+            self._store.write_models(
+                self._file(run_id, "snapshots"), result.snapshots, ReferenceSnapshot
+            )
+        else:  # ungrounded: no snapshots.json
+            self._store.delete(self._file(run_id, "snapshots"))
+            skip.add("snapshots")
         self._store.write_models(self._file(run_id, "questions"), result.questions, QuestionCase)
         self._store.write_models(
             self._file(run_id, "questions_rejected"), result.rejected, RejectedQuestion
         )
-        self._save_manifest(manifest, Step.QUESTIONS)
+        self._save_manifest(manifest, Step.QUESTIONS, skip=skip)
         return QuestionStep(result.questions, result.snapshots, result.rejected, reused=False)
 
     async def execute_questions(
@@ -303,11 +347,22 @@ class SyntheticUserPipeline:
             validate_run(scenarios=scenarios, questions=questions, executions=executions)
             return ExecuteStep(executions, reused=True)
 
+        raw_dir = run_artifact(run_id, RAW_DIR)
+        for stale in sorted(self._store.path_for(raw_dir).glob("*.json")):
+            stale.unlink()  # raw responses of a previous execute step
+
+        def write_raw(execution_id: str, body: JsonValue) -> str:
+            relative = raw_dir / f"{execution_id}.json"
+            self._store.write_text(relative, json.dumps(body, indent=2, ensure_ascii=False))
+            return f"{RAW_DIR}/{execution_id}.json"
+
         executor = ProductExecutor(
             self._product, self._settings, self._log, id_generator=self._ids()
         )
-        executions = await executor.execute(questions)
-        self._store.write_with(self._file(run_id, "executions"), executions, _EXECUTIONS)
+        executions = await executor.execute_many(
+            questions, product_id=inputs.product.product_id, raw_writer=write_raw
+        )
+        self._store.write_models(self._file(run_id, "executions"), executions, ExecutionRecord)
         self._save_manifest(manifest, Step.EXECUTE)
         return ExecuteStep(executions, reused=False)
 
@@ -317,7 +372,7 @@ class SyntheticUserPipeline:
         manifest = self._require_manifest(run_id, inputs)
         scenarios = self._load_scenarios(run_id)
         questions = self._load_questions(run_id)
-        snapshots = self._load_snapshots(run_id, scenarios, inputs.catalog)
+        snapshots = self._load_snapshots(run_id, scenarios, inputs)
         executions = self._load_executions(run_id)
         validate_run(
             scenarios=scenarios, snapshots=snapshots, questions=questions, executions=executions
@@ -339,23 +394,30 @@ class SyntheticUserPipeline:
         scenario_by_id = {s.id: s for s in scenarios}
         question_by_id = {q.question_id: q for q in questions}
         snapshot_by_id = {s.snapshot_id: s for s in snapshots}
-        cases = [
-            EvaluationCase(
-                question_by_id[e.question_id],
-                scenario_by_id[question_by_id[e.question_id].scenario_id],
-                snapshot_by_id[question_by_id[e.question_id].reference_snapshot_id],
-                e,
+        cases = []
+        for e in executions:
+            question = question_by_id[e.question_id]
+            snapshot_id = question.reference_snapshot_id
+            if snapshot_id is not None and snapshot_id not in snapshot_by_id:
+                raise ArtifactIntegrityError(
+                    f"{question.question_id}: unknown snapshot {snapshot_id}"
+                )
+            cases.append(
+                EvaluationCase(
+                    question,
+                    scenario_by_id[question.scenario_id],
+                    snapshot_by_id[snapshot_id] if snapshot_id is not None else None,
+                    e,
+                )
             )
-            for e in executions
-        ]
-        evaluator = SqlEvaluator(
+        evaluator = Evaluator(
             self._llm,
             self._settings,
             self._log,
-            catalog=inputs.catalog,
+            index=inputs.reference_index,
             id_generator=self._ids(),
         )
-        evaluations = await evaluator.evaluate_many(cases, inputs.product)
+        evaluations = await evaluator.evaluate_many(cases, inputs.product, inputs.persona)
         bugs = [b for e in evaluations for b in e.bug_candidates]
         self._store.write_models(self._file(run_id, "evaluations"), evaluations, EvaluationResult)
         self._store.write_models(self._file(run_id, "bug_candidates"), bugs, BugCandidate)
@@ -384,21 +446,20 @@ class SyntheticUserPipeline:
         def note(step: Step, was_reused: bool) -> None:
             (reused if was_reused else ran).append(step)
 
-        index_result = await self.build_reference_index(
-            inputs.catalog, force=Step.INDEX in regenerate
-        )
-        note(Step.INDEX, index_result.reused)
+        index_step = self.check_reference_index(inputs)
+        index_id = index_step.index.versioned_id if index_step.index else None
         manifest = self._manifest_or_none(run_id)
-        cascade = (
-            manifest is not None and manifest.reference_index_id != index_result.index.index_id
+        cascade = manifest is not None and (
+            manifest.reference_index_id != index_id or manifest.mode is not inputs.mode
         )
+        # "reused" = same index (and mode) as the existing run; the check itself is cheap.
+        note(Step.INDEX, manifest is not None and not cascade)
         if cascade:
-            self._log.info("Reference index changed; regenerating the run from scenarios")
+            self._log.info("Reference index or mode changed; regenerating the run from scenarios")
 
         scenario_step = await self.generate_scenarios(
             run_id,
             inputs,
-            index_result.index,
             count=scenario_count,
             force=cascade or Step.SCENARIOS in regenerate,
         )
@@ -429,17 +490,15 @@ class SyntheticUserPipeline:
         return RunSummary(
             run_id=run_id,
             run_dir=str(self._store.path_for(run_artifact(run_id, ""))),
-            reference_index_id=index_result.index.index_id,
+            mode=inputs.mode,
+            reference_index_id=index_id,
             steps_run=ran,
             steps_reused=reused,
             scenarios_accepted=len(scenario_step.accepted),
             scenarios_rejected=len(scenario_step.rejected),
             questions=len(question_step.questions),
             questions_rejected=len(question_step.rejected),
-            outcomes={
-                o: outcomes.get(o, 0)
-                for o in ("sql_generated", "clarification", "denied", "error", "timeout")
-            },
+            outcomes={o.value: outcomes.get(o, 0) for o in ProductOutcome},
             verdicts={
                 v: verdicts.get(v, 0) for v in ("pass", "fail", "inconclusive", "recorded_only")
             },
@@ -453,7 +512,8 @@ class SyntheticUserPipeline:
         return run_artifact(run_id, name)
 
     def _has(self, run_id: str, step: Step) -> bool:
-        return all(self._store.exists(self._file(run_id, k)) for k in STEP_ARTIFACTS[step])
+        required = set(STEP_ARTIFACTS[step]) - OPTIONAL_ARTIFACTS
+        return all(self._store.exists(self._file(run_id, k)) for k in required)
 
     def _manifest_or_none(self, run_id: str) -> RunManifest | None:
         try:
@@ -468,38 +528,46 @@ class SyntheticUserPipeline:
 
     @staticmethod
     def _check_manifest(
-        manifest: RunManifest, inputs: RunInputs, index_id: str | None = None
+        manifest: RunManifest, inputs: RunInputs, check_index: bool = False
     ) -> None:
+        index = inputs.reference_index
         expected = (
             manifest.persona_id,
             manifest.product_id,
+            manifest.mode,
             manifest.catalog_id,
             manifest.catalog_version,
         )
         actual = (
             inputs.persona.id,
             inputs.product.product_id,
-            inputs.catalog.catalog_id,
-            inputs.catalog.catalog_version,
+            inputs.mode,
+            index.source_catalog_id if index else None,
+            index.source_catalog_version if index else None,
         )
         if expected != actual:
             raise ArtifactIntegrityError(
                 f"Configured inputs {actual} do not match run {manifest.run_id} {expected}"
             )
-        if index_id is not None and manifest.reference_index_id != index_id:
+        index_id = index.versioned_id if index else None
+        if check_index and manifest.reference_index_id != index_id:
             raise ArtifactIntegrityError(
                 f"Run {manifest.run_id} was built from index {manifest.reference_index_id}, "
                 f"not {index_id}; regenerate from the scenarios step"
             )
 
-    def _save_manifest(self, manifest: RunManifest, step: Step) -> None:
-        """Record ``step``'s artifacts; drop (and delete) artifacts of all later steps."""
+    def _save_manifest(
+        self, manifest: RunManifest, step: Step, skip: set[str] | frozenset[str] = frozenset()
+    ) -> None:
+        """Record ``step``'s artifacts (minus ``skip``: not written in this mode); drop (and
+        delete) artifacts of all later steps."""
         later = steps_from(step) - {step}
         stale = {key for s in later for key in STEP_ARTIFACTS[s]}
         for key in stale:
             self._store.delete(self._file(manifest.run_id, key))
         artifacts = {k: v for k, v in manifest.artifacts.items() if k not in stale}
-        artifacts.update(STEP_ARTIFACTS[step])
+        artifacts = {k: v for k, v in artifacts.items() if k not in skip}
+        artifacts.update({k: v for k, v in STEP_ARTIFACTS[step].items() if k not in skip})
         self._store.write_model(
             run_artifact(manifest.run_id, MANIFEST),
             manifest.model_copy(update={"artifacts": artifacts}),
@@ -511,14 +579,16 @@ class SyntheticUserPipeline:
     def _load_questions(self, run_id: str) -> list[QuestionCase]:
         return self._store.read_models(self._file(run_id, "questions"), QuestionCase)
 
-    def _load_executions(self, run_id: str) -> list[ExecutionResult]:
-        return self._store.read_with(self._file(run_id, "executions"), _EXECUTIONS)
+    def _load_executions(self, run_id: str) -> list[ExecutionRecord]:
+        return self._store.read_models(self._file(run_id, "executions"), ExecutionRecord)
 
     def _load_snapshots(
-        self, run_id: str, scenarios: Sequence[Scenario], catalog: ReferenceCatalog
+        self, run_id: str, scenarios: Sequence[Scenario], inputs: RunInputs
     ) -> list[ReferenceSnapshot]:
-        """snapshots.json if present, else rebuilt from the catalog (deterministic)."""
+        """snapshots.json if present, else rebuilt from the index (deterministic)."""
         relative = self._file(run_id, "snapshots")
         if self._store.exists(relative):
             return self._store.read_models(relative, ReferenceSnapshot)
-        return [build_snapshot(catalog, s.cheat_sheet, snapshot_id_for(s.id)) for s in scenarios]
+        if inputs.reference_index is None:
+            return []
+        return snapshots_for(inputs.reference_index, scenarios)

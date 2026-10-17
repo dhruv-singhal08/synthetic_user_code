@@ -63,7 +63,8 @@ def test_bad_log_level_exits_nonzero() -> None:
 
 ALL_COMMANDS = (
     "smoke-llm",
-    "build-index",
+    "validate-index",
+    "export-fixture-template",
     "generate-scenarios",
     "generate-questions",
     "execute",

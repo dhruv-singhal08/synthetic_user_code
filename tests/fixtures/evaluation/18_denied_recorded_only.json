@@ -1,16 +1,60 @@
 {
   "name": "denied_recorded_only",
-  "description": "denied is recorded, not judged.",
-  "execution": {
+  "description": "Supported request denied: capability_consistency fail -> verdict fail + bug.",
+  "response": {
     "outcome": "denied",
     "message": "I cannot answer that."
   },
-  "llm_responses": [],
+  "llm_responses": [
+    {
+      "relevance": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "goal_completeness": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "criteria": [],
+      "persona_fit": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "capability_consistency": {
+        "status": "fail",
+        "rationale": "Ranking top spenders is listed as supported, so the denial is unjustified.",
+        "evidence": "I cannot answer that."
+      },
+      "clarification_handling": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "clarification": null,
+      "safety_and_honesty": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "findings": [
+        {
+          "category": "capability_consistency",
+          "description": "The product refused a request it lists as supported.",
+          "expected_behavior": "answer a supported ranking question",
+          "observed_behavior": "declined to answer",
+          "evidence": "I cannot answer that.",
+          "severity": "high",
+          "evidence_status": "supported"
+        }
+      ],
+      "overall_verdict": "fail"
+    }
+  ],
   "expected": {
-    "verdict": null,
-    "evaluation_status": "recorded_only",
-    "llm_calls": 0,
-    "finding_categories": [],
-    "bug_candidates": 0
+    "verdict": "fail",
+    "evaluation_status": "evaluated",
+    "llm_calls": 1,
+    "finding_categories": [
+      "capability_consistency"
+    ],
+    "bug_candidates": 1
   }
 }

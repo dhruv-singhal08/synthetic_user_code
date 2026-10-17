@@ -1,14 +1,20 @@
-"""Evaluation of one product execution: checks, findings, verdict, bug candidates."""
+"""Evaluation of one product execution: checks, findings, verdict, bug candidates.
+
+Generic checks apply to every product; grounded_checks are filled by artifact plugins (e.g.
+"sql", nodes/evaluators/plugins/) and only in grounded mode. Plugin-specific models live with
+their plugin.
+"""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.execution import ProductOutcome
+from synthetic_user.models.run import GenerationMode
 
 # Outcomes that are recorded but not judged: verdict may be None only for these.
 RECORDED_ONLY_OUTCOMES = frozenset(
@@ -69,15 +75,15 @@ class EvaluationStatus(StrEnum):
     RECORDED_ONLY = "recorded_only"
 
 
-class EvaluationChecks(StrictModel):
-    intent_alignment: CheckStatus
-    table_selection: CheckStatus
-    column_selection: CheckStatus
-    join_correctness: CheckStatus
-    filter_correctness: CheckStatus
-    aggregation_correctness: CheckStatus
-    sql_syntax: CheckStatus
-    semantic_considerations: CheckStatus
+class GenericChecks(StrictModel):
+    """Product-agnostic criteria, judged in both modes."""
+
+    relevance: CheckStatus
+    goal_completeness: CheckStatus
+    persona_fit: CheckStatus
+    capability_consistency: CheckStatus
+    clarification_handling: CheckStatus
+    safety_and_honesty: CheckStatus
 
 
 class Finding(StrictModel):
@@ -86,7 +92,8 @@ class Finding(StrictModel):
     description: NonEmptyStr
     expected_behavior: NonEmptyStr
     observed_behavior: NonEmptyStr
-    sql_evidence: str | None = None
+    # Exact quote copied from the product response (text, message or an artifact such as SQL).
+    evidence: str | None = None
     severity: Severity
     confidence: float | None = Field(
         default=None, ge=0.0, le=1.0, description="uncalibrated; None when not estimated"
@@ -103,24 +110,32 @@ class ClarificationEvaluation(StrictModel):
     reason: NonEmptyStr
 
 
+class CriterionStatus(StrEnum):
+    MET = "met"
+    PARTLY = "partly"
+    NOT_MET = "not_met"
+    # Cannot be checked without ground truth (e.g. whether a stated figure is correct).
+    UNVERIFIABLE = "unverifiable"
+
+
+class CriterionResult(StrictModel):
+    criterion: NonEmptyStr
+    status: CriterionStatus
+    rationale: NonEmptyStr
+    evidence: str | None = None  # exact quote from the response, if any
+
+
 class BugCandidate(StrictModel):
     bug_id: NonEmptyStr = Field(pattern=r"^BUG_\d{3,}$")
     title: NonEmptyStr
     description: NonEmptyStr
     reproduction_question: NonEmptyStr
+    product_id: NonEmptyStr
     question_id: NonEmptyStr
     scenario_id: NonEmptyStr
     execution_id: NonEmptyStr
     finding_ids: list[NonEmptyStr] = Field(min_length=1)
     status: BugStatus = BugStatus.NEEDS_REVIEW
-
-
-class SqlAnalysis(StrictModel):
-    dialect: NonEmptyStr
-    parse_ok: bool
-    tables: list[NonEmptyStr] = Field(default_factory=list)
-    columns: list[NonEmptyStr] = Field(default_factory=list)
-    parse_errors: list[NonEmptyStr] = Field(default_factory=list)
 
 
 class EvaluationResult(StrictModel):
@@ -129,13 +144,21 @@ class EvaluationResult(StrictModel):
     scenario_id: NonEmptyStr
     execution_id: NonEmptyStr
     product_outcome: ProductOutcome
+    mode: GenerationMode
     verdict: Verdict | None
     evaluation_status: EvaluationStatus
-    checks: EvaluationChecks | None = None
+    checks: GenericChecks | None = None
+    grounded_checks: dict[NonEmptyStr, CheckStatus] = Field(default_factory=dict)
+    check_rationale: dict[NonEmptyStr, NonEmptyStr] = Field(
+        default_factory=dict, description="check name -> why it got its status"
+    )
+    plugins_applied: list[NonEmptyStr] = Field(default_factory=list)
+    criteria_results: list[CriterionResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
     clarification_evaluation: ClarificationEvaluation | None = None
     bug_candidates: list[BugCandidate] = Field(default_factory=list)
-    sql_analysis: SqlAnalysis | None = None
+    # Plugin name -> its analysis (e.g. "sql" -> static SQL analysis), grounded mode only.
+    plugin_analysis: dict[NonEmptyStr, dict[str, JsonValue]] = Field(default_factory=dict)
     llm_verdict: Verdict | None = None
     cheat_sheet_conflicts: list[NonEmptyStr] = Field(default_factory=list)
     notes: list[NonEmptyStr] = Field(default_factory=list)
@@ -149,6 +172,19 @@ class EvaluationResult(StrictModel):
         recorded_only = self.evaluation_status is EvaluationStatus.RECORDED_ONLY
         if recorded_only != (self.verdict is None):
             raise ValueError("evaluation_status is recorded_only exactly when verdict is None")
+        if self.mode is GenerationMode.UNGROUNDED and (
+            self.grounded_checks
+            or self.cheat_sheet_conflicts
+            or self.plugins_applied
+            or self.plugin_analysis
+        ):
+            raise ValueError("ungrounded evaluations have no grounded_checks or cheat sheet")
+        if self.grounded_checks and not self.plugins_applied:
+            raise ValueError("grounded_checks are filled by plugins; plugins_applied is empty")
+        known_checks = set(GenericChecks.model_fields) | set(self.grounded_checks)
+        unknown_rationale = sorted(set(self.check_rationale) - known_checks)
+        if unknown_rationale:
+            raise ValueError(f"check_rationale for unknown checks {unknown_rationale}")
         finding_ids = {f.finding_id for f in self.findings}
         for bug in self.bug_candidates:
             unknown = sorted(set(bug.finding_ids) - finding_ids)
@@ -157,18 +193,24 @@ class EvaluationResult(StrictModel):
         return self
 
 
-# --- LLM-facing drafts (no ids, no source; code assigns those) -------------------------------
+# --- generic (all products) LLM-facing draft -------------------------------------------------
 
 
-class FindingDraft(StrictModel):
-    category: NonEmptyStr = Field(
-        description="the EvaluationChecks field this finding explains, e.g. join_correctness"
+class CheckJudgement(StrictModel):
+    status: CheckStatus
+    rationale: NonEmptyStr
+    evidence: str | None = Field(
+        default=None, description="exact quote copied from the product response, if any"
     )
+
+
+class GenericFindingDraft(StrictModel):
+    category: NonEmptyStr = Field(description="the generic check this finding explains")
     description: NonEmptyStr
     expected_behavior: NonEmptyStr
     observed_behavior: NonEmptyStr
-    sql_evidence: str | None = Field(
-        default=None, description="exact fragment copied from the SQL under evaluation"
+    evidence: str | None = Field(
+        default=None, description="exact quote copied from the product response"
     )
     severity: Severity
     confidence: float | None = Field(
@@ -178,8 +220,30 @@ class FindingDraft(StrictModel):
     matches_known_gap: bool = False
 
 
-class SqlEvaluationDraft(StrictModel):
-    checks: EvaluationChecks
-    findings: list[FindingDraft] = Field(default_factory=list)
-    cheat_sheet_conflicts: list[NonEmptyStr] = Field(default_factory=list)
-    verdict: Verdict
+class GenericEvaluationDraft(StrictModel):
+    """One judgement per generic check, per-criterion results, optional clarification detail."""
+
+    relevance: CheckJudgement
+    goal_completeness: CheckJudgement
+    criteria: list[CriterionResult] = Field(default_factory=list)
+    persona_fit: CheckJudgement
+    capability_consistency: CheckJudgement
+    clarification_handling: CheckJudgement
+    clarification: ClarificationEvaluation | None = None
+    safety_and_honesty: CheckJudgement
+    findings: list[GenericFindingDraft] = Field(default_factory=list)
+    overall_verdict: Verdict = Field(
+        description="your own overall opinion; recorded as llm_verdict, not decisive"
+    )
+
+    def judgements(self) -> dict[str, CheckJudgement]:
+        return {name: getattr(self, name) for name in GenericChecks.model_fields}
+
+
+class ReferenceCoverageDraft(StrictModel):
+    """LLM draft of the grounded reference_coverage check (no artifact plugin applied)."""
+
+    reference_coverage: CheckJudgement
+    covered: list[NonEmptyStr] = Field(default_factory=list)
+    missing: list[NonEmptyStr] = Field(default_factory=list)
+    findings: list[GenericFindingDraft] = Field(default_factory=list)

@@ -1,0 +1,23 @@
+# Product adapter for product_id sample_policy_chatbot: a JSON-over-HTTP product, config only.
+# The URL is a DUMMY - replace it with the real endpoint. Secrets come from the environment:
+# set PRODUCT_API_TOKEN before running; it is never written to the run manifest or logs.
+type: http_json
+options:
+  url: https://chatbot.example.invalid/v1/ask
+  method: POST
+  headers:
+    Authorization: "Bearer ${PRODUCT_API_TOKEN}"
+  timeout: 30
+  request_template:
+    question: "{utterance}"
+    session_id: "{session_id}"
+  response_mapping:
+    text: data.answer
+    artifacts:
+      - kind: sql                 # optional: kept only when the product returns data.sql
+        path: data.sql
+    clarification_when: "data.type == clarification"
+    clarification_message: data.answer
+    denied_when: "data.status == unsupported"
+    denied_message: data.answer
+    product_version: meta.version

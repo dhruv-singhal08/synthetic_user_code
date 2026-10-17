@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from synthetic_user.models.base import AmbiguityLevel, NonEmptyStr, StrictModel
 from synthetic_user.models.reference import ReferenceSnapshot
+from synthetic_user.models.run import GenerationMode, mode_mismatch
 from synthetic_user.models.scenario import TaskType
 
 
@@ -43,13 +44,16 @@ class Expectations(StrictModel):
     clarification: ClarificationExpectation
     acceptable_behaviors: list[NonEmptyStr] = Field(min_length=1)
     unacceptable_behaviors: list[NonEmptyStr] = Field(default_factory=list)
+    # Copied or refined from the scenario; a QuestionCase requires at least one.
+    success_criteria: list[NonEmptyStr] = Field(default_factory=list)
 
 
 class QuestionCase(StrictModel):
     question_id: NonEmptyStr = Field(pattern=r"^Q_\d{3,}$")
     scenario_id: NonEmptyStr = Field(pattern=r"^SCN_\d{3,}$")
     persona_id: NonEmptyStr
-    reference_snapshot_id: NonEmptyStr
+    mode: GenerationMode
+    reference_snapshot_id: NonEmptyStr | None = None
     utterance: NonEmptyStr
     intended_goal: NonEmptyStr
     intent: QuestionIntent
@@ -57,6 +61,19 @@ class QuestionCase(StrictModel):
     expectations: Expectations
     interpretation_notes: list[NonEmptyStr] = Field(default_factory=list)
     schema_leak_warnings: list[NonEmptyStr] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        problems = [
+            mode_mismatch(
+                self.mode, self.reference_snapshot_id is not None, "a reference_snapshot_id"
+            ),
+            None if self.expectations.success_criteria else "expectations.success_criteria empty",
+        ]
+        found = [p for p in problems if p]
+        if found:
+            raise ValueError(f"question {self.question_id}: {'; '.join(found)}")
+        return self
 
 
 class QuestionGenerationConfig(StrictModel):

@@ -1,4 +1,4 @@
-"""Detect catalog identifiers leaking into natural-language questions.
+"""Detect reference index identifiers (table/column names) leaking into natural-language questions.
 
 Only identifiers containing an underscore are checked (e.g. ``card_transactions``,
 ``currency_code``): single words such as ``amount`` are ordinary English and would make
@@ -10,11 +10,11 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-from synthetic_user.models.reference import ReferenceCatalog
+from synthetic_user.models.reference import ReferenceIndex
 
 
-def catalog_identifiers(catalog: ReferenceCatalog) -> list[str]:
-    names = {t.name for t in catalog.tables} | {c.name for t in catalog.tables for c in t.columns}
+def index_identifiers(index: ReferenceIndex) -> list[str]:
+    names = {t.name for t in index.tables} | {c.name for t in index.tables for c in t.columns}
     return sorted(n for n in names if "_" in n)
 
 

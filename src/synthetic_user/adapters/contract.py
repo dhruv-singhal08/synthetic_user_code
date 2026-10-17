@@ -1,8 +1,8 @@
-"""Product contract: how to talk to an NL2SQL product, requested from its URL.
+"""Product contract: how to talk to a product, requested from its URL (web UI, D113).
 
 The real HTTP connection is NOT implemented yet. ``request_contract`` returns a MOCK contract
 (``mock=True``) describing the API the real product is expected to expose; questions are then
-answered by MockProductClient.
+answered by MockLLMAdapter.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from pydantic import Field
 
-from synthetic_user.core.exceptions import ProductClientError
+from synthetic_user.core.exceptions import ProductAdapterError
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 
 
@@ -37,7 +37,7 @@ def request_contract(url: str, product_id: str, sql_dialect: str) -> ProductCont
     """MOCK: validate the URL and return the contract the product is expected to publish."""
     parsed = urlparse(url.strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ProductClientError(f"Product URL must be an http(s) URL, got {url!r}")
+        raise ProductAdapterError(f"Product URL must be an http(s) URL, got {url!r}")
     return ProductContract(
         contract_version="mock-1",
         product_id=product_id,
@@ -48,11 +48,13 @@ def request_contract(url: str, product_id: str, sql_dialect: str) -> ProductCont
             path="/v1/ask",
             request_fields={"question": "string - the user's natural-language question"},
             response_fields={
-                "outcome": "sql_generated | clarification | denied | error",
-                "sql": "string - present when outcome is sql_generated",
+                "outcome": "answered | clarification | denied | error",
+                "text": "string - optional answer text when outcome is answered",
+                "artifacts": 'list of {kind, content, metadata} - e.g. kind "sql" holds the '
+                "generated SQL",
                 "message": "string - clarification question or denial reason",
             },
         ),
-        outcomes=["sql_generated", "clarification", "denied", "error", "timeout"],
+        outcomes=["answered", "clarification", "denied", "error", "timeout"],
         mock=True,
     )

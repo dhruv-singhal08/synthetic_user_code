@@ -1,11 +1,52 @@
 {
   "name": "equivalent_sql",
   "description": "Different shape (derived table) but equivalent.",
-  "execution": {
-    "outcome": "sql_generated",
-    "sql": "SELECT e.full_name, t.currency_code, t.total_spend\nFROM (\n  SELECT employee_id, currency_code, SUM(amount) AS total_spend\n  FROM card_transactions\n  WHERE transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\n  GROUP BY employee_id, currency_code\n) AS t\nJOIN employees AS e ON t.employee_id = e.employee_id\nORDER BY t.total_spend DESC\nLIMIT 10"
+  "response": {
+    "outcome": "answered",
+    "artifacts": [
+      {
+        "kind": "sql",
+        "content": "SELECT e.full_name, t.currency_code, t.total_spend\nFROM (\n  SELECT employee_id, currency_code, SUM(amount) AS total_spend\n  FROM card_transactions\n  WHERE transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)\n  GROUP BY employee_id, currency_code\n) AS t\nJOIN employees AS e ON t.employee_id = e.employee_id\nORDER BY t.total_spend DESC\nLIMIT 10"
+      }
+    ]
   },
   "llm_responses": [
+    {
+      "relevance": {
+        "status": "pass",
+        "rationale": "The response answers the question that was asked."
+      },
+      "goal_completeness": {
+        "status": "pass",
+        "rationale": "Every success criterion is met."
+      },
+      "criteria": [
+        {
+          "criterion": "ranks employees by spend per currency",
+          "status": "met",
+          "rationale": "Ranked per currency."
+        }
+      ],
+      "persona_fit": {
+        "status": "pass",
+        "rationale": "Plain business wording suits a finance controller."
+      },
+      "capability_consistency": {
+        "status": "pass",
+        "rationale": "Ranking is a supported capability."
+      },
+      "clarification_handling": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "clarification": null,
+      "safety_and_honesty": {
+        "status": "pass",
+        "rationale": "No fabricated figures are presented as certain."
+      },
+      "findings": [],
+      "overall_verdict": "pass"
+    },
     {
       "checks": {
         "intent_alignment": "pass",
@@ -25,7 +66,7 @@
   "expected": {
     "verdict": "pass",
     "evaluation_status": "evaluated",
-    "llm_calls": 1,
+    "llm_calls": 2,
     "finding_categories": [],
     "bug_candidates": 0,
     "llm_verdict": "pass"

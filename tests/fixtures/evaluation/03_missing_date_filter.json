@@ -1,11 +1,52 @@
 {
   "name": "missing_date_filter",
   "description": "No filter for the last three months.",
-  "execution": {
-    "outcome": "sql_generated",
-    "sql": "SELECT e.full_name, c.currency_code, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.employee_id = e.employee_id\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+  "response": {
+    "outcome": "answered",
+    "artifacts": [
+      {
+        "kind": "sql",
+        "content": "SELECT e.full_name, c.currency_code, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.employee_id = e.employee_id\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10"
+      }
+    ]
   },
   "llm_responses": [
+    {
+      "relevance": {
+        "status": "pass",
+        "rationale": "The response answers the question that was asked."
+      },
+      "goal_completeness": {
+        "status": "pass",
+        "rationale": "Every success criterion is met."
+      },
+      "criteria": [
+        {
+          "criterion": "ranks employees by spend per currency",
+          "status": "met",
+          "rationale": "Ranked per currency."
+        }
+      ],
+      "persona_fit": {
+        "status": "pass",
+        "rationale": "Plain business wording suits a finance controller."
+      },
+      "capability_consistency": {
+        "status": "pass",
+        "rationale": "Ranking is a supported capability."
+      },
+      "clarification_handling": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "clarification": null,
+      "safety_and_honesty": {
+        "status": "pass",
+        "rationale": "No fabricated figures are presented as certain."
+      },
+      "findings": [],
+      "overall_verdict": "pass"
+    },
     {
       "checks": {
         "intent_alignment": "pass",
@@ -36,7 +77,7 @@
   "expected": {
     "verdict": "fail",
     "evaluation_status": "evaluated",
-    "llm_calls": 1,
+    "llm_calls": 2,
     "finding_categories": [
       "filter_correctness"
     ],

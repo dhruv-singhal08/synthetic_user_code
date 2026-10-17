@@ -1,53 +1,45 @@
-"""ProductClient Protocol: the NL2SQL product under test, as Node 4 sees it."""
+"""ProductAdapter Protocol: the only way the pipeline talks to a product under test.
+
+Each product = one adapter, selected by config (adapters/registry.py). Adapters return the
+generic ProductResponse; all product-specific parsing stays inside the adapter.
+"""
 
 from __future__ import annotations
 
-from typing import Protocol, Self, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-from pydantic import model_validator
+from pydantic import Field
 
-from synthetic_user.core.exceptions import ProductClientError
+from synthetic_user.core.exceptions import ProductAdapterError
 from synthetic_user.models.base import NonEmptyStr, StrictModel
-from synthetic_user.models.execution import ProductOutcome
+from synthetic_user.models.execution import ProductResponse
+
+__all__ = ["ProductAdapter", "ProductRequest", "ProductResponse", "UnavailableAdapter"]
 
 
-class ProductResponse(StrictModel):
-    """What the product returned for one question (no ids or timings; Node 4 adds those)."""
-
-    outcome: ProductOutcome
-    sql: str | None = None
-    message: str | None = None
-    error_type: str | None = None
-    product_version: str | None = None
-
-    @model_validator(mode="after")
-    def _payload_matches_outcome(self) -> Self:
-        if self.outcome is ProductOutcome.SQL_GENERATED and not self.sql:
-            raise ValueError("sql is required for outcome sql_generated")
-        if (
-            self.outcome in (ProductOutcome.CLARIFICATION, ProductOutcome.DENIED)
-            and not self.message
-        ):
-            raise ValueError(f"message is required for outcome {self.outcome}")
-        if self.outcome is ProductOutcome.ERROR and not self.error_type:
-            raise ValueError("error_type is required for outcome error")
-        return self
+class ProductRequest(StrictModel):
+    question_id: NonEmptyStr
+    utterance: NonEmptyStr
+    session_id: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 @runtime_checkable
-class ProductClient(Protocol):
-    @property
-    def product_id(self) -> NonEmptyStr: ...
+class ProductAdapter(Protocol):
+    name: str
 
-    async def ask(self, utterance: str) -> ProductResponse: ...
+    async def send(self, req: ProductRequest) -> ProductResponse: ...
+
+    async def aclose(self) -> None: ...
 
 
-class UnavailableProductClient:
+class UnavailableAdapter:
     """Placeholder for steps that never call the product (raises if asked)."""
 
-    @property
-    def product_id(self) -> str:
-        return "not-configured"
+    name = "unavailable"
 
-    async def ask(self, utterance: str) -> ProductResponse:
-        raise ProductClientError("this step does not call the product")
+    async def send(self, req: ProductRequest) -> ProductResponse:
+        raise ProductAdapterError("this step does not call the product")
+
+    async def aclose(self) -> None:
+        return None

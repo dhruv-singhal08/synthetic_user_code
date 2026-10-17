@@ -36,7 +36,7 @@ class LLMOutputValidationError(SyntheticUserError):
 
 
 class ReferenceIntegrityError(SyntheticUserError):
-    """A reference item contradicts the catalog (unknown table, column, or relationship)."""
+    """A reference item contradicts the reference index (unknown table, column, relationship)."""
 
 
 class ArtifactNotFoundError(SyntheticUserError):
@@ -47,8 +47,12 @@ class ArtifactIntegrityError(SyntheticUserError):
     """A run artifact exists but is corrupt or inconsistent."""
 
 
-class ProductClientError(SyntheticUserError):
-    """The NL2SQL product client failed to produce a response."""
+class ProductAdapterError(SyntheticUserError):
+    """A product adapter failed to produce a response (transport, connection, bad setup)."""
+
+
+class UnsupportedModeError(SyntheticUserError):
+    """The requested step does not support the current generation mode yet."""
 
 
 class SQLAnalysisError(SyntheticUserError):

@@ -12,14 +12,33 @@ from synthetic_user import cli
 from synthetic_user.cli import app
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.reference import ReferenceIndex
-from synthetic_user.storage.json_store import JsonArtifactStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
+SAMPLE_INDEX = REPO_ROOT / "data" / "references" / "sample_card_spend_index.json"
+CHATBOT = REPO_ROOT / "data" / "products" / "sample_chatbot.yaml"
 
 
-@pytest.fixture
-def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _config(tmp_path: Path, *, with_index: bool) -> Path:
+    data = yaml.safe_load((REPO_ROOT / "config" / "app.yaml").read_text(encoding="utf-8"))
+    data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
+    data["inputs"] = {
+        key: (
+            [str(REPO_ROOT / x) for x in value]
+            if isinstance(value, list)
+            else str(REPO_ROOT / value)
+        )
+        for key, value in data["inputs"].items()
+    }
+    if not with_index:
+        del data["inputs"]["reference_index_file"]
+    path = tmp_path / ("app.yaml" if with_index else "app.ungrounded.yaml")
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     for var in (
         "GOOGLE_API_KEY",
@@ -32,18 +51,16 @@ def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "LOG_LEVEL",
     ):
         monkeypatch.delenv(var, raising=False)
-    data = yaml.safe_load((REPO_ROOT / "config" / "app.yaml").read_text(encoding="utf-8"))
-    data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
-    data["inputs"] = {key: str(REPO_ROOT / value) for key, value in data["inputs"].items()}
-    path = tmp_path / "app.yaml"
-    path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    return path
 
 
 @pytest.fixture
-def stored_index(tmp_path: Path, sample_index: ReferenceIndex) -> ReferenceIndex:
-    JsonArtifactStore(tmp_path / "artifacts").write_reference_index(sample_index)
-    return sample_index
+def config_path(tmp_path: Path) -> Path:
+    return _config(tmp_path, with_index=True)
+
+
+@pytest.fixture
+def ungrounded_config(tmp_path: Path) -> Path:
+    return _config(tmp_path, with_index=False)
 
 
 def _script(monkeypatch: pytest.MonkeyPatch, *responses: Any) -> None:
@@ -54,15 +71,19 @@ def _fields(output: str) -> dict[str, str]:
     return dict(p.split("=", 1) for p in output.strip().splitlines()[-1].split())
 
 
+def _ungrounded(draft: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in draft.items() if k != "reference_cheat_sheet"}
+
+
 def test_writes_scenarios_rejected_and_manifest(
     config_path: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stored_index: ReferenceIndex,
+    sample_index: ReferenceIndex,
     scenario_drafts: list[dict[str, Any]],
 ) -> None:
     bad = json.loads(json.dumps(scenario_drafts[1]))
-    bad["cheat_sheet"]["tables"].append("budgets")
+    bad["reference_cheat_sheet"]["tables"].append("budgets")
     _script(
         monkeypatch, {"scenarios": [scenario_drafts[0], bad, scenario_drafts[2]]}, {"scenarios": []}
     )
@@ -73,7 +94,12 @@ def test_writes_scenarios_rejected_and_manifest(
     )
     assert result.exit_code == 0, result.output
     fields = _fields(result.output)
-    assert (fields["accepted"], fields["rejected"], fields["duplicates"]) == ("2", "1", "0")
+    assert (fields["mode"], fields["accepted"], fields["rejected"], fields["duplicates"]) == (
+        "grounded",
+        "2",
+        "1",
+        "0",
+    )
 
     run_dir = tmp_path / "artifacts" / "runs" / RUN_ID
     scenarios = json.loads((run_dir / "scenarios.json").read_text(encoding="utf-8"))
@@ -83,7 +109,8 @@ def test_writes_scenarios_rejected_and_manifest(
 
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["run_id"] == RUN_ID
-    assert manifest["reference_index_id"] == stored_index.index_id
+    assert manifest["mode"] == "grounded"
+    assert manifest["reference_index_id"] == sample_index.versioned_id
     assert manifest["catalog_id"] == "sample_card_spend"
     assert manifest["artifacts"] == {
         "scenarios": "scenarios.json",
@@ -92,45 +119,84 @@ def test_writes_scenarios_rejected_and_manifest(
     assert "secrets" not in manifest["effective_config"]
 
 
-def test_explicit_inputs_and_new_run_id(
-    config_path: Path,
+def test_explicit_inputs_reference_index_and_new_run_id(
+    ungrounded_config: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    sample_index: ReferenceIndex,
     scenario_drafts: list[dict[str, Any]],
 ) -> None:
-    index_file = tmp_path / "my_index.json"
-    index_file.write_text(sample_index.model_dump_json(), encoding="utf-8")
     _script(monkeypatch, {"scenarios": [scenario_drafts[1]]})
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(ungrounded_config),
+            "generate-scenarios",
+            "--persona",
+            str(REPO_ROOT / "data" / "personas" / "finance_controller.yaml"),
+            "--product",
+            str(REPO_ROOT / "data" / "products" / "sample_product.yaml"),
+            "--reference-index",
+            str(SAMPLE_INDEX),
+            "--count",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    fields = _fields(result.output)
+    assert fields["run_id"].startswith("RUN_") and fields["mode"] == "grounded"
+    assert (tmp_path / "artifacts" / "runs" / fields["run_id"] / "scenarios.json").is_file()
+
+
+def test_no_index_is_ungrounded_with_chatbot_product(
+    ungrounded_config: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario_drafts: list[dict[str, Any]],
+) -> None:
+    _script(monkeypatch, {"scenarios": [_ungrounded(scenario_drafts[1])]})
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(ungrounded_config),
+            "generate-scenarios",
+            "--run-id",
+            RUN_ID,
+            "--product",
+            str(CHATBOT),
+            "--count",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "mode ungrounded" in result.output  # logged
+    fields = _fields(result.output)
+    assert (fields["mode"], fields["accepted"]) == ("ungrounded", "1")
+    run_dir = tmp_path / "artifacts" / "runs" / RUN_ID
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert (manifest["mode"], manifest["reference_index_id"]) == ("ungrounded", None)
+    assert manifest["product_id"] == "sample_policy_chatbot"
+    scenario = json.loads((run_dir / "scenarios.json").read_text(encoding="utf-8"))[0]
+    assert scenario["mode"] == "ungrounded" and scenario["reference_cheat_sheet"] is None
+
+
+def test_missing_reference_index_file_is_an_error(config_path: Path, tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
         [
             "--config",
             str(config_path),
             "generate-scenarios",
-            "--persona",
-            str(REPO_ROOT / "data" / "personas" / "finance_controller.yaml"),
-            "--product",
-            str(REPO_ROOT / "data" / "products" / "sample_product.yaml"),
-            "--index",
-            str(index_file),
-            "--count",
-            "1",
+            "--reference-index",
+            str(tmp_path / "missing.json"),
         ],
     )
-    assert result.exit_code == 0, result.output
-    run_id = _fields(result.output)["run_id"]
-    assert run_id.startswith("RUN_")
-    assert (tmp_path / "artifacts" / "runs" / run_id / "scenarios.json").is_file()
-
-
-def test_no_index_tells_user_to_build_one(config_path: Path) -> None:
-    result = CliRunner().invoke(app, ["--config", str(config_path), "generate-scenarios"])
     assert result.exit_code == 1
-    assert "run `synthetic-user build-index` first" in result.output
+    assert "Reference index not found" in result.output
 
 
-def test_bad_run_id(config_path: Path, stored_index: ReferenceIndex) -> None:
+def test_bad_run_id(config_path: Path) -> None:
     result = CliRunner().invoke(
         app, ["--config", str(config_path), "generate-scenarios", "--run-id", "../evil"]
     )

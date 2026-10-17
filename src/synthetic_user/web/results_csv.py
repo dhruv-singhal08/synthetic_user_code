@@ -10,14 +10,22 @@ import io
 from collections.abc import Sequence
 
 from synthetic_user.models.evaluation import CheckStatus, EvaluationResult
-from synthetic_user.models.execution import ExecutionResult
+from synthetic_user.models.execution import (
+    AnsweredResponse,
+    ClarificationResponse,
+    DeniedResponse,
+    ErrorResponse,
+    ExecutionRecord,
+)
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.scenario import Scenario
 
 SCENARIO_COLUMNS = [
     "scenario_id",
+    "mode",
     "scenario_title",
     "business_goal",
+    "success_criteria",
     "task_type",
     "capability",
     "capability_rationale",
@@ -38,12 +46,16 @@ QUESTION_COLUMNS = [
     "clarification_expected",
     "acceptable_behaviors",
     "unacceptable_behaviors",
+    "question_success_criteria",
     "interpretation_notes",
     "schema_leak_warnings",
 ]
 EXECUTION_COLUMNS = [
     "execution_id",
+    "adapter",
     "product_outcome",
+    "answer_text",
+    "artifact_kinds",
     "generated_sql",
     "product_message",
     "latency_ms",
@@ -53,6 +65,8 @@ EVALUATION_COLUMNS = [
     "final_verdict",
     "llm_verdict",
     "evaluation_status",
+    "plugins_applied",
+    "criteria_results",
     "failed_checks",
     "inconclusive_checks",
     "findings",
@@ -69,7 +83,7 @@ def build_rows(
     run_id: str,
     scenarios: Sequence[Scenario],
     questions: Sequence[QuestionCase] = (),
-    executions: Sequence[ExecutionResult] = (),
+    executions: Sequence[ExecutionRecord] = (),
     evaluations: Sequence[EvaluationResult] = (),
 ) -> list[dict[str, str]]:
     execution_by_question = {e.question_id: e for e in executions}
@@ -106,14 +120,21 @@ def _complete(row: dict[str, str]) -> dict[str, str]:
 
 
 def _scenario_cells(s: Scenario) -> dict[str, str]:
-    cs = s.cheat_sheet
-    return {
+    cells = {
         "scenario_id": s.id,
+        "mode": s.mode.value,
         "scenario_title": s.title,
         "business_goal": s.business_goal,
+        "success_criteria": _SEP.join(s.success_criteria),
         "task_type": s.task_type.value,
         "capability": s.capability.value,
         "capability_rationale": s.capability_rationale,
+    }
+    cs = s.reference_cheat_sheet
+    if cs is None:
+        return cells
+    return {
+        **cells,
         "cheat_tables": _SEP.join(cs.tables),
         "cheat_columns": _SEP.join(cs.columns),
         "cheat_joins": _SEP.join(
@@ -136,29 +157,47 @@ def _question_cells(q: QuestionCase) -> dict[str, str]:
         "clarification_expected": q.expectations.clarification.value,
         "acceptable_behaviors": _SEP.join(q.expectations.acceptable_behaviors),
         "unacceptable_behaviors": _SEP.join(q.expectations.unacceptable_behaviors),
+        "question_success_criteria": _SEP.join(q.expectations.success_criteria),
         "interpretation_notes": _SEP.join(q.interpretation_notes),
         "schema_leak_warnings": _SEP.join(q.schema_leak_warnings),
     }
 
 
-def _execution_cells(e: ExecutionResult) -> dict[str, str]:
-    latency = e.metadata.latency_ms
+def _execution_cells(e: ExecutionRecord) -> dict[str, str]:
+    latency = e.latency_ms
+    response = e.response
+    text, message, sql = "", "", ""
+    if isinstance(response, AnsweredResponse):
+        text = response.text or ""
+        artifact = response.first_artifact("sql")
+        sql = artifact.content if artifact and isinstance(artifact.content, str) else ""
+    elif isinstance(response, ClarificationResponse | DeniedResponse):
+        message = response.message
+    elif isinstance(response, ErrorResponse):
+        message = response.message or response.error_type
     return {
         "execution_id": e.execution_id,
+        "adapter": e.adapter,
         "product_outcome": e.outcome.value,
-        "generated_sql": getattr(e, "sql", "") or "",
-        "product_message": getattr(e, "message", None) or getattr(e, "error_type", "") or "",
+        "answer_text": text,
+        "artifact_kinds": _SEP.join(a.kind for a in getattr(response, "artifacts", [])),
+        "generated_sql": sql,
+        "product_message": message,
         "latency_ms": f"{latency:.0f}" if latency is not None else "",
     }
 
 
 def _evaluation_cells(ev: EvaluationResult) -> dict[str, str]:
-    checks = ev.checks.model_dump() if ev.checks else {}
+    checks = {**(ev.checks.model_dump() if ev.checks else {}), **ev.grounded_checks}
     return {
         "evaluation_id": ev.evaluation_id,
         "final_verdict": ev.verdict.value if ev.verdict else "",
         "llm_verdict": ev.llm_verdict.value if ev.llm_verdict else "",
         "evaluation_status": ev.evaluation_status.value,
+        "plugins_applied": _SEP.join(ev.plugins_applied),
+        "criteria_results": _SEP.join(
+            f"{c.status.value}: {c.criterion}" for c in ev.criteria_results
+        ),
         "failed_checks": _SEP.join(k for k, v in checks.items() if v == CheckStatus.FAIL),
         "inconclusive_checks": _SEP.join(
             k for k, v in checks.items() if v == CheckStatus.INCONCLUSIVE

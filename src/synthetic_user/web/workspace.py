@@ -1,8 +1,9 @@
 """UI run workspace: inputs, UI state and the results table for one run.
 
 Layout inside ``<artifacts_dir>/runs/<run_id>/``:
-    inputs/persona.yaml, inputs/product.yaml, inputs/catalog.yaml   (uploaded or sample copy)
-    inputs/persona_queries.json                                      (optional pasted queries)
+    inputs/persona.yaml, inputs/product.yaml      (uploaded or sample copy)
+    inputs/reference_index.json                    (uploaded or sample copy; absent -> ungrounded)
+    inputs/persona_queries.json                    (optional pasted queries)
     ui_state.json, results.csv, + the normal pipeline artifacts
 """
 
@@ -15,30 +16,32 @@ from typing import Any
 
 from pydantic import BaseModel, Field, TypeAdapter
 
+from synthetic_user.adapters.contract import ProductContract
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import InputAssetError
 from synthetic_user.core.identifiers import new_run_id
 from synthetic_user.core.loaders import parse_asset
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import EvaluationResult
-from synthetic_user.models.execution import ExecutionResult
+from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
-from synthetic_user.models.reference import ReferenceCatalog
+from synthetic_user.models.reference import ReferenceIndex
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.pipeline import RunInputs, Step, steps_from
-from synthetic_user.product.contract import ProductContract
+from synthetic_user.references.loader import parse_reference_index
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact
 from synthetic_user.web.results_csv import build_rows, to_csv
 
+REFERENCE_INDEX = "reference_index"  # optional input kind (JSON); absent -> ungrounded
 INPUT_KINDS: dict[str, tuple[type[BaseModel], str]] = {
     "persona": (Persona, "Persona file"),
     "product": (ProductDescription, "Product file"),
-    "catalog": (ReferenceCatalog, "Catalog file"),
+    REFERENCE_INDEX: (ReferenceIndex, "Reference index"),
 }
-MAX_UPLOAD_BYTES = 1_000_000
+MAX_UPLOAD_BYTES = 10_000_000  # full pre-built reference index JSONs are large
 MAX_PERSONA_QUERIES = 50
 RESULTS_CSV = "results.csv"
 UI_STATE = "ui_state.json"
@@ -47,7 +50,7 @@ UI_STATE = "ui_state.json"
 class UiRunState(StrictModel):
     run_id: NonEmptyStr
     created_at: datetime
-    sources: dict[str, str]  # kind -> "sample" | "uploaded: <filename>"
+    sources: dict[str, str]  # kind -> "sample" | "uploaded: <filename>" | "none"
     persona_queries: list[str] = Field(default_factory=list)
     reference_index_id: str | None = None
     contract: ProductContract | None = None
@@ -61,7 +64,7 @@ class Upload:
 
 
 def parse_upload(kind: str, upload: Upload) -> BaseModel:
-    """Validate an uploaded YAML file as persona / product / catalog."""
+    """Validate an uploaded file as persona / product (YAML) or reference index (JSON)."""
     if kind not in INPUT_KINDS:
         raise InputAssetError(f"Unknown input kind {kind!r}")
     if len(upload.content) > MAX_UPLOAD_BYTES:
@@ -70,8 +73,18 @@ def parse_upload(kind: str, upload: Upload) -> BaseModel:
         text = upload.content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise InputAssetError(f"{upload.filename}: not UTF-8 text") from exc
+    return _parse(kind, text, upload.filename)
+
+
+def _parse(kind: str, text: str, source: str) -> BaseModel:
+    if kind == REFERENCE_INDEX:
+        return parse_reference_index(text, source=source)
     model, label = INPUT_KINDS[kind]
-    return parse_asset(text, model, kind=label, source=upload.filename)
+    return parse_asset(text, model, kind=label, source=source)
+
+
+def _file_name(kind: str) -> str:
+    return f"{kind}.json" if kind == REFERENCE_INDEX else f"{kind}.yaml"
 
 
 def clean_queries(text: str) -> list[str]:
@@ -89,40 +102,63 @@ class Workspace:
 
     # --- samples / inputs ----------------------------------------------------------------
 
-    def sample_path(self, kind: str) -> Path:
+    def sample_path(self, kind: str) -> Path | None:
         paths = {
             "persona": self._settings.inputs.persona_path,
             "product": self._settings.inputs.product_path,
-            "catalog": self._settings.inputs.catalog_path,
+            REFERENCE_INDEX: self._settings.inputs.reference_index_file,
         }
         return paths[kind]
 
-    def sample(self, kind: str) -> tuple[str, BaseModel]:
+    def sample(self, kind: str) -> tuple[str, BaseModel] | None:
+        """(text, parsed) of the configured sample; None for an unconfigured reference index."""
         path = self.sample_path(kind)
+        if path is None:
+            return None
         if not path.is_file():
             raise InputAssetError(f"Sample {kind} not found: {path}")
         text = path.read_text(encoding="utf-8")
-        model, label = INPUT_KINDS[kind]
-        return text, parse_asset(text, model, kind=label, source=str(path))
+        return text, _parse(kind, text, str(path))
 
-    def create_run(self, uploads: dict[str, Upload | None], persona_queries: str) -> UiRunState:
-        """Validate every input (uploaded or sample), then save them into a new run."""
+    def create_run(
+        self,
+        uploads: dict[str, Upload | None],
+        persona_queries: str,
+        *,
+        use_reference_index: bool = False,
+    ) -> UiRunState:
+        """Validate every input, then save them into a new run.
+
+        Persona: upload or the configured sample. Product description: upload only (no
+        sample). Reference index: only when switched on, and then an upload is required;
+        switched off -> ungrounded run.
+        """
         texts: dict[str, str] = {}
         sources: dict[str, str] = {}
         for kind in INPUT_KINDS:
             upload = uploads.get(kind)
+            if kind == REFERENCE_INDEX and not use_reference_index:
+                sources[kind] = "off"
+                continue
             if upload is not None:
                 parse_upload(kind, upload)
                 texts[kind] = upload.content.decode("utf-8")
                 sources[kind] = f"uploaded: {upload.filename}"
-            else:
-                texts[kind], _ = self.sample(kind)
+            elif kind == "persona" and (sample := self.sample(kind)) is not None:
+                texts[kind] = sample[0]
                 sources[kind] = "sample"
+            elif kind == "product":
+                raise InputAssetError("Upload a product description (YAML); no sample is used")
+            else:
+                raise InputAssetError(
+                    "Reference index is switched on: upload the pre-built index JSON, or switch "
+                    "it off for an ungrounded run"
+                )
         queries = clean_queries(persona_queries)
 
         run_id = new_run_id()
         for kind, text in texts.items():
-            self._store.write_text(self._input(run_id, f"{kind}.yaml"), text)
+            self._store.write_text(self._input(run_id, _file_name(kind)), text)
         self._store.write_with(
             self._input(run_id, "persona_queries.json"), queries, TypeAdapter(list[str])
         )
@@ -133,22 +169,23 @@ class Workspace:
         return state
 
     def load_inputs(self, run_id: str) -> RunInputs:
-        def parse(kind: str) -> BaseModel:
-            path = self._store.path_for(self._input(run_id, f"{kind}.yaml"))
-            model, label = INPUT_KINDS[kind]
-            return parse_asset(path.read_text(encoding="utf-8"), model, kind=label, source=kind)
+        def parse(kind: str) -> BaseModel | None:
+            path = self._store.path_for(self._input(run_id, _file_name(kind)))
+            if kind == REFERENCE_INDEX and not path.is_file():
+                return None
+            return _parse(kind, path.read_text(encoding="utf-8"), kind)
 
         persona = parse("persona")
         product = parse("product")
-        catalog = parse("catalog")
+        index = parse(REFERENCE_INDEX)
         assert isinstance(persona, Persona)
+        assert index is None or isinstance(index, ReferenceIndex)
         assert isinstance(product, ProductDescription)
-        assert isinstance(catalog, ReferenceCatalog)
         queries = self.state(run_id).persona_queries
         if queries:
             examples = list(dict.fromkeys([*persona.example_utterances, *queries]))
             persona = persona.model_copy(update={"example_utterances": examples})
-        return RunInputs(persona=persona, product=product, catalog=catalog)
+        return RunInputs(persona=persona, product=product, reference_index=index)
 
     # --- state -----------------------------------------------------------------------------
 
@@ -172,14 +209,19 @@ class Workspace:
         """Current results table (+ rejected items), and refresh results.csv."""
         scenarios = self._read(run_id, "scenarios.json", list[Scenario]) or []
         questions = self._read(run_id, "questions.json", list[QuestionCase]) or []
-        executions = self._read(run_id, "executions.json", list[ExecutionResult]) or []
+        executions = self._read(run_id, "executions.json", list[ExecutionRecord]) or []
         evaluations = self._read(run_id, "evaluations.json", list[EvaluationResult]) or []
         rows = build_rows(run_id, scenarios, questions, executions, evaluations)
         self._store.write_text(run_artifact(run_id, RESULTS_CSV), to_csv(rows))
+        details = {
+            "scenarios": [s.model_dump(mode="json") for s in scenarios],
+            "evaluations": [e.model_dump(mode="json") for e in evaluations],
+        }
         rejected_scenarios = self._read(run_id, "scenarios_rejected.json", list[RejectedScenario])
         rejected_questions = self._read(run_id, "questions_rejected.json", list[RejectedQuestion])
         return {
             "rows": rows,
+            **details,
             "rejected_scenarios": [r.model_dump(mode="json") for r in rejected_scenarios or []],
             "rejected_questions": [r.model_dump(mode="json") for r in rejected_questions or []],
             "artifacts": sorted(

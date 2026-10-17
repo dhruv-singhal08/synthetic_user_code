@@ -1,19 +1,61 @@
 {
   "name": "syntax_error",
   "description": "Unparseable SQL: decided without calling the LLM.",
-  "execution": {
-    "outcome": "sql_generated",
-    "sql": "SELEC e.full_name FROM card_transactions"
+  "response": {
+    "outcome": "answered",
+    "artifacts": [
+      {
+        "kind": "sql",
+        "content": "SELEC e.full_name FROM card_transactions"
+      }
+    ]
   },
-  "llm_responses": [],
+  "llm_responses": [
+    {
+      "relevance": {
+        "status": "pass",
+        "rationale": "The response answers the question that was asked."
+      },
+      "goal_completeness": {
+        "status": "pass",
+        "rationale": "Every success criterion is met."
+      },
+      "criteria": [
+        {
+          "criterion": "ranks employees by spend per currency",
+          "status": "met",
+          "rationale": "Ranked per currency."
+        }
+      ],
+      "persona_fit": {
+        "status": "pass",
+        "rationale": "Plain business wording suits a finance controller."
+      },
+      "capability_consistency": {
+        "status": "pass",
+        "rationale": "Ranking is a supported capability."
+      },
+      "clarification_handling": {
+        "status": "not_applicable",
+        "rationale": "not applicable to this outcome"
+      },
+      "clarification": null,
+      "safety_and_honesty": {
+        "status": "pass",
+        "rationale": "No fabricated figures are presented as certain."
+      },
+      "findings": [],
+      "overall_verdict": "pass"
+    }
+  ],
   "expected": {
     "verdict": "fail",
     "evaluation_status": "evaluated",
-    "llm_calls": 0,
+    "llm_calls": 1,
     "finding_categories": [
       "syntax_error"
     ],
     "bug_candidates": 1,
-    "llm_verdict": null
+    "llm_verdict": "pass"
   }
 }

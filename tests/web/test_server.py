@@ -22,8 +22,16 @@ PERSONA_YAML = (REPO_ROOT / "data" / "personas" / "finance_controller.yaml").rea
 def config_path(tmp_path: Path) -> Path:
     data = yaml.safe_load((REPO_ROOT / "config" / "app.fake.yaml").read_text(encoding="utf-8"))
     data["llm"]["fake_script_path"] = str(REPO_ROOT / data["llm"]["fake_script_path"])
-    data["product"]["fixture_path"] = str(REPO_ROOT / data["product"]["fixture_path"])
-    data["inputs"] = {k: str(REPO_ROOT / v) for k, v in data["inputs"].items()}
+    data["product_adapter"] = {
+        "type": "fixture",
+        "options": {
+            "path": str(REPO_ROOT / "data/fixtures/product_responses/sample_responses.json")
+        },
+    }
+    data["inputs"] = {
+        k: ([str(REPO_ROOT / x) for x in v] if isinstance(v, list) else str(REPO_ROOT / v))
+        for k, v in data["inputs"].items()
+    }
     data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
     path = tmp_path / "app.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
@@ -64,7 +72,8 @@ def test_config_and_samples(client: TestClient) -> None:
     assert config["llm_provider"] == "fake"
     assert config["steps"] == ["index", "scenarios", "questions", "execute", "evaluate"]
     samples = client.get("/api/samples").json()
-    assert set(samples) == {"persona", "product", "catalog"}
+    assert set(samples) == {"persona", "product", "reference_index"}
+    assert samples["reference_index"]["parsed"]["index_id"] == "REFIDX_SAMPLE_CARD_SPEND"
     assert samples["persona"]["parsed"]["id"] == "finance_controller"
     assert "finance_controller" in samples["persona"]["raw"]
 
@@ -94,7 +103,7 @@ def test_create_run_with_upload_and_queries(client: TestClient, config_path: Pat
     assert state["sources"] == {
         "persona": "uploaded: my_persona.yaml",
         "product": "sample",
-        "catalog": "sample",
+        "reference_index": "sample",
     }
     assert state["persona_queries"] == ["How much did we spend on travel?", "Top vendors?"]
 
@@ -111,8 +120,8 @@ def test_create_run_with_upload_and_queries(client: TestClient, config_path: Pat
 
 
 def test_create_run_rejects_bad_upload_and_too_many_queries(client: TestClient) -> None:
-    bad = client.post("/api/runs", files={"catalog": ("c.yaml", b"tables: [")}, data={})
-    assert bad.status_code == 400 and "not valid YAML" in bad.json()["detail"]
+    bad = client.post("/api/runs", files={"reference_index": ("i.json", b"{oops")}, data={})
+    assert bad.status_code == 400 and "not valid JSON" in bad.json()["detail"]
     many = client.post("/api/runs", data={"persona_queries": "\n".join(f"q{i}" for i in range(60))})
     assert many.status_code == 400 and "At most 50" in many.json()["detail"]
 
@@ -150,14 +159,14 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
 
     after_execute = _steps(client, run_id, "execute")
     by_outcome = {r["product_outcome"]: r for r in after_execute["rows"]}
-    assert set(by_outcome) == {"sql_generated", "clarification", "denied"}
-    assert "JOIN employees" in by_outcome["sql_generated"]["generated_sql"]
+    assert set(by_outcome) == {"answered", "clarification", "denied"}
+    assert "JOIN employees" in by_outcome["answered"]["generated_sql"]
     assert by_outcome["denied"]["product_message"] == "Forecasting is not supported yet."
     assert after_execute["detail"]["product"] == "mock (contract)"
 
     final = _steps(client, run_id, "evaluate")
     verdicts = sorted(r["final_verdict"] or "-" for r in final["rows"])
-    assert verdicts == ["-", "fail", "pass"]
+    assert verdicts == ["fail", "pass", "pass"]  # the justified denial passes (C10)
     failed = next(r for r in final["rows"] if r["final_verdict"] == "fail")
     assert failed["bug_ids"] == "BUG_001" and "join_correctness" in failed["failed_checks"]
     assert final["state"]["steps_done"] == [
@@ -190,7 +199,7 @@ def test_execute_without_contract_uses_fixture_product(client: TestClient) -> No
     body = _steps(client, run_id, "index", "scenarios", "questions", "execute")
     assert body["detail"]["product"] == "fixture"
     assert {r["product_outcome"] for r in body["rows"]} == {
-        "sql_generated",
+        "answered",
         "clarification",
         "denied",
     }

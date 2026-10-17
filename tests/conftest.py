@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 import warnings
 from pathlib import Path
@@ -10,16 +9,17 @@ from typing import Any
 import pytest
 
 from synthetic_user.core.config import AppConfig, load_config
-from synthetic_user.core.loaders import load_catalog, load_persona, load_product
+from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceCatalog, ReferenceIndex
+from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.references.loader import load_reference_index
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_CONFIG = REPO_ROOT / "config" / "app.yaml"
-SAMPLE_CATALOG = REPO_ROOT / "data" / "references" / "sample_catalog.yaml"
-SAMPLE_INDEX = REPO_ROOT / "tests" / "fixtures" / "sample_reference_index.json"
+SAMPLE_INDEX = REPO_ROOT / "data" / "references" / "sample_card_spend_index.json"
 
 
 @pytest.fixture(autouse=True)
@@ -45,19 +45,9 @@ def app_config() -> AppConfig:
 
 
 @pytest.fixture
-def sample_catalog() -> ReferenceCatalog:
-    return load_catalog(SAMPLE_CATALOG)
-
-
-@pytest.fixture
 def sample_index() -> ReferenceIndex:
-    return ReferenceIndex.model_validate_json(SAMPLE_INDEX.read_text(encoding="utf-8"))
-
-
-@pytest.fixture
-def sample_draft(sample_index: ReferenceIndex) -> dict[str, Any]:
-    """What a well-behaved LLM returns for the sample catalog (no ids/versions/timestamps)."""
-    return copy.deepcopy(sample_index.model_dump(mode="json", include={"tables", "uncertainties"}))
+    """The pre-built sample reference index (card spend), loaded like a user's file."""
+    return load_reference_index(SAMPLE_INDEX)
 
 
 SAMPLE_PERSONA = REPO_ROOT / "data" / "personas" / "finance_controller.yaml"
@@ -75,6 +65,12 @@ def sample_product() -> ProductDescription:
 
 
 @pytest.fixture
+def sample_chatbot() -> ProductDescription:
+    """A non-SQL product (text answers only)."""
+    return load_product(REPO_ROOT / "data" / "products" / "sample_chatbot.yaml")
+
+
+@pytest.fixture
 def scenario_drafts() -> list[dict[str, Any]]:
     """Three distinct, valid scenario drafts for the sample index:
     [0] supported multi-table ranking, [1] supported single-table trend, [2] unsupported."""
@@ -83,11 +79,16 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "business_goal": "Identify which employees drive the most corporate card spend "
             "so finance can review outliers",
             "title": "Top spenders by employee",
+            "success_criteria": [
+                "names the employees ranked by total card spend",
+                "keeps amounts separate per currency or states which currency is used",
+                "covers the requested time period",
+            ],
             "task_type": "ranking",
             "capability": "supported",
             "capability_rationale": "Product supports 'ranking and top-N' and 'joins over "
             "documented relationships'",
-            "cheat_sheet": {
+            "reference_cheat_sheet": {
                 "tables": ["card_transactions", "employees"],
                 "columns": [
                     "card_transactions.amount",
@@ -122,11 +123,15 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "business_goal": "Track how monthly card spend per merchant category evolves "
             "to spot budget drift",
             "title": "Monthly spend trend by merchant category",
+            "success_criteria": [
+                "shows card spend per merchant category for each month",
+                "covers the requested period",
+            ],
             "task_type": "trend",
             "capability": "supported",
             "capability_rationale": "Product supports 'single-table aggregation' and "
             "'filtering by date range'",
-            "cheat_sheet": {
+            "reference_cheat_sheet": {
                 "tables": ["card_transactions"],
                 "columns": [
                     "card_transactions.amount",
@@ -148,10 +153,14 @@ def scenario_drafts() -> list[dict[str, Any]]:
         {
             "business_goal": "Forecast next quarter's card spend to plan the budget",
             "title": "Card spend forecast",
+            "success_criteria": [
+                "states clearly whether a forecast can be produced",
+                "does not present invented future figures as facts",
+            ],
             "task_type": "other",
             "capability": "unsupported",
             "capability_rationale": "Product lists 'forecasting' under not_supported_yet",
-            "cheat_sheet": {
+            "reference_cheat_sheet": {
                 "tables": ["card_transactions"],
                 "columns": ["card_transactions.amount", "card_transactions.transaction_date"],
                 "metrics": [
@@ -179,7 +188,8 @@ def sample_scenarios(
             id=f"SCN_{i:03d}",
             persona_id="finance_controller",
             product_id="sample_nl2sql",
-            reference_index_id=sample_index.index_id,
+            mode=GenerationMode.GROUNDED,
+            reference_index_id=sample_index.versioned_id,
             signature=f"sig-{i}",
             **draft,
         )

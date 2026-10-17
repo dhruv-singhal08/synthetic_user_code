@@ -3,13 +3,19 @@
     "id": "SCN_001",
     "persona_id": "finance_controller",
     "product_id": "sample_nl2sql",
+    "mode": "grounded",
     "reference_index_id": "IDX_20261013_120000_0001",
     "business_goal": "Identify which employees drive the most corporate card spend so finance can review outliers",
     "title": "Top spenders by employee",
     "task_type": "ranking",
     "capability": "supported",
     "capability_rationale": "Product supports 'ranking and top-N' and 'joins over documented relationships'",
-    "cheat_sheet": {
+    "success_criteria": [
+      "names the employees ranked by total card spend",
+      "keeps amounts separate per currency or states which currency is used",
+      "covers the requested time period"
+    ],
+    "reference_cheat_sheet": {
       "tables": [
         "card_transactions",
         "employees"
@@ -65,13 +71,18 @@
     "id": "SCN_002",
     "persona_id": "finance_controller",
     "product_id": "sample_nl2sql",
+    "mode": "grounded",
     "reference_index_id": "IDX_20261013_120000_0001",
     "business_goal": "Track how monthly card spend per merchant category evolves to spot budget drift",
     "title": "Monthly spend trend by merchant category",
     "task_type": "trend",
     "capability": "supported",
     "capability_rationale": "Product supports 'single-table aggregation' and 'filtering by date range'",
-    "cheat_sheet": {
+    "success_criteria": [
+      "shows card spend per merchant category for each month",
+      "covers the requested period"
+    ],
+    "reference_cheat_sheet": {
       "tables": [
         "card_transactions"
       ],
@@ -107,5 +118,47 @@
       "terms_to_avoid": []
     },
     "signature": "benchmark-2"
+  },
+  {
+    "id": "SCN_003",
+    "persona_id": "finance_controller",
+    "product_id": "sample_policy_chatbot",
+    "mode": "ungrounded",
+    "reference_index_id": null,
+    "reference_cheat_sheet": null,
+    "business_goal": "Find out how much may be spent per night on a hotel in Paris before booking",
+    "title": "Hotel limit for a Paris trip",
+    "task_type": "explanation",
+    "capability": "supported",
+    "capability_rationale": "Product supports 'explain per-diem and hotel limits'",
+    "success_criteria": [
+      "states a nightly hotel limit for Paris",
+      "says whether taxes are included"
+    ],
+    "question_guidance": {
+      "intent": "learn the hotel cap for Paris"
+    },
+    "signature": "explanation|book hotel limit night paris spent|supported"
+  },
+  {
+    "id": "SCN_004",
+    "persona_id": "finance_controller",
+    "product_id": "sample_policy_chatbot",
+    "mode": "ungrounded",
+    "reference_index_id": null,
+    "reference_cheat_sheet": null,
+    "business_goal": "Get an expense report approved without leaving the chat",
+    "title": "Approve my expense report",
+    "task_type": "how_to",
+    "capability": "unsupported",
+    "capability_rationale": "Product lists 'submitting or approving expense reports' under not_supported_yet",
+    "success_criteria": [
+      "says clearly that it cannot approve reports",
+      "explains where approval is done"
+    ],
+    "question_guidance": {
+      "intent": "approve a report via chat"
+    },
+    "signature": "how_to|approved chat expense leaving report without|unsupported"
   }
 ]

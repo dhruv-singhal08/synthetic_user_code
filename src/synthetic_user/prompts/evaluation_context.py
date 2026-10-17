@@ -21,8 +21,10 @@ def evaluation_context(
         include={"utterance", "intended_goal", "intent", "expectations", "interpretation_notes"},
     )
     scenario_json = scenario.model_dump(
-        mode="json", include={"business_goal", "title", "task_type", "capability"}
+        mode="json",
+        include={"business_goal", "title", "task_type", "capability", "success_criteria"},
     )
+    sheet = scenario.reference_cheat_sheet
     snapshot_json = snapshot.model_dump(
         mode="json", include={"tables", "relationships", "missing_references"}
     )
@@ -36,9 +38,10 @@ Scenario:
 {json.dumps(scenario_json, indent=2)}
 
 Reference cheat sheet (a plausible path - a REFERENCE, not a required structure):
-{json.dumps(scenario.cheat_sheet.model_dump(mode="json"), indent=2)}
+{json.dumps(sheet.model_dump(mode="json") if sheet else None, indent=2)}
 
-Reference snapshot (AUTHORITATIVE schema metadata):
+Reference snapshot (AUTHORITATIVE schema metadata; table business_rules and calculated_fields
+are authoritative domain rules the SQL must follow, e.g. default currency or count definitions):
 {json.dumps(snapshot_json, indent=2)}
 
 Product under test:

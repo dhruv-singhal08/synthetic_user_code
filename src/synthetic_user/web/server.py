@@ -14,6 +14,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from synthetic_user.adapters.base import ProductAdapter, UnavailableAdapter
+from synthetic_user.adapters.contract import ProductContract, request_contract
+from synthetic_user.adapters.mock_llm import MockLLMAdapter
+from synthetic_user.adapters.registry import create_adapter
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import (
     ArtifactNotFoundError,
@@ -25,10 +29,6 @@ from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline
-from synthetic_user.product.base import ProductClient, UnavailableProductClient
-from synthetic_user.product.contract import ProductContract, request_contract
-from synthetic_user.product.factory import create_product_client
-from synthetic_user.product.mock_client import MockProductClient
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.web.workspace import INPUT_KINDS, RESULTS_CSV, Upload, Workspace, parse_upload
 
@@ -70,7 +70,7 @@ def create_app(settings: AppConfig) -> FastAPI:
         return {
             "llm_provider": settings.llm.provider,
             "llm_model": settings.llm.model,
-            "product_client": settings.product.client,
+            "product_adapter": settings.product_adapter.type,
             "sql_dialect": settings.sql.dialect,
             "scenario_count": settings.generation.scenario.scenario_count,
             "question_count": settings.generation.question.question_count,
@@ -79,10 +79,13 @@ def create_app(settings: AppConfig) -> FastAPI:
 
     @app.get("/api/samples")
     async def samples() -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for kind in INPUT_KINDS:
-            text, model = workspace.sample(kind)
-            result[kind] = {"raw": text, "parsed": model.model_dump(mode="json")}
+        """Only the persona has a sample; product description and reference index are
+        upload-only."""
+        result: dict[str, Any] = dict.fromkeys(INPUT_KINDS)
+        sample = workspace.sample("persona")
+        if sample is not None:
+            text, model = sample
+            result["persona"] = {"raw": text, "parsed": model.model_dump(mode="json")}
         return result
 
     @app.post("/api/preview/{kind}")
@@ -97,13 +100,20 @@ def create_app(settings: AppConfig) -> FastAPI:
     async def create_run(
         persona: Annotated[UploadFile | None, File()] = None,
         product: Annotated[UploadFile | None, File()] = None,
-        catalog: Annotated[UploadFile | None, File()] = None,
+        reference_index: Annotated[UploadFile | None, File()] = None,
         persona_queries: Annotated[str, Form()] = "",
+        use_reference_index: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
         uploads: dict[str, Upload | None] = {}
-        for kind, file in (("persona", persona), ("product", product), ("catalog", catalog)):
+        for kind, file in (
+            ("persona", persona),
+            ("product", product),
+            ("reference_index", reference_index),
+        ):
             uploads[kind] = Upload(file.filename or kind, await file.read()) if file else None
-        state = workspace.create_run(uploads, persona_queries)
+        state = workspace.create_run(
+            uploads, persona_queries, use_reference_index=use_reference_index
+        )
         return {"state": state.model_dump(mode="json"), **workspace.results(state.run_id)}
 
     @app.get("/api/runs/{run_id}")
@@ -130,29 +140,34 @@ def create_app(settings: AppConfig) -> FastAPI:
         count = body.count if body else None
         llm = create_llm_client(settings)
         product = (
-            _product_client(settings, llm, state.contract, inputs)
+            _product_adapter(settings, llm, state.contract, inputs)
             if step is Step.EXECUTE
-            else UnavailableProductClient()
+            else UnavailableAdapter()
         )
         pipeline = SyntheticUserPipeline(
             settings, llm, product, store, logger=get_run_logger("synthetic_user.web", run_id)
         )
         detail: dict[str, Any] = {}
 
-        if step is Step.INDEX:
-            result = await pipeline.build_reference_index(inputs.catalog)
-            state = state.model_copy(update={"reference_index_id": result.index.index_id})
-            detail = {"reused": result.reused, "index": result.index.model_dump(mode="json")}
-        elif step is Step.SCENARIOS:
-            if state.reference_index_id is None:
-                raise ConfigError("Build the reference index first")
-            index = store.read_reference_index(
-                inputs.catalog.catalog_id, inputs.catalog.catalog_version, state.reference_index_id
-            )
-            scenario_step = await pipeline.generate_scenarios(
-                run_id, inputs, index, count=count, force=True
+        if step in (Step.INDEX, Step.SCENARIOS):
+            # The index check (no LLM) runs automatically before scenarios.
+            index_step = pipeline.check_reference_index(inputs)
+            index_id = index_step.index.versioned_id if index_step.index else None
+            state = workspace.mark_done(
+                state.model_copy(update={"reference_index_id": index_id}), Step.INDEX
             )
             detail = {
+                "mode": index_step.mode.value,
+                "reference_index_id": index_id,
+                "tables": len(index_step.index.tables) if index_step.index else 0,
+                "warnings": index_step.warnings,
+            }
+        if step is Step.SCENARIOS:
+            scenario_step = await pipeline.generate_scenarios(
+                run_id, inputs, count=count, force=True
+            )
+            detail = {
+                **detail,
                 "accepted": len(scenario_step.accepted),
                 "rejected": len(scenario_step.rejected),
             }
@@ -165,9 +180,12 @@ def create_app(settings: AppConfig) -> FastAPI:
                 "rejected": len(question_step.rejected),
             }
         elif step is Step.EXECUTE:
-            execute_step = await pipeline.execute_questions(run_id, inputs, force=True)
+            try:
+                execute_step = await pipeline.execute_questions(run_id, inputs, force=True)
+            finally:
+                await pipeline.aclose()
             detail = {
-                "product": "mock (contract)" if state.contract else settings.product.client,
+                "product": "mock (contract)" if state.contract else product.name,
                 "executions": len(execute_step.executions),
             }
         else:
@@ -200,11 +218,13 @@ def create_app(settings: AppConfig) -> FastAPI:
     return app
 
 
-def _product_client(
+def _product_adapter(
     settings: AppConfig, llm: LLMClient, contract: ProductContract | None, inputs: RunInputs
-) -> ProductClient:
+) -> ProductAdapter:
     """Contract requested from a URL -> mock product behind that contract; else the
-    configured product client (fixture)."""
+    configured product adapter."""
     if contract is not None:
-        return MockProductClient(llm, contract, inputs.catalog, inputs.product)
-    return create_product_client(settings)
+        if inputs.reference_index is None:
+            raise ConfigError("The mock product needs a reference index (its database schema)")
+        return MockLLMAdapter(llm, contract, inputs.reference_index, inputs.product)
+    return create_adapter(settings)

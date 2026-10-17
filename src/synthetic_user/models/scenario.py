@@ -1,9 +1,9 @@
-"""Scenarios: what the synthetic user wants to find out, plus a reference cheat sheet."""
+"""Scenarios: what the synthetic user wants to achieve; grounded ones carry a cheat sheet."""
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
 from pydantic import Field, model_validator
 
@@ -15,6 +15,7 @@ from synthetic_user.models.base import (
     table_of,
 )
 from synthetic_user.models.reference import VerificationStatus
+from synthetic_user.models.run import GenerationMode, mode_mismatch
 
 
 class TaskType(StrEnum):
@@ -25,6 +26,12 @@ class TaskType(StrEnum):
     FILTER_LOOKUP = "filter_lookup"
     DISTRIBUTION = "distribution"
     ANOMALY_INVESTIGATION = "anomaly_investigation"
+    # Product-agnostic tasks (chatbots, search, summarisers, ...).
+    EXPLANATION = "explanation"
+    HOW_TO = "how_to"
+    SUMMARIZATION = "summarization"
+    RECOMMENDATION = "recommendation"
+    TROUBLESHOOTING = "troubleshooting"
     OTHER = "other"
 
 
@@ -79,15 +86,25 @@ class QuestionGenerationGuidance(StrictModel):
     terms_to_avoid: list[NonEmptyStr] = Field(default_factory=list)
 
 
+SuccessCriteria = Annotated[
+    list[NonEmptyStr],
+    Field(min_length=1, description="what a goal-complete answer must contain"),
+]
+
+
 class ScenarioDraft(StrictModel):
-    """LLM-facing scenario: business goal first; no ids, parent ids or signature."""
+    """LLM-facing scenario: business goal first; no ids, parent ids, mode or signature.
+
+    reference_cheat_sheet is present only in grounded mode (the node enforces that).
+    """
 
     business_goal: NonEmptyStr
     title: NonEmptyStr
     task_type: TaskType
     capability: CapabilityClassification
     capability_rationale: NonEmptyStr
-    cheat_sheet: ReferenceCheatSheet
+    success_criteria: SuccessCriteria
+    reference_cheat_sheet: ReferenceCheatSheet | None = None
     question_guidance: QuestionGenerationGuidance
 
 
@@ -101,15 +118,28 @@ class Scenario(StrictModel):
     id: NonEmptyStr = Field(pattern=r"^SCN_\d{3,}$")
     persona_id: NonEmptyStr
     product_id: NonEmptyStr
-    reference_index_id: NonEmptyStr
+    mode: GenerationMode
+    reference_index_id: NonEmptyStr | None = None
     business_goal: NonEmptyStr
     title: NonEmptyStr
     task_type: TaskType
     capability: CapabilityClassification
     capability_rationale: NonEmptyStr
-    cheat_sheet: ReferenceCheatSheet
+    success_criteria: SuccessCriteria
+    reference_cheat_sheet: ReferenceCheatSheet | None = None
     question_guidance: QuestionGenerationGuidance
     signature: NonEmptyStr
+
+    @model_validator(mode="after")
+    def _reference_matches_mode(self) -> Self:
+        problems = [
+            mode_mismatch(self.mode, self.reference_cheat_sheet is not None, "a cheat sheet"),
+            mode_mismatch(self.mode, self.reference_index_id is not None, "a reference_index_id"),
+        ]
+        found = [p for p in problems if p]
+        if found:
+            raise ValueError(f"scenario {self.id}: {'; '.join(found)}")
+        return self
 
 
 class RejectedScenario(StrictModel):

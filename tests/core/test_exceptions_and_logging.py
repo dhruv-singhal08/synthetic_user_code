@@ -19,7 +19,7 @@ from synthetic_user.core.logging import get_run_logger, parse_log_level
         exceptions.ReferenceIntegrityError,
         exceptions.ArtifactNotFoundError,
         exceptions.ArtifactIntegrityError,
-        exceptions.ProductClientError,
+        exceptions.ProductAdapterError,
         exceptions.SQLAnalysisError,
     ],
 )

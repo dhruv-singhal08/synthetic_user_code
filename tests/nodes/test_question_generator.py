@@ -6,14 +6,16 @@ from typing import Any
 import pytest
 
 from synthetic_user.core.config import AppConfig
+from synthetic_user.core.exceptions import ArtifactIntegrityError
 from synthetic_user.core.identifiers import SequentialIdGenerator
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.base import AmbiguityLevel
 from synthetic_user.models.persona import ExpertiseLevel, Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionGenerationResult
-from synthetic_user.models.reference import ReferenceCatalog
-from synthetic_user.models.scenario import Scenario
+from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.run import GenerationMode
+from synthetic_user.models.scenario import Scenario, TaskType
 from synthetic_user.nodes.question_generator import SURPLUS, VAGUE_NOT_ALLOWED, QuestionGenerator
 from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
 from synthetic_user.references.snapshot import build_snapshot
@@ -57,11 +59,11 @@ class Env:
         persona: Persona,
         product: ProductDescription,
         scenarios: list[Scenario],
-        catalog: ReferenceCatalog,
+        index: ReferenceIndex,
         settings: AppConfig,
     ) -> None:
         self.persona, self.product, self.scenarios = persona, product, scenarios
-        self.catalog, self.settings = catalog, settings
+        self.index, self.settings = index, settings
 
     async def run(
         self,
@@ -82,7 +84,7 @@ class Env:
             persona or self.persona,
             self.product,
             self.scenarios[:scenarios],
-            self.catalog,
+            self.index,
             count=count,
         )
 
@@ -92,10 +94,10 @@ def env(
     sample_persona: Persona,
     sample_product: ProductDescription,
     sample_scenarios: list[Scenario],
-    sample_catalog: ReferenceCatalog,
+    sample_index: ReferenceIndex,
     app_config: AppConfig,
 ) -> Env:
-    return Env(sample_persona, sample_product, sample_scenarios, sample_catalog, app_config)
+    return Env(sample_persona, sample_product, sample_scenarios, sample_index, app_config)
 
 
 # --- ids and goal ---------------------------------------------------------------------------
@@ -126,6 +128,7 @@ async def test_ids_and_goal_set_by_code(env: Env) -> None:
     assert result.questions[2].intended_goal == env.scenarios[1].business_goal
     assert [s.snapshot_id for s in result.snapshots] == ["SNAP_SCN_001", "SNAP_SCN_002"]
     assert not result.rejected
+    assert {x.mode for x in result.questions} == {"grounded"}
 
 
 async def test_llm_cannot_set_ids_or_goal(env: Env) -> None:
@@ -186,7 +189,7 @@ async def test_leak_kept_as_warning_when_not_rejecting(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Spend per currency_code last month?"))])
     result = await env.run(llm, count=1, reject_schema_leaks=False)
     assert result.questions[0].schema_leak_warnings == [
-        "mentions catalog identifier 'currency_code'"
+        "mentions reference index identifier 'currency_code'"
     ]
     assert len(llm.calls) == 1
 
@@ -293,10 +296,10 @@ def test_prompt_contents(
     sample_persona: Persona,
     sample_product: ProductDescription,
     sample_scenarios: list[Scenario],
-    sample_catalog: ReferenceCatalog,
+    sample_index: ReferenceIndex,
 ) -> None:
     scenario = sample_scenarios[0]
-    snapshot = build_snapshot(sample_catalog, scenario.cheat_sheet, "SNAP_SCN_001")
+    snapshot = build_snapshot(sample_index, scenario.reference_cheat_sheet, "SNAP_SCN_001")
     options = QuestionPromptOptions(
         count=3, ambiguity_level=AmbiguityLevel.HIGH, language="en", allow_vague_questions=False
     )
@@ -316,10 +319,116 @@ def test_prompt_contents(
     assert sample_persona.behavior.style in user
     assert "Mostly vague or investigative" in user
     assert 'style "vague" is not allowed' in user
-    assert "No table names, no column names" in user
+    assert "Plain language only: no internal identifiers" in user
+    assert "Reference snapshot (for YOUR understanding only" in user
     assert "several valid" in user
     for example in sample_persona.example_utterances:
         assert f"- {example}" in user.split("## PROHIBITED", 1)[1]
     contract = user.split("## OUTPUT CONTRACT", 1)[1].split("## PROHIBITED", 1)[0]
     for forbidden in ('"question_id":', '"intended_goal":', '"schema_leak_warnings":'):
         assert forbidden not in contract
+
+
+# --- v2.1: success criteria ------------------------------------------------------------------
+
+
+async def test_success_criteria_copied_from_scenario_or_refined(env: Env) -> None:
+    refined = q("Which staff spend most on travel?")
+    refined["expectations"]["success_criteria"] = ["names the top travel spenders"]
+    llm = FakeLLMClient([batch(q("Who are our biggest card spenders this quarter?"), refined)])
+    result = await env.run(llm)
+    copied, kept = result.questions
+    assert copied.expectations.success_criteria == env.scenarios[0].success_criteria
+    assert kept.expectations.success_criteria == ["names the top travel spenders"]
+
+
+def _ungrounded(scenario: Scenario) -> Scenario:
+    return scenario.model_copy(
+        update={
+            "mode": GenerationMode.UNGROUNDED,
+            "reference_index_id": None,
+            "reference_cheat_sheet": None,
+        }
+    )
+
+
+async def _generate(
+    env: Env,
+    llm: FakeLLMClient,
+    scenarios: list[Scenario],
+    index: ReferenceIndex | None,
+    **cfg: Any,
+) -> QuestionGenerationResult:
+    generator = QuestionGenerator(
+        llm,
+        _settings(env.settings, **cfg),
+        logging.getLogger("t"),
+        id_generator=SequentialIdGenerator(),
+    )
+    return await generator.generate(env.persona, env.product, scenarios, index, count=2)
+
+
+async def test_ungrounded_questions_have_mode_and_no_snapshot(env: Env) -> None:
+    llm = FakeLLMClient([batch(q("Who spends most on cards?"), q("Which team overspends?"))])
+    result = await _generate(env, llm, [_ungrounded(env.scenarios[0])], None)
+    assert [x.question_id for x in result.questions] == ["Q_001", "Q_002"]
+    assert all(x.mode == "ungrounded" and x.reference_snapshot_id is None for x in result.questions)
+    assert result.snapshots == []
+    user = llm.calls[0].user
+    assert "Reference snapshot" not in user and "cheat sheet" not in user
+    assert "No reference data is available" in user
+
+
+async def test_leaks_only_checked_in_grounded_mode(env: Env) -> None:
+    leaky = "What is the total amount by currency_code in card_transactions?"
+    grounded = await _generate(
+        env, FakeLLMClient([batch(q(leaky))] * 3), env.scenarios[:1], env.index
+    )
+    assert not grounded.questions and "schema leak" in grounded.rejected[0].reasons[0]
+    ungrounded = await _generate(
+        env, FakeLLMClient([batch(q(leaky))]), [_ungrounded(env.scenarios[0])], env.index
+    )
+    assert [x.schema_leak_warnings for x in ungrounded.questions] == [[]]
+
+
+async def test_mixed_modes_snapshot_only_for_grounded(env: Env) -> None:
+    llm = FakeLLMClient([batch(q("Top spenders this quarter?")), batch(q("Monthly trend please?"))])
+    scenarios = [env.scenarios[0], _ungrounded(env.scenarios[1])]
+    result = await _generate(env, llm, scenarios, env.index)
+    assert [(x.mode, x.reference_snapshot_id) for x in result.questions] == [
+        ("grounded", "SNAP_SCN_001"),
+        ("ungrounded", None),
+    ]
+    assert [s.snapshot_id for s in result.snapshots] == ["SNAP_SCN_001"]
+
+
+async def test_grounded_scenario_without_index_is_an_error(env: Env) -> None:
+    with pytest.raises(ArtifactIntegrityError, match="grounded but no reference index"):
+        await _generate(env, FakeLLMClient([]), env.scenarios[:1], None)
+
+
+async def test_chatbot_product_questions_generated(
+    env: Env, sample_chatbot: ProductDescription
+) -> None:
+    scenario = _ungrounded(env.scenarios[0]).model_copy(
+        update={
+            "product_id": "sample_policy_chatbot",
+            "business_goal": "Find out the hotel cap for a Paris business trip",
+            "title": "Hotel limit for a Paris trip",
+            "task_type": TaskType.EXPLANATION,
+            "success_criteria": ["states the nightly hotel limit", "says if taxes are included"],
+        }
+    )
+    llm = FakeLLMClient([batch(q("How much can I spend per night on a hotel in Paris?"))])
+    generator = QuestionGenerator(
+        llm, env.settings, logging.getLogger("t"), id_generator=SequentialIdGenerator()
+    )
+    result = await generator.generate(env.persona, sample_chatbot, [scenario], None, count=1)
+    question = result.questions[0]
+    assert question.intended_goal == scenario.business_goal
+    assert question.expectations.success_criteria == scenario.success_criteria
+    system, user = llm.calls[0].system, llm.calls[0].user
+    assert "product type\n(chatbot) is context only" in user
+    assert "SQL" not in system
+    template = user.split("## CONSTRAINTS", 1)[1].split("## OUTPUT CONTRACT", 1)[0]
+    assert "SQL" not in template

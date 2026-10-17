@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceCatalog
+from synthetic_user.models.reference import ReferenceIndex
 
 SYSTEM = (
     "You are a MOCK NL2SQL product used for testing. Answer the user's question about the "
@@ -17,21 +17,23 @@ SYSTEM = (
 
 
 def build_mock_product_prompt(
-    question: str, catalog: ReferenceCatalog, product: ProductDescription, sql_dialect: str
+    question: str, index: ReferenceIndex, product: ProductDescription, sql_dialect: str
 ) -> tuple[str, str]:
     schema = {
         "tables": [
             {
                 "name": t.name,
-                "description": t.description,
+                "description": t.business_purpose,
                 "columns": [
                     {"name": c.name, "type": c.data_type, "description": c.description}
                     for c in t.columns
                 ],
             }
-            for t in catalog.tables
+            for t in index.tables
         ],
-        "relationships": [r.model_dump(mode="json") for r in catalog.relationships],
+        "relationships": [
+            r.model_dump(mode="json", exclude={"extras"}) for r in index.relationships
+        ],
     }
     capabilities = product.model_dump(mode="json", include={"supported", "not_supported_yet"})
     user = (

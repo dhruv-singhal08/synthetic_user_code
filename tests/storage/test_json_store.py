@@ -9,11 +9,11 @@ from pydantic import TypeAdapter
 
 from synthetic_user.core.exceptions import ArtifactIntegrityError, ArtifactNotFoundError
 from synthetic_user.models.execution import (
-    ExecutionResult,
-    SqlGeneratedResult,
-    TimeoutResult,
+    AnsweredResponse,
+    ExecutionRecord,
+    TimeoutResponse,
 )
-from synthetic_user.models.reference import IndexedTable, ReferenceIndex
+from synthetic_user.models.reference import IndexColumn, IndexTable, ReferenceIndex
 from synthetic_user.storage import json_store
 from synthetic_user.storage.json_store import JsonArtifactStore
 
@@ -24,10 +24,14 @@ def _index(index_id: str = "IDX_001") -> ReferenceIndex:
         index_version="1",
         source_catalog_id="sample_card_spend",
         source_catalog_version="1.0",
-        tables=[IndexedTable(name="card_transactions", business_purpose="card spend")],
+        tables=[
+            IndexTable(
+                name="card_transactions",
+                business_purpose="card spend",
+                columns=[IndexColumn(name="amount")],
+            )
+        ],
         generated_at=datetime(2026, 10, 13, tzinfo=UTC),
-        llm_provider="fake",
-        llm_model="fake",
     )
 
 
@@ -54,17 +58,30 @@ def test_union_round_trip_via_adapter(tmp_path: Path) -> None:
     common = {
         "question_id": "Q_001",
         "product_id": "p",
+        "adapter": "fixture",
         "submitted_question": "q",
         "started_at": datetime(2026, 10, 13, tzinfo=UTC),
     }
-    results: list[ExecutionResult] = [
-        SqlGeneratedResult(execution_id="EXE_001", sql="SELECT 1", **common),  # type: ignore[arg-type]
-        TimeoutResult(execution_id="EXE_002", **common),  # type: ignore[arg-type]
+    records = [
+        ExecutionRecord.model_validate(
+            {
+                "execution_id": "EXE_001",
+                "response": {
+                    "outcome": "answered",
+                    "artifacts": [{"kind": "sql", "content": "SELECT 1"}],
+                },
+                **common,
+            }
+        ),
+        ExecutionRecord.model_validate(
+            {"execution_id": "EXE_002", "response": {"outcome": "timeout"}, **common}
+        ),
     ]
-    adapter: TypeAdapter[list[ExecutionResult]] = TypeAdapter(list[ExecutionResult])
-    store.write_with("executions.json", results, adapter)
+    adapter: TypeAdapter[list[ExecutionRecord]] = TypeAdapter(list[ExecutionRecord])
+    store.write_with("executions.json", records, adapter)
     loaded = store.read_with("executions.json", adapter)
-    assert [type(r) for r in loaded] == [SqlGeneratedResult, TimeoutResult]
+    assert [type(r.response) for r in loaded] == [AnsweredResponse, TimeoutResponse]
+    assert loaded == records
 
 
 def test_overwrite_replaces_content(tmp_path: Path) -> None:
@@ -122,35 +139,3 @@ def test_paths_cannot_escape_store(tmp_path: Path, bad: str) -> None:
 def test_absolute_path_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="inside the store"):
         JsonArtifactStore(tmp_path).path_for(tmp_path / "x.json")
-
-
-# --- reusable reference indexes ----------------------------------------------------------
-
-
-def test_reference_index_location_and_round_trip(tmp_path: Path) -> None:
-    store = JsonArtifactStore(tmp_path)
-    path = store.write_reference_index(_index())
-    assert path == tmp_path / "reference_indexes" / "sample_card_spend_v1.0" / "IDX_001.json"
-    assert store.read_reference_index("sample_card_spend", "1.0", "IDX_001") == _index()
-
-
-def test_list_reference_indexes(tmp_path: Path) -> None:
-    store = JsonArtifactStore(tmp_path)
-    assert store.list_reference_indexes("sample_card_spend", "1.0") == []
-    store.write_reference_index(_index("IDX_002"))
-    store.write_reference_index(_index("IDX_001"))
-    assert store.list_reference_indexes("sample_card_spend", "1.0") == ["IDX_001", "IDX_002"]
-
-
-def test_reference_index_mismatch_detected(tmp_path: Path) -> None:
-    store = JsonArtifactStore(tmp_path)
-    src = store.write_reference_index(_index("IDX_001"))
-    src.rename(src.with_name("IDX_009.json"))
-    with pytest.raises(ArtifactIntegrityError, match="does not match"):
-        store.read_reference_index("sample_card_spend", "1.0", "IDX_009")
-
-
-@pytest.mark.parametrize("bad", ["../x", "a/b", "", ".hidden"])
-def test_unsafe_index_components_rejected(tmp_path: Path, bad: str) -> None:
-    with pytest.raises(ValueError, match="not safe"):
-        JsonArtifactStore(tmp_path).reference_index_path(bad, "1.0", "IDX_001")

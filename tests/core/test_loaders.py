@@ -6,8 +6,8 @@ import pytest
 
 from synthetic_user.core.config import load_config
 from synthetic_user.core.exceptions import InputAssetError
-from synthetic_user.core.loaders import load_catalog, load_persona, load_product
-from synthetic_user.models.reference import Cardinality, VerificationStatus
+from synthetic_user.core.loaders import load_persona, load_product
+from synthetic_user.references.loader import load_reference_index
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA = REPO_ROOT / "data"
@@ -25,29 +25,6 @@ def test_product_yaml_loads() -> None:
     assert not set(product.supported) & set(product.not_supported_yet)
 
 
-def test_catalog_yaml_loads_with_intended_properties() -> None:
-    catalog = load_catalog(DATA / "references" / "sample_catalog.yaml")
-    assert {t.name for t in catalog.tables} == {
-        "card_transactions",
-        "employees",
-        "departments",
-        "merchants",
-    }
-    assert catalog.has_column("card_transactions", "currency_code")
-    assert catalog.has_column("card_transactions", "merchant_category")
-    assert catalog.has_column("employees", "department_id")
-
-    statuses = sorted(r.verification for r in catalog.relationships)
-    assert statuses == [VerificationStatus.UNKNOWN, VerificationStatus.VERIFIED]
-    unknown = next(r for r in catalog.relationships if r.verification is VerificationStatus.UNKNOWN)
-    assert unknown.cardinality is Cardinality.UNKNOWN
-
-    merchants = catalog.get_table("merchants")
-    assert merchants is not None
-    assert merchants.description is None
-    assert all(c.description is None for c in merchants.columns)
-
-
 def test_repo_config_input_paths_resolve_to_loadable_assets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -55,7 +32,8 @@ def test_repo_config_input_paths_resolve_to_loadable_assets(
     cfg = load_config(REPO_ROOT / "config" / "app.yaml", env={})
     load_persona(cfg.inputs.persona_path)
     load_product(cfg.inputs.product_path)
-    load_catalog(cfg.inputs.catalog_path)
+    assert cfg.inputs.reference_index_file is not None
+    load_reference_index(cfg.inputs.reference_index_file)
 
 
 def test_missing_asset(tmp_path: Path) -> None:
@@ -67,7 +45,7 @@ def test_invalid_yaml_asset(tmp_path: Path) -> None:
     path = tmp_path / "bad.yaml"
     path.write_text("tables: [", encoding="utf-8")
     with pytest.raises(InputAssetError, match="not valid YAML"):
-        load_catalog(path)
+        load_product(path)
 
 
 def test_non_mapping_asset(tmp_path: Path) -> None:
@@ -78,26 +56,14 @@ def test_non_mapping_asset(tmp_path: Path) -> None:
 
 
 def test_validation_error_details_name_the_field(tmp_path: Path) -> None:
-    path = tmp_path / "catalog.yaml"
+    path = tmp_path / "product.yaml"
     path.write_text(
-        "catalog_id: c\ncatalog_version: '1'\n"
-        "tables:\n  - name: t\n    columns:\n      - name: a\n        nullable: maybe\n",
+        "product_id: p\nproduct_version: '1'\nname: n\ndescription: d\nproduct_type: chatbot\n"
+        "supported: [a]\ncolour: blue\n",
         encoding="utf-8",
     )
     with pytest.raises(InputAssetError) as exc_info:
-        load_catalog(path)
+        load_product(path)
     message = str(exc_info.value)
-    assert "ReferenceCatalog" in message
-    assert "tables.0.columns.0.nullable" in message
-
-
-def test_duplicate_table_names_rejected(tmp_path: Path) -> None:
-    path = tmp_path / "catalog.yaml"
-    path.write_text(
-        "catalog_id: c\ncatalog_version: '1'\ntables:\n"
-        "  - {name: t, columns: [{name: a}]}\n"
-        "  - {name: t, columns: [{name: b}]}\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(InputAssetError, match="duplicate table names"):
-        load_catalog(path)
+    assert "ProductDescription" in message
+    assert "colour" in message

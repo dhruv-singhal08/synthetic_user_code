@@ -1,0 +1,55 @@
+{
+  "product_id": "sample_policy_chatbot",
+  "product_version": "fixture-1",
+  "answers": [
+    {
+      "question_id": "Q_001",
+      "utterance": "How much can I spend per night on a hotel in Paris?",
+      "outcome": "answered",
+      "text": "For Paris the nightly hotel limit is 220 EUR including taxes (Travel Policy section 4.2).",
+      "artifacts": []
+    },
+    {
+      "question_id": "Q_002",
+      "utterance": "Can you approve my expense report for me?",
+      "outcome": "denied",
+      "message": "I can't approve expense reports. Your manager approves them in the expense tool."
+    }
+  ],
+  "rules": [
+    {
+      "contains": [
+        "receipt"
+      ],
+      "response": {
+        "outcome": "clarification",
+        "message": "Is this a card purchase or a cash purchase?"
+      }
+    },
+    {
+      "contains": [
+        "simulate",
+        "outage"
+      ],
+      "response": {
+        "outcome": "error",
+        "error_type": "ServiceUnavailable",
+        "message": "Simulated product outage."
+      }
+    },
+    {
+      "contains": [
+        "simulate",
+        "timeout"
+      ],
+      "response": {
+        "simulate_timeout": true
+      }
+    }
+  ],
+  "default": {
+    "outcome": "error",
+    "error_type": "NoFixtureMatch",
+    "message": "No fixture answer for this question; paste one (export-fixture-template)."
+  }
+}

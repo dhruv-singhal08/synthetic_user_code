@@ -1,0 +1,435 @@
+{
+  "index_id": "REFIDX_SAMPLE_CARD_SPEND",
+  "index_version": "1",
+  "source_catalog_id": "sample_card_spend",
+  "source_catalog_version": "1.0",
+  "generated_at": "2026-10-13T12:00:00Z",
+  "generation_mode": "hand_written_sample_for_offline_tests",
+  "llm_provider": null,
+  "llm_model": null,
+  "source_files": [
+    {
+      "name": "sample_catalog.yaml",
+      "role": "illustrative sample schema"
+    }
+  ],
+  "scope": {
+    "table_count": 4,
+    "column_count": 16,
+    "tables": [
+      "card_transactions",
+      "employees",
+      "departments",
+      "merchants"
+    ]
+  },
+  "tables": [
+    {
+      "name": "card_transactions",
+      "business_purpose": "Corporate card spend, one row per transaction",
+      "grain": "one row per transaction",
+      "key_entities": [
+        "transaction",
+        "employee",
+        "merchant"
+      ],
+      "primary_key_columns": [
+        "transaction_id"
+      ],
+      "important_columns": [
+        "transaction_id",
+        "employee_id",
+        "amount",
+        "currency_code",
+        "transaction_date"
+      ],
+      "metrics": [
+        {
+          "name": "total_spend",
+          "description": "Sum of amount; only meaningful within a single currency_code"
+        },
+        {
+          "name": "transaction_count",
+          "description": "Count of transactions"
+        }
+      ],
+      "dimensions": [
+        {
+          "name": "currency_code",
+          "description": "ISO 4217 currency of amount. Amounts in different currencies must not be summed directly.",
+          "allowed_values_raw": "USD, EUR, GBP, INR",
+          "declared_cardinality": 4
+        },
+        {
+          "name": "merchant_category",
+          "description": "Merchant category as reported on the transaction.",
+          "allowed_values_raw": "travel, dining, software, office_supplies, other",
+          "declared_cardinality": 5
+        }
+      ],
+      "time_columns": [
+        {
+          "name": "transaction_date",
+          "description": "Date the transaction posted.",
+          "data_type": "DATE"
+        }
+      ],
+      "relationships": [
+        {
+          "source_table": "card_transactions",
+          "source_column": "employee_id",
+          "target_table": "employees",
+          "target_column": "employee_id",
+          "cardinality": "many_to_one",
+          "verification": "verified",
+          "source": "sample_catalog.yaml"
+        }
+      ],
+      "calculated_fields": [],
+      "business_rules": [],
+      "sensitive_columns": [],
+      "columns": [
+        {
+          "name": "transaction_id",
+          "data_type": "STRING",
+          "description": "Unique transaction identifier.",
+          "primary_key": true,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "employee_id",
+          "data_type": "STRING",
+          "description": "Cardholder employee.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "merchant_id",
+          "data_type": "STRING",
+          "description": "Merchant where the transaction occurred.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "transaction_date",
+          "data_type": "DATE",
+          "description": "Date the transaction posted.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "amount",
+          "data_type": "NUMERIC",
+          "description": "Transaction amount in the transaction currency (see currency_code).",
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "currency_code",
+          "data_type": "STRING",
+          "description": "ISO 4217 currency of amount. Amounts in different currencies must not be summed directly.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": true,
+          "categorical_values_raw": "USD, EUR, GBP, INR",
+          "declared_cardinality": 4
+        },
+        {
+          "name": "merchant_category",
+          "data_type": "STRING",
+          "description": "Merchant category as reported on the transaction.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": true,
+          "categorical_values_raw": "travel, dining, software, office_supplies, other",
+          "declared_cardinality": 5
+        }
+      ],
+      "column_count": 7
+    },
+    {
+      "name": "employees",
+      "business_purpose": "Employee directory used to attribute card spend to people",
+      "grain": "one row per employee",
+      "key_entities": [
+        "employee"
+      ],
+      "primary_key_columns": [
+        "employee_id"
+      ],
+      "important_columns": [
+        "employee_id",
+        "full_name",
+        "department_id"
+      ],
+      "metrics": [],
+      "dimensions": [
+        {
+          "name": "department_id",
+          "description": "Department the employee belongs to.",
+          "allowed_values_raw": null,
+          "declared_cardinality": null
+        }
+      ],
+      "time_columns": [],
+      "relationships": [
+        {
+          "source_table": "employees",
+          "source_column": "department_id",
+          "target_table": "departments",
+          "target_column": "department_id",
+          "cardinality": "unknown",
+          "verification": "unknown",
+          "source": "sample_catalog.yaml"
+        }
+      ],
+      "calculated_fields": [],
+      "business_rules": [],
+      "sensitive_columns": [
+        "full_name"
+      ],
+      "columns": [
+        {
+          "name": "employee_id",
+          "data_type": "STRING",
+          "description": "Unique employee identifier.",
+          "primary_key": true,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "full_name",
+          "data_type": "STRING",
+          "description": "Employee full name.",
+          "primary_key": false,
+          "pii": true,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "department_id",
+          "data_type": "STRING",
+          "description": "Department the employee belongs to.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        }
+      ],
+      "column_count": 3
+    },
+    {
+      "name": "departments",
+      "business_purpose": "Department reference data with finance cost centers",
+      "grain": "one row per department",
+      "key_entities": [
+        "department",
+        "cost center"
+      ],
+      "primary_key_columns": [
+        "department_id"
+      ],
+      "important_columns": [
+        "department_id",
+        "department_name",
+        "cost_center"
+      ],
+      "metrics": [],
+      "dimensions": [
+        {
+          "name": "department_name",
+          "description": "Department display name.",
+          "allowed_values_raw": null,
+          "declared_cardinality": null
+        },
+        {
+          "name": "cost_center",
+          "description": "Finance cost center code.",
+          "allowed_values_raw": null,
+          "declared_cardinality": null
+        }
+      ],
+      "time_columns": [],
+      "relationships": [],
+      "calculated_fields": [],
+      "business_rules": [],
+      "sensitive_columns": [],
+      "columns": [
+        {
+          "name": "department_id",
+          "data_type": "STRING",
+          "description": "Unique department identifier.",
+          "primary_key": true,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "department_name",
+          "data_type": "STRING",
+          "description": "Department display name.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "cost_center",
+          "data_type": "STRING",
+          "description": "Finance cost center code.",
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        }
+      ],
+      "column_count": 3
+    },
+    {
+      "name": "merchants",
+      "business_purpose": "unknown",
+      "grain": "unknown",
+      "key_entities": [
+        "merchant"
+      ],
+      "primary_key_columns": [
+        "merchant_id"
+      ],
+      "important_columns": [
+        "merchant_id",
+        "merchant_name"
+      ],
+      "metrics": [],
+      "dimensions": [
+        {
+          "name": "merchant_name",
+          "description": null,
+          "allowed_values_raw": null,
+          "declared_cardinality": null
+        },
+        {
+          "name": "country_code",
+          "description": null,
+          "allowed_values_raw": null,
+          "declared_cardinality": null
+        }
+      ],
+      "time_columns": [],
+      "relationships": [],
+      "calculated_fields": [],
+      "business_rules": [],
+      "sensitive_columns": [],
+      "columns": [
+        {
+          "name": "merchant_id",
+          "data_type": "STRING",
+          "description": null,
+          "primary_key": true,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "merchant_name",
+          "data_type": "STRING",
+          "description": null,
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        },
+        {
+          "name": "country_code",
+          "data_type": "STRING",
+          "description": null,
+          "primary_key": false,
+          "pii": false,
+          "categorical": false,
+          "categorical_values_raw": null,
+          "declared_cardinality": 0
+        }
+      ],
+      "column_count": 3
+    }
+  ],
+  "relationships": [
+    {
+      "source_table": "card_transactions",
+      "source_column": "employee_id",
+      "target_table": "employees",
+      "target_column": "employee_id",
+      "cardinality": "many_to_one",
+      "verification": "verified",
+      "source": "sample_catalog.yaml"
+    },
+    {
+      "source_table": "employees",
+      "source_column": "department_id",
+      "target_table": "departments",
+      "target_column": "department_id",
+      "cardinality": "unknown",
+      "verification": "unknown",
+      "source": "sample_catalog.yaml"
+    }
+  ],
+  "global_semantic_rules": {
+    "currency": "Amounts in different currency_code values must not be summed directly."
+  },
+  "uncertainties": [
+    {
+      "table": "merchants",
+      "field": "business_purpose",
+      "value": null,
+      "reason": "no table or column descriptions; business purpose and grain unknown"
+    },
+    {
+      "table": "card_transactions",
+      "field": "merchant_id",
+      "value": null,
+      "reason": "no documented relationship to merchants"
+    },
+    {
+      "table": "employees",
+      "field": "department_id",
+      "value": null,
+      "reason": "relationship to departments.department_id is not verified"
+    },
+    {
+      "table": "card_transactions",
+      "field": "amount",
+      "value": null,
+      "reason": "amounts are in mixed currencies (currency_code); sums across currencies are not meaningful"
+    }
+  ],
+  "integrity_report": {
+    "status": "passed",
+    "issues": [],
+    "notes": [
+      "Illustrative sample; not real data."
+    ]
+  }
+}

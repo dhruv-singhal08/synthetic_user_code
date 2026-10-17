@@ -56,8 +56,15 @@ class SafeChainClient:
         except LLMProviderError:
             raise
         except Exception as exc:  # SDK raises many unrelated types; normalize them all.
+            hint = (
+                " - SafeChain read a config without `models`: remove CONFIG_PATH from .env "
+                f"(SafeChain must read {self._config_path}) and check that file has `models:`"
+                if "No models defined" in str(exc)
+                else ""
+            )
             raise LLMProviderError(
-                f"SafeChain call failed (model id {self._model_id}): {type(exc).__name__}: {exc}"
+                f"SafeChain call failed (model id {self._model_id}): "
+                f"{type(exc).__name__}: {exc}{hint}"
             ) from exc
 
     async def _invoke(self, system: str, user: str) -> str:

@@ -1,7 +1,6 @@
 """Pure checks of a scenario cheat sheet against the reference index.
 
-A cheat sheet may only use tables in the index, and only columns the index mentions for that
-table (important/dimension/time/metric columns, relationship endpoints).
+A cheat sheet may only use tables in the index, and only columns that table has in the index.
 """
 
 from __future__ import annotations
@@ -11,27 +10,15 @@ from synthetic_user.models.scenario import CheatRelationship, ReferenceCheatShee
 
 
 def index_columns(index: ReferenceIndex) -> dict[str, set[str]]:
-    """Table -> bare column names the index mentions for it."""
-    columns: dict[str, set[str]] = {t.name: set() for t in index.tables}
-    for table in index.tables:
-        refs = [
-            *table.important_columns,
-            *table.dimensions,
-            *table.time_columns,
-            *(c for m in table.metrics for c in m.columns),
-            *(r.source_column for r in table.relationships),
-        ]
-        columns[table.name].update(_bare(ref) for ref in refs)
-        for rel in table.relationships:
-            columns.setdefault(rel.target_table, set()).add(_bare(rel.target_column))
-    return columns
+    """Table -> its column names in the index."""
+    return {t.name: {c.name for c in t.columns} for t in index.tables}
 
 
 def check_cheat_sheet_against_index(
     cheat_sheet: ReferenceCheatSheet, index: ReferenceIndex
 ) -> list[str]:
-    """Errors for tables not in the index and "t.c" refs whose column the index doesn't
-    list for table t. Empty list means valid."""
+    """Errors for tables not in the index and "t.c" refs whose column table t does not have.
+    Empty list means valid."""
     known_tables = {t.name for t in index.tables}
     allowed = index_columns(index)
     errors = [
@@ -68,12 +55,10 @@ def align_relationship_verification(
     - Join with no index relationship -> "unknown" + note.
     Notes are appended to semantic_considerations and also returned.
     """
-    known = _index_relationships(index)
     notes: list[str] = []
     relationships: list[CheatRelationship] = []
     for rel in cheat_sheet.relationships:
-        pair = frozenset({rel.source, rel.target})
-        indexed = known.get(pair)
+        indexed = index.verification(rel.source, rel.target)
         if indexed is None:
             notes.append(
                 f"join {rel.source} = {rel.target} has no relationship in the reference "
@@ -94,17 +79,3 @@ def align_relationship_verification(
         }
     )
     return updated, notes
-
-
-def _index_relationships(index: ReferenceIndex) -> dict[frozenset[str], VerificationStatus]:
-    known: dict[frozenset[str], VerificationStatus] = {}
-    for table in index.tables:
-        for rel in table.relationships:
-            source = f"{table.name}.{_bare(rel.source_column)}"
-            target = f"{rel.target_table}.{_bare(rel.target_column)}"
-            known[frozenset({source, target})] = rel.verification
-    return known
-
-
-def _bare(ref: str) -> str:
-    return ref.rpartition(".")[2]

@@ -2,7 +2,7 @@
 
 Script format::
 
-    {"rules": [{"contains": ["You document a data catalog"], "response": {...}}, ...]}
+    {"rules": [{"contains": ["You design realistic"], "response": {...}}, ...]}
 
 For every call, the first rule whose substrings ALL occur in ``system + user`` answers.
 Rules are reusable (not consumed). ``response`` is a JSON object (for generate_json) or a

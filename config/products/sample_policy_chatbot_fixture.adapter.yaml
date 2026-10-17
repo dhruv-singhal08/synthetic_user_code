@@ -1,0 +1,5 @@
+# Offline fixture adapter for product_id sample_policy_chatbot (text-only answers).
+# Use with: synthetic-user execute --run-id RUN_... --adapter-config config/products/sample_policy_chatbot_fixture.adapter.yaml
+type: fixture
+options:
+  path: ./data/fixtures/product_responses/sample_chatbot_responses.json

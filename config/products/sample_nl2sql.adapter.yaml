@@ -1,0 +1,5 @@
+# Product adapter for product_id sample_nl2sql: offline fixture answers.
+# Referenced from config/app*.yaml as `product_adapter: ./config/products/sample_nl2sql.adapter.yaml`.
+type: fixture
+options:
+  path: ./data/fixtures/product_responses/sample_responses.json

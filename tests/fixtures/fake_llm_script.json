@@ -31,139 +31,45 @@
     },
     {
       "contains": [
-        "You document a data catalog"
+        "You design realistic test scenarios",
+        "No data schema is available"
       ],
       "response": {
-        "tables": [
+        "scenarios": [
           {
-            "name": "card_transactions",
-            "business_purpose": "Corporate card spend, one row per transaction",
-            "grain": "one row per transaction",
-            "key_entities": [
-              "transaction",
-              "employee",
-              "merchant"
+            "business_goal": "Find out how much I may spend on a hotel night for a trip to Paris",
+            "title": "Hotel limit for a Paris trip",
+            "task_type": "explanation",
+            "capability": "supported",
+            "capability_rationale": "Product supports 'explain per-diem and hotel limits'",
+            "success_criteria": [
+              "states the nightly hotel limit that applies",
+              "says whether taxes are included"
             ],
-            "important_columns": [
-              "transaction_id",
-              "employee_id",
-              "amount",
-              "currency_code",
-              "transaction_date"
-            ],
-            "metrics": [
-              {
-                "name": "total_spend",
-                "description": "Sum of amount; only meaningful within a single currency_code",
-                "columns": [
-                  "amount",
-                  "currency_code"
-                ]
-              },
-              {
-                "name": "transaction_count",
-                "description": "Count of transactions",
-                "columns": [
-                  "transaction_id"
-                ]
-              }
-            ],
-            "dimensions": [
-              "currency_code",
-              "merchant_category"
-            ],
-            "time_columns": [
-              "transaction_date"
-            ],
-            "relationships": [
-              {
-                "source_column": "employee_id",
-                "target_table": "employees",
-                "target_column": "employee_id",
-                "cardinality": "many_to_one",
-                "verification": "verified"
-              }
-            ]
+            "question_guidance": {
+              "intent": "learn the hotel cap for Paris"
+            }
           },
           {
-            "name": "employees",
-            "business_purpose": "Employee directory used to attribute card spend to people",
-            "grain": "one row per employee",
-            "key_entities": [
-              "employee"
+            "business_goal": "Get my expense report approved without leaving the chat",
+            "title": "Approve my expense report",
+            "task_type": "how_to",
+            "capability": "unsupported",
+            "capability_rationale": "Product lists 'submitting or approving expense reports' under not_supported_yet",
+            "success_criteria": [
+              "says clearly that it cannot approve reports",
+              "explains where approval is done"
             ],
-            "important_columns": [
-              "employee_id",
-              "full_name",
-              "department_id"
-            ],
-            "metrics": [],
-            "dimensions": [
-              "department_id"
-            ],
-            "time_columns": [],
-            "relationships": [
-              {
-                "source_column": "department_id",
-                "target_table": "departments",
-                "target_column": "department_id",
-                "cardinality": "unknown",
-                "verification": "unknown"
-              }
-            ]
-          },
-          {
-            "name": "departments",
-            "business_purpose": "Department reference data with finance cost centers",
-            "grain": "one row per department",
-            "key_entities": [
-              "department",
-              "cost center"
-            ],
-            "important_columns": [
-              "department_id",
-              "department_name",
-              "cost_center"
-            ],
-            "metrics": [],
-            "dimensions": [
-              "department_name",
-              "cost_center"
-            ],
-            "time_columns": [],
-            "relationships": []
-          },
-          {
-            "name": "merchants",
-            "business_purpose": "unknown",
-            "grain": "unknown",
-            "key_entities": [
-              "merchant"
-            ],
-            "important_columns": [
-              "merchant_id",
-              "merchant_name"
-            ],
-            "metrics": [],
-            "dimensions": [
-              "merchant_name",
-              "country_code"
-            ],
-            "time_columns": [],
-            "relationships": []
+            "question_guidance": {
+              "intent": "approve a report via chat"
+            }
           }
-        ],
-        "uncertainties": [
-          "merchants: catalog has no table or column descriptions; business purpose and grain unknown",
-          "card_transactions.merchant_id: no documented relationship to merchants",
-          "employees.department_id -> departments.department_id: relationship not verified in catalog",
-          "card_transactions.amount: amounts are in mixed currencies (currency_code); sums across currencies are not meaningful"
         ]
       }
     },
     {
       "contains": [
-        "You design realistic analytics scenarios"
+        "You design realistic test scenarios"
       ],
       "response": {
         "scenarios": [
@@ -173,7 +79,12 @@
             "task_type": "ranking",
             "capability": "supported",
             "capability_rationale": "Product supports 'ranking and top-N' and 'joins over documented relationships'",
-            "cheat_sheet": {
+            "success_criteria": [
+              "names the employees ranked by total card spend",
+              "keeps amounts separate per currency or states which currency is used",
+              "covers the requested time period"
+            ],
+            "reference_cheat_sheet": {
               "tables": [
                 "card_transactions",
                 "employees"
@@ -228,7 +139,11 @@
             "task_type": "trend",
             "capability": "supported",
             "capability_rationale": "Product supports 'single-table aggregation' and 'filtering by date range'",
-            "cheat_sheet": {
+            "success_criteria": [
+              "shows card spend per merchant category for each month",
+              "covers the requested period"
+            ],
+            "reference_cheat_sheet": {
               "tables": [
                 "card_transactions"
               ],
@@ -264,7 +179,11 @@
             "task_type": "other",
             "capability": "unsupported",
             "capability_rationale": "Product lists 'forecasting' under not_supported_yet",
-            "cheat_sheet": {
+            "success_criteria": [
+              "states clearly whether a forecast can be produced",
+              "does not present invented future figures as facts"
+            ],
+            "reference_cheat_sheet": {
               "tables": [
                 "card_transactions"
               ],
@@ -402,17 +321,6 @@
     },
     {
       "contains": [
-        "You judge whether an NL2SQL product"
-      ],
-      "response": {
-        "relevance": "relevant",
-        "necessity": "necessary",
-        "asks_for_given_info": false,
-        "reason": "Amounts are in several currencies and the question does not say which."
-      }
-    },
-    {
-      "contains": [
         "You review SQL produced"
       ],
       "response": {
@@ -429,6 +337,272 @@
         "findings": [],
         "cheat_sheet_conflicts": [],
         "verdict": "pass"
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Hotel limit for a Paris trip"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "How much can I spend per night on a hotel in Paris?",
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "expectations": {
+              "clarification": "not_expected",
+              "acceptable_behaviors": [
+                "states the nightly limit for Paris"
+              ]
+            },
+            "interpretation_notes": []
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Approve my expense report"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "Can you approve my expense report for me?",
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "expectations": {
+              "clarification": "not_expected",
+              "acceptable_behaviors": [
+                "says it cannot approve reports and where to do it"
+              ]
+            },
+            "interpretation_notes": []
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You evaluate how well a conversational product",
+        "top 10 card spenders"
+      ],
+      "response": {
+        "relevance": {
+          "status": "pass",
+          "rationale": "Addresses the question asked."
+        },
+        "goal_completeness": {
+          "status": "pass",
+          "rationale": "All criteria met."
+        },
+        "criteria": [
+          {
+            "criterion": "names the employees ranked by total card spend",
+            "status": "met",
+            "rationale": "Covered by the response."
+          },
+          {
+            "criterion": "keeps amounts separate per currency or states which currency is used",
+            "status": "met",
+            "rationale": "Covered by the response."
+          },
+          {
+            "criterion": "covers the requested time period",
+            "status": "met",
+            "rationale": "Covered by the response."
+          }
+        ],
+        "persona_fit": {
+          "status": "pass",
+          "rationale": "Suits the persona."
+        },
+        "capability_consistency": {
+          "status": "pass",
+          "rationale": "Within supported capabilities."
+        },
+        "clarification_handling": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "clarification": null,
+        "safety_and_honesty": {
+          "status": "pass",
+          "rationale": "Nothing fabricated is presented as certain."
+        },
+        "findings": [],
+        "overall_verdict": "pass"
+      }
+    },
+    {
+      "contains": [
+        "You evaluate how well a conversational product",
+        "monthly card spend"
+      ],
+      "response": {
+        "relevance": {
+          "status": "pass",
+          "rationale": "About the question asked."
+        },
+        "goal_completeness": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "criteria": [],
+        "persona_fit": {
+          "status": "pass",
+          "rationale": "Business wording."
+        },
+        "capability_consistency": {
+          "status": "pass",
+          "rationale": "Nothing unsupported claimed."
+        },
+        "clarification_handling": {
+          "status": "pass",
+          "rationale": "Currency is ambiguous and needed."
+        },
+        "clarification": {
+          "relevance": "relevant",
+          "necessity": "necessary",
+          "asks_for_given_info": false,
+          "reason": "Amounts are in several currencies and the question does not say which."
+        },
+        "safety_and_honesty": {
+          "status": "pass",
+          "rationale": "No claims made."
+        },
+        "findings": [],
+        "overall_verdict": "pass"
+      }
+    },
+    {
+      "contains": [
+        "You evaluate how well a conversational product",
+        "forecast"
+      ],
+      "response": {
+        "relevance": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "goal_completeness": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "criteria": [],
+        "persona_fit": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "capability_consistency": {
+          "status": "pass",
+          "rationale": "Forecasting is listed as not supported yet, so the denial is justified."
+        },
+        "clarification_handling": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "clarification": null,
+        "safety_and_honesty": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "findings": [],
+        "overall_verdict": "pass"
+      }
+    },
+    {
+      "contains": [
+        "You evaluate how well a conversational product",
+        "hotel in Paris"
+      ],
+      "response": {
+        "relevance": {
+          "status": "pass",
+          "rationale": "Addresses the question asked."
+        },
+        "goal_completeness": {
+          "status": "pass",
+          "rationale": "All criteria met."
+        },
+        "criteria": [
+          {
+            "criterion": "states the nightly hotel limit that applies",
+            "status": "met",
+            "rationale": "Covered by the response."
+          },
+          {
+            "criterion": "says whether taxes are included",
+            "status": "met",
+            "rationale": "Covered by the response."
+          }
+        ],
+        "persona_fit": {
+          "status": "pass",
+          "rationale": "Suits the persona."
+        },
+        "capability_consistency": {
+          "status": "pass",
+          "rationale": "Within supported capabilities."
+        },
+        "clarification_handling": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "clarification": null,
+        "safety_and_honesty": {
+          "status": "pass",
+          "rationale": "Nothing fabricated is presented as certain."
+        },
+        "findings": [],
+        "overall_verdict": "pass"
+      }
+    },
+    {
+      "contains": [
+        "You evaluate how well a conversational product",
+        "approve my expense report"
+      ],
+      "response": {
+        "relevance": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "goal_completeness": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "criteria": [],
+        "persona_fit": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "capability_consistency": {
+          "status": "pass",
+          "rationale": "Approving expense reports is not supported yet, so the denial is justified."
+        },
+        "clarification_handling": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "clarification": null,
+        "safety_and_honesty": {
+          "status": "not_applicable",
+          "rationale": "not applicable to this outcome"
+        },
+        "findings": [],
+        "overall_verdict": "pass"
       }
     }
   ]

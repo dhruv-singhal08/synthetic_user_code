@@ -48,6 +48,21 @@ CIBIS_CONSUMER_SECRET=<same value as in your starter .env>
 CONFIG_PATH=./config/app.yaml              # this app's config - NOT the SafeChain yaml
 ```
 
+**Your reference index:** copy your full index JSON (same format as
+`data/references/reference_index_sample_v2.json`) to `data\references\reference_index.json` -
+`config\app.safechain.yaml` already points there (`inputs.reference_index_file`). Remove that
+line to run ungrounded (no index, no cheat sheets).
+
+Check it loads before running anything else:
+
+```powershell
+poetry run synthetic-user validate-index --reference-index data/references/reference_index.json
+```
+
+Expected: `index_id=<your id> ... tables=11 columns=... relationships=... warnings=N` (no LLM
+call), then one `WARNING` line per problem found. A load error names the exact file and field
+path - send it to me.
+
 Leave `GOOGLE_API_KEY` / `GEMINI_MODEL` empty unless you use Gemini. If you set
 `LLM_PROVIDER=safechain`, it applies to *every* config, including the offline `app.fake.yaml` demo.
 
@@ -72,8 +87,8 @@ live log of every step and LLM call. Stop the server with **Ctrl+C**.
 - More detail in the log: add `--log-level DEBUG`
 - Offline demo (no SafeChain): `poetry run synthetic-user serve --config config/app.fake.yaml`
 
-In the UI: create a run (optionally upload persona / product / catalog YAML), then run the steps
-in order: **index -> scenarios -> questions -> execute -> evaluate**. Download the results CSV at
+In the UI: create a run (optionally upload persona / product YAML and your reference index JSON),
+then run the steps in order: **index -> scenarios -> questions -> execute -> evaluate**. Download the results CSV at
 the end. Run folders are under `artifacts\runs\<run_id>\`.
 
 ## 6. CLI instead of the UI (optional)

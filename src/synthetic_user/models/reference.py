@@ -1,18 +1,31 @@
-"""Reference data: the authoritative catalog, the LLM-built index, and per-run snapshots.
+"""Reference data (kind "data_catalog"): the pre-built reference index and per-scenario snapshots.
 
-The catalog is the only source of truth for tables, columns and relationships.
-Cross-checking index/snapshot content against the catalog lives in references/integrity.py.
+The reference index is a JSON file supplied by the user and is the ONLY reference source
+(tables, columns, types, descriptions, relationships + verification, rules). This tool never
+generates it. Field names follow the real file; provenance/bookkeeping keys the tool does not
+interpret are kept per level in ``extras`` (references/loader.py decides which), so nothing is
+lost. Validation warnings (duplicates, dangling references) live in references/integrity.py.
+Used only in grounded mode.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Self
+from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue
 
-from synthetic_user.models.base import NonEmptyStr, StrictModel, find_duplicates
+from synthetic_user.models.base import NonEmptyStr, StrictModel
+
+
+class ReferenceKind(StrEnum):
+    DATA_CATALOG = "data_catalog"
+
+
+DataCatalogKind = Literal[ReferenceKind.DATA_CATALOG]
+
+Extras = dict[str, JsonValue]
 
 
 class VerificationStatus(StrEnum):
@@ -29,142 +42,170 @@ class Cardinality(StrEnum):
     UNKNOWN = "unknown"
 
 
-class ColumnMetadata(StrictModel):
+class IndexColumn(StrictModel):
     name: NonEmptyStr
     data_type: str | None = None
     description: str | None = None
-    nullable: bool | None = None
-    allowed_values: list[str] | None = None
+    primary_key: bool = False
+    pii: bool = False
+    categorical: bool = False
+    categorical_values_raw: str | None = None
+    declared_cardinality: int | None = Field(default=None, ge=0)
+    extras: Extras = Field(default_factory=dict)
 
 
-class TableMetadata(StrictModel):
+class IndexMetric(StrictModel):
     name: NonEmptyStr
     description: str | None = None
-    grain: str | None = None
-    primary_key: list[NonEmptyStr] | None = None
-    columns: list[ColumnMetadata] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _columns_consistent(self) -> Self:
-        names = [c.name for c in self.columns]
-        dupes = find_duplicates(names)
-        if dupes:
-            raise ValueError(f"table {self.name!r}: duplicate column names {dupes}")
-        missing = [k for k in self.primary_key or [] if k not in names]
-        if missing:
-            raise ValueError(f"table {self.name!r}: primary_key columns not in table {missing}")
-        return self
-
-    def has_column(self, column: str) -> bool:
-        return any(c.name == column for c in self.columns)
+    aggregation_guidance: str | None = None
+    extras: Extras = Field(default_factory=dict)
 
 
-class Relationship(StrictModel):
+class IndexDimension(StrictModel):
+    name: NonEmptyStr
+    description: str | None = None
+    allowed_values_raw: str | None = None
+    declared_cardinality: int | None = Field(default=None, ge=0)
+    extras: Extras = Field(default_factory=dict)
+
+
+class IndexTimeColumn(StrictModel):
+    name: NonEmptyStr
+    description: str | None = None
+    data_type: str | None = None
+    extras: Extras = Field(default_factory=dict)
+
+
+class IndexRelationship(StrictModel):
     source_table: NonEmptyStr
     source_column: NonEmptyStr
     target_table: NonEmptyStr
     target_column: NonEmptyStr
     cardinality: Cardinality = Cardinality.UNKNOWN
     verification: VerificationStatus = VerificationStatus.UNKNOWN
+    extras: Extras = Field(default_factory=dict)
+
+    @property
+    def source(self) -> str:
+        return f"{self.source_table}.{self.source_column}"
+
+    @property
+    def target(self) -> str:
+        return f"{self.target_table}.{self.target_column}"
 
 
-class ReferenceCatalog(StrictModel):
-    catalog_id: NonEmptyStr
-    catalog_version: NonEmptyStr
-    tables: list[TableMetadata] = Field(min_length=1)
-    relationships: list[Relationship] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _unique_table_names(self) -> Self:
-        dupes = find_duplicates([t.name for t in self.tables])
-        if dupes:
-            raise ValueError(f"catalog {self.catalog_id!r}: duplicate table names {dupes}")
-        return self
-
-    def get_table(self, name: str) -> TableMetadata | None:
-        return next((t for t in self.tables if t.name == name), None)
-
-    def has_column(self, table: str, column: str) -> bool:
-        found = self.get_table(table)
-        return found is not None and found.has_column(column)
-
-
-class IndexMetric(StrictModel):
-    name: NonEmptyStr
-    description: str | None = None
-    columns: list[NonEmptyStr] = Field(default_factory=list)
-
-
-class IndexRelationship(StrictModel):
-    source_column: NonEmptyStr
-    target_table: NonEmptyStr
-    target_column: NonEmptyStr
-    cardinality: Cardinality = Cardinality.UNKNOWN
-    verification: VerificationStatus = VerificationStatus.UNKNOWN
-
-
-class IndexedTable(StrictModel):
+class IndexTable(StrictModel):
     name: NonEmptyStr
     business_purpose: NonEmptyStr
     grain: str | None = None
     key_entities: list[NonEmptyStr] = Field(default_factory=list)
+    primary_key_columns: list[NonEmptyStr] = Field(default_factory=list)
     important_columns: list[NonEmptyStr] = Field(default_factory=list)
     metrics: list[IndexMetric] = Field(default_factory=list)
-    dimensions: list[NonEmptyStr] = Field(default_factory=list)
-    time_columns: list[NonEmptyStr] = Field(default_factory=list)
+    dimensions: list[IndexDimension] = Field(default_factory=list)
+    time_columns: list[IndexTimeColumn] = Field(default_factory=list)
     relationships: list[IndexRelationship] = Field(default_factory=list)
+    calculated_fields: list[NonEmptyStr] = Field(default_factory=list)
+    business_rules: list[NonEmptyStr] = Field(default_factory=list)
+    sensitive_columns: list[NonEmptyStr] = Field(default_factory=list)
+    columns: list[IndexColumn] = Field(min_length=1)
+    extras: Extras = Field(default_factory=dict)
+
+    def get_column(self, name: str) -> IndexColumn | None:
+        return next((c for c in self.columns if c.name == name), None)
+
+    def has_column(self, name: str) -> bool:
+        return self.get_column(name) is not None
+
+    def rules(self) -> dict[str, list[str]]:
+        """Non-empty business_rules / calculated_fields / sensitive_columns."""
+        return {
+            key: values
+            for key, values in (
+                ("business_rules", self.business_rules),
+                ("calculated_fields", self.calculated_fields),
+                ("sensitive_columns", self.sensitive_columns),
+            )
+            if values
+        }
+
+
+class IndexUncertainty(StrictModel):
+    table: str | None = None
+    field: str | None = None
+    value: JsonValue = None
+    reason: NonEmptyStr
+
+    def text(self) -> str:
+        where = ".".join(p for p in (self.table, self.field) if p) or "index"
+        value = f" = {self.value!r}" if self.value is not None else ""
+        return f"{where}{value}: {self.reason}"
 
 
 class ReferenceIndex(StrictModel):
+    reference_kind: DataCatalogKind = ReferenceKind.DATA_CATALOG
     index_id: NonEmptyStr
     index_version: NonEmptyStr
     source_catalog_id: NonEmptyStr
     source_catalog_version: NonEmptyStr
-    tables: list[IndexedTable] = Field(default_factory=list)
     generated_at: datetime
-    llm_provider: NonEmptyStr
-    llm_model: NonEmptyStr
-    uncertainties: list[NonEmptyStr] = Field(default_factory=list)
+    tables: list[IndexTable] = Field(min_length=1)
+    relationships: list[IndexRelationship] = Field(default_factory=list)
+    global_semantic_rules: dict[NonEmptyStr, NonEmptyStr] = Field(default_factory=dict)
+    uncertainties: list[IndexUncertainty] = Field(default_factory=list)
+    extras: Extras = Field(default_factory=dict)
+    # Set by the loader: sha256[:8] of the file, so an edited file gets a new versioned_id.
+    content_fingerprint: str | None = None
 
-    @model_validator(mode="after")
-    def _unique_table_names(self) -> Self:
-        dupes = find_duplicates([t.name for t in self.tables])
-        if dupes:
-            raise ValueError(f"index {self.index_id!r}: duplicate table names {dupes}")
-        return self
+    @property
+    def versioned_id(self) -> str:
+        """index_id plus content fingerprint: recorded in run manifests and scenarios."""
+        if self.content_fingerprint is None:
+            return self.index_id
+        return f"{self.index_id}-{self.content_fingerprint}"
 
-    def get_table(self, name: str) -> IndexedTable | None:
+    # --- lookup helpers -----------------------------------------------------------------
+
+    def table_names(self) -> list[str]:
+        return [t.name for t in self.tables]
+
+    def get_table(self, name: str) -> IndexTable | None:
         return next((t for t in self.tables if t.name == name), None)
+
+    def columns(self, table: str) -> list[IndexColumn]:
+        found = self.get_table(table)
+        return list(found.columns) if found else []
+
+    def get_column(self, table: str, column: str) -> IndexColumn | None:
+        found = self.get_table(table)
+        return found.get_column(column) if found else None
+
+    def has_column(self, table: str, column: str) -> bool:
+        return self.get_column(table, column) is not None
+
+    def relationships_of(self, table: str) -> list[IndexRelationship]:
+        """Top-level relationships with ``table`` at either end."""
+        return [r for r in self.relationships if table in (r.source_table, r.target_table)]
+
+    def verification(self, left: str, right: str) -> VerificationStatus | None:
+        """Verification of the relationship joining "t.c" ``left`` and ``right`` (either
+        direction), or None when the index has no such relationship."""
+        pair = {left, right}
+        return next(
+            (r.verification for r in self.relationships if {r.source, r.target} == pair), None
+        )
+
+    def rules(self, table: str) -> dict[str, list[str]]:
+        found = self.get_table(table)
+        return found.rules() if found else {}
 
 
 class ReferenceSnapshot(StrictModel):
+    """The slice of the index one scenario's cheat sheet points at (built by code)."""
+
+    reference_kind: DataCatalogKind = ReferenceKind.DATA_CATALOG
     snapshot_id: NonEmptyStr
-    source_catalog_id: NonEmptyStr
-    source_catalog_version: NonEmptyStr
-    tables: list[TableMetadata] = Field(default_factory=list)
-    relationships: list[Relationship] = Field(default_factory=list)
+    source_index_id: NonEmptyStr
+    tables: list[IndexTable] = Field(default_factory=list)
+    relationships: list[IndexRelationship] = Field(default_factory=list)
     missing_references: list[NonEmptyStr] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _unique_table_names(self) -> Self:
-        dupes = find_duplicates([t.name for t in self.tables])
-        if dupes:
-            raise ValueError(f"snapshot {self.snapshot_id!r}: duplicate table names {dupes}")
-        return self
-
-
-class ReferenceIndexDraft(StrictModel):
-    """LLM-facing shape of a reference index: no ids, versions, timestamps or provider info.
-
-    Code adds those when building the ReferenceIndex.
-    """
-
-    tables: list[IndexedTable] = Field(default_factory=list)
-    uncertainties: list[NonEmptyStr] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _unique_table_names(self) -> Self:
-        dupes = find_duplicates([t.name for t in self.tables])
-        if dupes:
-            raise ValueError(f"duplicate table names {dupes}")
-        return self

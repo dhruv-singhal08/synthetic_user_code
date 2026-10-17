@@ -1,7 +1,12 @@
-"""Node 2: generate scenarios + reference cheat sheets (one LLM call per round).
+"""Node 2: generate scenarios (one LLM call per round), in two modes.
 
-Per-scenario deterministic checks decide accept / reject / duplicate. Short results are
-topped up at most ``max_topup_rounds`` times and never padded.
+grounded (reference index given): each scenario carries a reference cheat sheet built in the
+same call; deterministic checks: tables/columns exist in the index, no verification promotion,
+allow_multi_table, unsupported filter.
+ungrounded (no index): a cheat sheet must be absent (rejected otherwise), success_criteria
+non-empty, unsupported filter.
+Per-scenario checks decide accept / reject / duplicate. Short results are topped up at most
+``max_topup_rounds`` times and never padded.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from synthetic_user.models.base import StrictModel
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import (
     CapabilityClassification,
     ReferenceCheatSheet,
@@ -41,6 +47,8 @@ Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
 FILTERED_BY_CONFIG = "filtered_by_config"
 SURPLUS = "surplus: more scenarios returned than requested"
+MISSING_CHEAT_SHEET = "mode grounded requires a reference_cheat_sheet"
+UNEXPECTED_CHEAT_SHEET = "mode ungrounded must not have a reference_cheat_sheet"
 
 _STOPWORDS = frozenset(
     {
@@ -105,23 +113,29 @@ class _RawScenarioBatch(StrictModel):
     scenarios: list[dict[str, Any]] = Field(default_factory=list)
 
 
+def _goal_keywords(business_goal: str) -> str:
+    words = re.findall(r"[a-z0-9]+", business_goal.lower())
+    return " ".join(sorted({w for w in words if len(w) > 2 and w not in _STOPWORDS}))
+
+
 def scenario_signature(task_type: TaskType, business_goal: str, cheat: ReferenceCheatSheet) -> str:
-    """task_type | goal keywords | tables | metrics | dimensions | operations (all sorted)."""
-    keywords = sorted(
-        {
-            w
-            for w in re.findall(r"[a-z0-9]+", business_goal.lower())
-            if len(w) > 2 and w not in _STOPWORDS
-        }
-    )
+    """Grounded: task_type | goal keywords | tables | metrics | dimensions | operations."""
     parts = [
         task_type.value,
-        " ".join(keywords),
+        _goal_keywords(business_goal),
         ",".join(sorted(set(cheat.tables))),
         ",".join(sorted({m.name.strip().lower() for m in cheat.metrics})),
         ",".join(sorted(set(cheat.dimensions))),
         ",".join(sorted({o.strip().lower() for o in cheat.operations})),
     ]
+    return "|".join(p.replace("|", "/") for p in parts)
+
+
+def ungrounded_signature(
+    task_type: TaskType, business_goal: str, capability: CapabilityClassification
+) -> str:
+    """Ungrounded: task_type | goal keywords | capability."""
+    parts = [task_type.value, _goal_keywords(business_goal), capability.value]
     return "|".join(p.replace("|", "/") for p in parts)
 
 
@@ -149,16 +163,19 @@ class ScenarioGenerator:
         self,
         persona: Persona,
         product: ProductDescription,
-        index: ReferenceIndex,
+        index: ReferenceIndex | None,
         *,
         count: int | None = None,
         existing_signatures: Sequence[str] = (),
     ) -> ScenarioGenerationResult:
+        """mode = grounded if ``index`` else ungrounded."""
         cfg = self._settings.generation.scenario
         requested = count if count is not None else cfg.scenario_count
         if requested < 1:
             raise ValueError("scenario count must be >= 1")
 
+        mode = GenerationMode.GROUNDED if index is not None else GenerationMode.UNGROUNDED
+        self._log.info("Generating %d scenario(s), mode %s", requested, mode)
         state = _DedupState(existing_signatures)
         result = ScenarioGenerationResult()
         for round_no in range(1 + cfg.max_topup_rounds):
@@ -207,7 +224,7 @@ class ScenarioGenerator:
         raw: dict[str, Any],
         persona: Persona,
         product: ProductDescription,
-        index: ReferenceIndex,
+        index: ReferenceIndex | None,
         state: _DedupState,
         result: ScenarioGenerationResult,
     ) -> None:
@@ -220,9 +237,19 @@ class ScenarioGenerator:
             )
             return
 
-        reasons = check_cheat_sheet_against_index(draft.cheat_sheet, index)
-        if not cfg.allow_multi_table and len(set(draft.cheat_sheet.tables)) > 1:
-            reasons.append(f"multi_table_not_allowed: uses {sorted(set(draft.cheat_sheet.tables))}")
+        sheet = draft.reference_cheat_sheet
+        reasons: list[str] = []
+        if index is None:
+            if sheet is not None:
+                reasons.append(UNEXPECTED_CHEAT_SHEET)
+        elif sheet is None:
+            reasons.append(MISSING_CHEAT_SHEET)
+        else:
+            reasons.extend(check_cheat_sheet_against_index(sheet, index))
+            if not cfg.allow_multi_table and len(set(sheet.tables)) > 1:
+                reasons.append(f"multi_table_not_allowed: uses {sorted(set(sheet.tables))}")
+        if not draft.success_criteria:
+            reasons.append("success_criteria must not be empty")
         if (
             not cfg.include_unsupported_scenarios
             and draft.capability is CapabilityClassification.UNSUPPORTED
@@ -232,8 +259,12 @@ class ScenarioGenerator:
             result.rejected.append(RejectedScenario(payload=raw, reasons=reasons))
             return
 
-        cheat, _notes = align_relationship_verification(draft.cheat_sheet, index)
-        signature = scenario_signature(draft.task_type, draft.business_goal, cheat)
+        cheat: ReferenceCheatSheet | None = None
+        if index is not None and sheet is not None:
+            cheat, _notes = align_relationship_verification(sheet, index)
+            signature = scenario_signature(draft.task_type, draft.business_goal, cheat)
+        else:
+            signature = ungrounded_signature(draft.task_type, draft.business_goal, draft.capability)
         duplicate_of = state.find(signature)
         if duplicate_of is not None:
             result.duplicates.append(
@@ -245,13 +276,15 @@ class ScenarioGenerator:
             id=self._ids.next(IdKind.SCENARIO),
             persona_id=persona.id,
             product_id=product.product_id,
-            reference_index_id=index.index_id,
+            mode=GenerationMode.GROUNDED if index is not None else GenerationMode.UNGROUNDED,
+            reference_index_id=index.versioned_id if index is not None else None,
             business_goal=draft.business_goal,
             title=draft.title,
             task_type=draft.task_type,
             capability=draft.capability,
             capability_rationale=draft.capability_rationale,
-            cheat_sheet=cheat,
+            success_criteria=draft.success_criteria,
+            reference_cheat_sheet=cheat,
             question_guidance=draft.question_guidance,
             signature=signature,
         )
@@ -260,7 +293,7 @@ class ScenarioGenerator:
 
 
 class _DedupState:
-    """Signatures and (task, tables, metrics, dimensions) shapes seen so far."""
+    """Signatures seen so far, plus grounded (task, tables, metrics, dimensions) shapes."""
 
     def __init__(self, existing: Sequence[str]) -> None:
         self._by_signature: dict[str, str] = {}

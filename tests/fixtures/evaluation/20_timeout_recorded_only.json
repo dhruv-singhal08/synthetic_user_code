@@ -1,7 +1,7 @@
 {
   "name": "timeout_recorded_only",
   "description": "timeout is recorded, not judged.",
-  "execution": {
+  "response": {
     "outcome": "timeout",
     "timeout_seconds": 30
   },

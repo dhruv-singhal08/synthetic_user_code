@@ -16,9 +16,17 @@ llm:
 # provider; required when LLM_PROVIDER switches provider), SAFECHAIN_CONFIG_PATH.
 
 product:
-  client: fixture             # fixture (real product API deferred)
-  fixture_path: ./data/fixtures/product_responses/sample_responses.json
-  timeout_seconds: 30         # per product call
+  timeout_seconds: 30         # per product call (the executor's timeout, any adapter)
+
+# Which adapter talks to the product: fixture | http_json | python (see config/products/).
+# Inline {type, options}, or a path to a config/products/<product_id>.adapter.yaml file.
+product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
+  type: fixture             # fixture | http_json | python
+  options:
+    path: ./data/fixtures/product_responses/sample_responses.json
+
+evaluation:
+  plugins: [sql]            # artifact plugins for grounded evaluation (sql = SQL plugin)
 
 sql:
   dialect: bigquery           # sqlglot dialect; Spanner has no sqlglot dialect
@@ -37,8 +45,6 @@ generation:
     allow_vague_questions: false
     reject_schema_leaks: true           # reject questions that name tables/columns
 
-reference_index:
-  max_tables_per_call: 20         # catalog tables per LLM call; more -> batched
 
 paths:
   artifacts_dir: ./artifacts
@@ -46,6 +52,7 @@ paths:
 inputs:
   persona_path: ./data/personas/finance_controller.yaml
   product_path: ./data/products/sample_product.yaml
-  catalog_path: ./data/references/sample_catalog.yaml
+  reference_index_file: ./data/references/sample_card_spend_index.json   # pre-built index; omit -> ungrounded
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl   # benchmark-evaluator
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json
+  benchmark_product_paths: [./data/products/sample_product.yaml, ./data/products/sample_chatbot.yaml]

@@ -1,0 +1,28 @@
+# Product contract: how Synthetic User calls your product and reads its reply.
+# Upload it in "Product connection" together with the product URL (the URL field wins over
+# `url` below). Any JSON-over-HTTP conversational product works - no code needed.
+#
+# Secrets: never paste a token here. Use ${ENV_VAR} and set the variable before
+# `synthetic-user serve`; header values are never shown in the UI, logs or results.
+
+method: POST                          # GET sends no body
+headers:
+  Authorization: "Bearer ${PRODUCT_API_TOKEN}"
+timeout: 30                           # seconds per question
+
+# Request body. {utterance} = the generated question, {session_id} = the session (or null).
+request_template:
+  question: "{utterance}"
+  session_id: "{session_id}"
+
+# Where the reply lives: dotted paths into the JSON body (list items by index, e.g. data.items.0).
+response_mapping:
+  text: data.answer                   # answer text (text and/or an artifact is required)
+  artifacts:                          # optional, e.g. SQL / chart spec / citations
+    - kind: sql
+      path: data.sql
+  clarification_when: "data.type == clarification"   # optional, conditions are `path == value`
+  clarification_message: data.answer
+  denied_when: "data.status == unsupported"          # optional
+  denied_message: data.answer
+  product_version: meta.version                      # optional

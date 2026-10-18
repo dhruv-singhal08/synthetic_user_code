@@ -67,6 +67,9 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .rail .run-box { margin-top: 18px; padding: 12px; border-radius: var(--radius); background: var(--card); box-shadow: var(--shadow); font-size: 12px; }
 .rail .run-box b { display: block; font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.6px; margin-bottom: 4px; }
 .rail .run-box code { word-break: break-all; }
+.rail .run-box dl { margin: 10px 0 0; display: grid; gap: 2px; }
+.rail .run-box dt { color: var(--muted); font-size: 11px; margin-top: 6px; }
+.rail .run-box dd { margin: 0; overflow-wrap: anywhere; color: var(--ink-2); }
 main { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 
 /* --- cards ----------------------------------------------------------------------------- */
@@ -115,12 +118,15 @@ label.field { font-size: 12px; font-weight: 600; color: var(--ink-2); display: b
 .switch input:checked::after { left: 18px; }
 
 .dropzone {
-  border: 1.5px dashed #b7c3d2; border-radius: var(--radius); padding: 18px; text-align: center;
+  display: block; border: 1.5px dashed #b7c3d2; border-radius: var(--radius); padding: 18px; text-align: center;
   color: var(--ink-2); background: #fafbfd; cursor: pointer; transition: border-color 0.15s, background 0.15s;
 }
 .dropzone:hover, .dropzone.over { border-color: var(--blue); background: var(--blue-soft); }
 .dropzone b { color: var(--blue); }
 .dropzone .small { display: block; margin-top: 2px; }
+.dropzone.compact { padding: 12px; }
+.dropzone.chosen { border-style: solid; border-color: var(--pass); background: var(--pass-bg); }
+.dropzone.chosen .small { color: var(--pass); font-weight: 600; }
 
 /* --- badges / status ------------------------------------------------------------------- */
 .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase; white-space: nowrap; }
@@ -137,7 +143,8 @@ label.field { font-size: 12px; font-weight: 600; color: var(--ink-2); display: b
 .v.met { background: var(--pass-bg); color: var(--pass); }
 .v.partly, .v.unverifiable { background: var(--warn-bg); color: var(--warn); }
 .v.not_met { background: var(--fail-bg); color: var(--fail); }
-.outcome { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.outcome { font-size: 12px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
+#contract-upload { display: flex; flex-direction: column; gap: 6px; }
 .error-box { background: var(--fail-bg); color: var(--fail); border-radius: 6px; padding: 8px 10px; font-size: 13px; }
 .note { background: var(--info-bg); border-radius: 6px; padding: 10px 12px; font-size: 13px; color: var(--ink-2); }
 .note b { color: var(--ink); }
@@ -159,8 +166,14 @@ pre.sql { white-space: pre-wrap; }
 .startbar .spacer { flex: 1; }
 
 /* --- connection ------------------------------------------------------------------------ */
-.row { display: flex; gap: 10px; align-items: center; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row .grow { flex: 1; }
+.conn-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 20px; }
+.conn-field { border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.conn-field .panel-head { margin-bottom: 2px; }
+.conn-field .panel-head .field { margin: 0; }
+.conn-actions { margin-top: 14px; }
+.error-box.flash { margin-top: 10px; flex-basis: 100%; }
 .contract { margin-top: 14px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .kv { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; min-width: 0; }
 .kv b { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -179,6 +192,7 @@ pre.sql { white-space: pre-wrap; }
 .step .count-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); }
 .step .count-row input { width: 70px; padding: 5px 8px; }
 .step .result { font-size: 12px; color: var(--ink-2); min-height: 18px; }
+.step .step-btn { margin-top: auto; }
 .status { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--muted); }
 .step.done .status { color: var(--pass); }
 .step.running .status { color: var(--blue); }
@@ -242,6 +256,6 @@ td.id { font-family: Consolas, monospace; font-size: 12px; color: var(--ink-2); 
   .rail { display: none; }
   .grid-3, .steps { grid-template-columns: minmax(0, 1fr); }
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .contract { grid-template-columns: minmax(0, 1fr); }
+  .contract, .conn-grid { grid-template-columns: minmax(0, 1fr); }
   .topbar { padding: 0 16px; }
 }

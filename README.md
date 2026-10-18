@@ -166,23 +166,33 @@ A local FastAPI server (`src/synthetic_user/web/`) with a single-page UI. It bin
 `127.0.0.1` by default and has no authentication, so do not expose it on a network.
 API docs are at `/api/docs`.
 
-1. **Inputs:** upload persona / product description YAML and (optionally) your reference index
-   JSON, or keep the samples. Each is validated on upload and previewed. No reference index ->
-   the run is ungrounded. Optional **sample queries** for
-   the persona (one per line) are added to the persona's example utterances to mimic the
-   user's style; generated questions never copy them.
-2. **Product connection:** enter the product URL and **Request contract**. The real
-   connection is not implemented: this returns a **mock** contract (ask endpoint, outcomes,
-   SQL dialect) and questions are then answered by a mock product (an LLM stand-in that
-   writes SQL from the reference index schema; needs an index). Without a contract the configured fixture product is used.
-3. **Pipeline:** run the steps (index check, scenarios (+ cheat sheets), questions, run on product,
-   evaluate) one by one or **Run all**. Re-running a step regenerates everything after it.
-4. **Results:** one row per question, the same table as `runs/<run_id>/results.csv`, which
-   is rewritten after every step (scenario + cheat sheet columns, then question, then product
-   SQL/message, then verdict, checks, findings and bug ids). Click a row for every field;
+1. **Inputs:**
+   - **Persona:** the sample persona or your own YAML upload, plus optional **sample queries**
+     (one per line) that are added to the persona's example utterances to mimic the user's
+     style; generated questions never copy them.
+   - **Product description:** upload only (YAML), no sample.
+   - **Reference index:** toggle. Off (default) -> ungrounded run. On -> upload the pre-built
+     index JSON (no sample) -> grounded run with cheat sheets and grounded checks.
+   Each file is validated on upload and previewed.
+2. **Product connection:** the **product URL** plus a **contract** (YAML/JSON) that says how
+   to call the product and read its reply: `method`, `headers` (`${ENV_VAR}` only for
+   secrets), `timeout`, `request_template` (`{utterance}`, `{session_id}`) and
+   `response_mapping` (dotted paths for text / artifacts, clarification / denied conditions).
+   It is the `http_json` adapter's options (a `*.adapter.yaml` file works too); download a
+   template from the UI (`/api/contract-template`). The URL field wins over a `url` in the
+   contract. Header values are never shown or returned by the API. **Mock product** (demo
+   only) instead routes questions to an LLM stand-in that answers from the reference index.
+   Not connected -> the configured `product_adapter` answers.
+3. **Pipeline:** generate scenarios (the index check runs first), generate questions, run on
+   product, evaluate - one by one, in order, or **Run all**. Re-running a step regenerates
+   everything after it.
+4. **Results:** KPI tiles, verdict distribution, filters/search and one row per question - the
+   same table as `runs/<run_id>/results.csv`, which is rewritten after every step. Click a row
+   for every field (scenario, cheat sheet, question, response, checks, findings, bug);
    download the CSV or any step's JSON. Reload-safe: the run id is kept in the URL (`?run=`).
 
-UI runs store their inputs in `runs/<run_id>/inputs/` and UI state in `ui_state.json`.
+UI runs store their inputs (and an uploaded contract, `product_contract.yaml`) in
+`runs/<run_id>/inputs/` and UI state in `ui_state.json`.
 
 ## Artifact layout
 

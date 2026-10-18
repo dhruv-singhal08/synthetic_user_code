@@ -16,7 +16,7 @@ const MAIN_COLUMNS = [
 const state = {
   config: null, samplePersona: null, personaSource: "sample", useIndex: false, uploads: {},
   runId: null, run: null, rows: [], scenarios: [], evaluations: [], filter: "all", search: "",
-  allColumns: false, busy: false,
+  allColumns: false, busy: false, contractSource: "upload", contractFile: null,
 };
 
 // --- helpers ----------------------------------------------------------------------------------
@@ -148,7 +148,9 @@ function updateReadiness() {
   $("#chk-product").className = r.product ? "ok" : "";
   $("#chk-index").className = r.index ? "ok" : "";
   $("#chk-index").textContent = state.useIndex ? "Reference index" : "Reference index (off)";
-  $("#start-hint").textContent = r.ok ? (state.runId ? "Starting again creates a new run." : "") : "Complete the required inputs to start.";
+  $("#start-hint").textContent = r.ok
+    ? (state.runId ? "Starting again creates a new run." : "")
+    : state.runId ? "The current run's inputs are listed on the left. Fill these to start a new run." : "Complete the required inputs to start.";
   $("#create-run").disabled = !r.ok || state.busy;
 }
 
@@ -171,36 +173,100 @@ async function createRun() {
 }
 
 // --- product connection -----------------------------------------------------------------------
-async function requestContract() {
-  const url = $("#product-url").value.trim();
-  await withBusy("Requesting contract", async () => {
-    const body = await postJson(`/api/runs/${state.runId}/contract`, { url });
-    state.run = body.state;
-    renderContract(body.contract);
-    updateUi();
-    log(`Contract received from ${url}`);
-  });
+function setContractSource(source) {
+  state.contractSource = source;
+  for (const b of $$("#contract-source button")) b.classList.toggle("on", b.dataset.source === source);
+  $("#contract-upload").classList.toggle("hidden", source !== "upload");
+  $("#contract-mock").classList.toggle("hidden", source !== "mock");
+  updateUi();
 }
 
-function renderContract(contract) {
+function setContractFile(file) {
+  state.contractFile = file || null;
+  $("#contract-file").textContent = file ? `Selected: ${file.name}` : "Request body template + where the answer is in the reply";
+  $("[data-contract-drop]").classList.toggle("chosen", Boolean(file));
+  updateUi();
+}
+
+function wireContractDrop() {
+  const zone = $("[data-contract-drop]");
+  const input = $("input[type=file]", zone);
+  input.addEventListener("change", () => { setContractFile(input.files[0]); input.value = ""; });
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
+  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+  zone.addEventListener("drop", (e) => { e.preventDefault(); zone.classList.remove("over"); setContractFile(e.dataTransfer.files[0]); });
+}
+
+function canConnect() {
+  if (!state.runId || state.busy) return false;
+  const url = $("#product-url").value.trim();
+  return state.contractSource === "mock" ? Boolean(url) : Boolean(state.contractFile);
+}
+
+async function connect() {
+  const url = $("#product-url").value.trim();
+  await withBusy("Connecting", async () => {
+    if (state.contractSource === "mock") {
+      const body = await postJson(`/api/runs/${state.runId}/contract`, { url });
+      state.run = body.state;
+      log(`Mock product contract for ${url}`);
+    } else {
+      const form = new FormData();
+      form.append("url", url);
+      form.append("contract", state.contractFile);
+      const body = await api(`/api/runs/${state.runId}/connection`, { method: "POST", body: form });
+      state.run = body.state;
+      log(`Connected to ${state.run.connection.product_url} (${state.contractFile.name})`);
+    }
+    renderConnection();
+  }, "#connection .conn-actions");
+}
+
+async function disconnect() {
+  await withBusy("Disconnecting", async () => {
+    const body = await api(`/api/runs/${state.runId}/connection`, { method: "DELETE" });
+    state.run = body.state;
+    renderConnection();
+    log("Product disconnected - the configured adapter answers");
+  }, "#connection .conn-actions");
+}
+
+function renderConnection() {
   const box = $("#contract");
   box.replaceChildren();
   const badge = $("#conn-badge");
-  if (!contract) {
-    badge.className = "badge info"; badge.textContent = "Not connected";
+  const run = state.run || {};
+  const kv = (k, v) => el("div", { class: "kv" }, el("b", { text: k }), el("span", { text: v }));
+  if (run.connection) {
+    const c = run.connection;
+    badge.className = "badge ok"; badge.textContent = "Connected";
+    if (!$("#product-url").value) $("#product-url").value = c.product_url;
+    const mapping = c.response_mapping;
+    const outcomes = ["answered", mapping.clarification_when && "clarification", mapping.denied_when && "denied", "error"].filter(Boolean);
+    box.append(
+      el("div", { class: "contract" },
+        kv("Endpoint", `${c.method} ${c.product_url}`), kv("Contract", c.contract_file),
+        kv("Headers", c.header_names.length ? `${c.header_names.join(", ")} (values hidden)` : "none"),
+        kv("Outcomes", outcomes.join(", "))),
+      el("details", {}, el("summary", { text: "View request template and response mapping" }),
+        el("pre", { text: JSON.stringify({ timeout: c.timeout, request_template: c.request_template, response_mapping: mapping }, null, 2) })),
+    );
     return;
   }
-  badge.className = contract.mock ? "badge warn" : "badge ok";
-  badge.textContent = contract.mock ? "Mock contract" : "Connected";
-  if (contract.product_url && !$("#product-url").value) $("#product-url").value = contract.product_url;
-  const kv = (k, v) => el("div", { class: "kv" }, el("b", { text: k }), el("span", { text: v }));
-  box.append(
-    el("div", { class: "contract" },
-      kv("Product", contract.product_id), kv("Endpoint", `${contract.ask.method} ${contract.ask.path}`),
-      kv("Outcomes", contract.outcomes.join(", ")), kv("Contract", `${contract.contract_version}${contract.mock ? " (mock)" : ""}`)),
-    el("details", {}, el("summary", { text: "View contract JSON" }), el("pre", { text: JSON.stringify(contract, null, 2) })),
-  );
-  if (contract.mock) box.append(el("div", { class: "note", style: "margin-top:10px", text: "The real HTTP connection is not implemented yet: this mock contract routes questions to a mock product (an LLM stand-in that answers from the reference index)." }));
+  if (run.contract) {
+    const contract = run.contract;
+    badge.className = "badge warn"; badge.textContent = "Mock product";
+    if (!$("#product-url").value) $("#product-url").value = contract.product_url;
+    box.append(
+      el("div", { class: "contract" },
+        kv("Product", contract.product_id), kv("Endpoint", `${contract.ask.method} ${contract.ask.path}`),
+        kv("Outcomes", contract.outcomes.join(", ")), kv("Contract", `${contract.contract_version} (mock)`)),
+      el("details", {}, el("summary", { text: "View contract JSON" }), el("pre", { text: JSON.stringify(contract, null, 2) })),
+      el("div", { class: "note", style: "margin-top:10px", text: "No real call is made: questions are answered by a mock product (an LLM stand-in that answers from the reference index)." }),
+    );
+    return;
+  }
+  badge.className = "badge info"; badge.textContent = "Not connected";
 }
 
 // --- pipeline ---------------------------------------------------------------------------------
@@ -223,15 +289,21 @@ function updateUi() {
   const completed = STEPS.filter((s) => d.has(s)).length;
   $("#progress-bar").style.width = `${(completed / STEPS.length) * 100}%`;
   $("#run-all").disabled = !state.runId || state.busy || completed === STEPS.length;
-  $("#request-contract").disabled = !state.runId || state.busy;
+  $("#connect").disabled = !canConnect();
+  $("#disconnect").disabled = !state.runId || state.busy || !(state.run && (state.run.connection || state.run.contract));
   updateReadiness();
 
-  const contract = state.run && state.run.contract;
+  const connection = state.run && state.run.connection;
+  const contract = state.run && (connection || state.run.contract);
   const adapter = state.config ? state.config.product_adapter : "configured";
-  $("#execute-desc").textContent = contract
-    ? "Questions go to the product behind the requested contract (mock product)."
-    : `Questions go to the configured "${adapter}" product adapter. Answers are recorded, never executed.`;
-  $("#adapter-note").textContent = contract ? "" : `Without a contract, questions are answered by the configured "${adapter}" product adapter.`;
+  $("#execute-desc").textContent = connection
+    ? `Questions go to ${connection.product_url}. Answers are recorded, never executed.`
+    : state.run && state.run.contract
+      ? "Questions go to the mock product (LLM stand-in). Answers are recorded, never executed."
+      : `Questions go to the configured "${adapter}" product adapter. Answers are recorded, never executed.`;
+  $("#adapter-note").textContent = contract ? "" : state.runId
+    ? `Not connected: questions go to the configured "${adapter}" adapter.`
+    : "Start a run first.";
   const grounded = state.run ? state.run.sources.reference_index !== "off" : state.useIndex;
   $("#scenarios-desc").textContent = grounded
     ? "Business goals, success criteria and a reference cheat sheet from the index."
@@ -242,6 +314,13 @@ function updateUi() {
   csv.href = state.runId ? `/api/runs/${state.runId}/results.csv` : "#";
   $("#rail-run").replaceChildren(state.runId ? el("code", { text: state.runId }) : document.createTextNode("No run started"));
   $("#rail-mode").replaceChildren(...(state.run ? [el("span", { class: `badge ${grounded ? "blue" : "info"}`, text: grounded ? "Grounded" : "Ungrounded" })] : []));
+  const sources = el("dl");
+  if (state.run) {
+    const labels = { persona: "Persona", product: "Product description", reference_index: "Reference index" };
+    for (const [kind, label] of Object.entries(labels)) sources.append(el("dt", { text: label }), el("dd", { text: state.run.sources[kind] || "—" }));
+    sources.append(el("dt", { text: "Product" }), el("dd", { text: connection ? connection.product_url : state.run.contract ? "mock product" : `configured adapter (${adapter})` }));
+  }
+  $("#rail-sources").replaceChildren(...(state.run ? [sources] : []));
   const nav = { inputs: Boolean(state.runId), connection: Boolean(contract), pipeline: completed === STEPS.length, results: state.rows.some((r) => r.evaluation_status) };
   for (const [k, v] of Object.entries(nav)) $(`#nav-${k}`).classList.toggle("done", v);
 }
@@ -292,14 +371,14 @@ async function runAll() {
   $("#results").scrollIntoView({ behavior: "smooth" });
 }
 
-async function withBusy(label, fn) {
+async function withBusy(label, fn, errorTarget = "#inputs .startbar") {
   state.busy = true; $("#busy").textContent = `${label}…`; updateUi();
-  $$("#inputs .startbar .error-box").forEach((n) => n.remove());
-  try { await fn(); } catch (err) { log(`${label} failed: ${err.message}`, true); alertBox(err.message); }
+  $$(".error-box.flash").forEach((n) => n.remove());
+  try { await fn(); } catch (err) { log(`${label} failed: ${err.message}`, true); alertBox(err.message, errorTarget); }
   finally { state.busy = false; $("#busy").textContent = ""; updateUi(); }
 }
-function alertBox(message) {
-  $("#inputs .startbar").prepend(el("div", { class: "error-box", text: message }));
+function alertBox(message, target) {
+  $(target).after(el("div", { class: "error-box flash", text: message }));
 }
 
 // --- results ----------------------------------------------------------------------------------
@@ -308,7 +387,7 @@ function applyRun(body) {
   state.rows = body.rows || [];
   state.scenarios = body.scenarios || [];
   state.evaluations = body.evaluations || [];
-  renderContract(state.run.contract);
+  renderConnection();
   renderResults(body);
   updateUi();
 }
@@ -485,7 +564,11 @@ async function boot() {
   for (const b of $$(".segmented button", panel("persona"))) b.addEventListener("click", () => setPersonaSource(b.dataset.source));
   $("#use-index").addEventListener("change", (e) => setUseIndex(e.target.checked));
   $("#create-run").addEventListener("click", createRun);
-  $("#request-contract").addEventListener("click", requestContract);
+  wireContractDrop();
+  for (const b of $$("#contract-source button")) b.addEventListener("click", () => setContractSource(b.dataset.source));
+  $("#product-url").addEventListener("input", updateUi);
+  $("#connect").addEventListener("click", connect);
+  $("#disconnect").addEventListener("click", disconnect);
   $("#run-all").addEventListener("click", runAll);
   for (const node of $$(".step")) $(".step-btn", node).addEventListener("click", () => withBusy(`Running ${node.dataset.step}`, () => runStep(node.dataset.step)));
   for (const b of $$("#filter button")) b.addEventListener("click", () => {

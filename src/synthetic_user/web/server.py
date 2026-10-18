@@ -6,16 +6,24 @@ refreshes results.csv, and returns the current results table.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from synthetic_user.adapters.base import ProductAdapter, UnavailableAdapter
 from synthetic_user.adapters.contract import ProductContract, request_contract
+from synthetic_user.adapters.http_json import (
+    HttpJsonAdapter,
+    HttpJsonOptions,
+    Transport,
+    urllib_transport,
+)
 from synthetic_user.adapters.mock_llm import MockLLMAdapter
 from synthetic_user.adapters.registry import create_adapter
 from synthetic_user.core.config import AppConfig
@@ -30,9 +38,23 @@ from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline
 from synthetic_user.storage.json_store import JsonArtifactStore
-from synthetic_user.web.workspace import INPUT_KINDS, RESULTS_CSV, Upload, Workspace, parse_upload
+from synthetic_user.web.workspace import (
+    INPUT_KINDS,
+    RESULTS_CSV,
+    ProductConnection,
+    Upload,
+    Workspace,
+    parse_upload,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
+CONTRACT_TEMPLATE = STATIC_DIR / "product_contract_template.yaml"
+# UI steps run in order (D115); scenarios runs the index check itself.
+_PREREQUISITE = {
+    Step.QUESTIONS: Step.SCENARIOS,
+    Step.EXECUTE: Step.QUESTIONS,
+    Step.EVALUATE: Step.EXECUTE,
+}
 
 
 class StepRequest(BaseModel):
@@ -43,7 +65,15 @@ class ContractRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
 
 
-def create_app(settings: AppConfig) -> FastAPI:
+def create_app(
+    settings: AppConfig,
+    *,
+    env: Mapping[str, str] | None = None,
+    transport: Transport = urllib_transport,
+) -> FastAPI:
+    """``env`` fills ``${VAR}`` contract headers (default: the process environment);
+    ``transport`` is replaceable for tests."""
+    environ: Mapping[str, str] = os.environ if env is None else env
     store = JsonArtifactStore(settings.paths.artifacts_dir)
     workspace = Workspace(settings, store)
     app = FastAPI(title="Synthetic User", docs_url="/api/docs")
@@ -94,6 +124,14 @@ def create_app(settings: AppConfig) -> FastAPI:
         model = parse_upload(kind, upload)
         return {"raw": upload.content.decode("utf-8"), "parsed": model.model_dump(mode="json")}
 
+    @app.get("/api/contract-template", response_class=PlainTextResponse)
+    async def contract_template() -> PlainTextResponse:
+        return PlainTextResponse(
+            CONTRACT_TEMPLATE.read_text(encoding="utf-8"),
+            media_type="application/x-yaml",
+            headers={"Content-Disposition": 'attachment; filename="product_contract.yaml"'},
+        )
+
     # --- runs ----------------------------------------------------------------------------
 
     @app.post("/api/runs")
@@ -121,12 +159,32 @@ def create_app(settings: AppConfig) -> FastAPI:
         state = workspace.state(check_run_id(run_id))
         return {"state": state.model_dump(mode="json"), **workspace.results(run_id)}
 
+    @app.post("/api/runs/{run_id}/connection")
+    async def connect_product(
+        run_id: str,
+        contract: Annotated[UploadFile, File()],
+        url: Annotated[str, Form(max_length=2000)] = "",
+    ) -> dict[str, Any]:
+        """Real product: product URL + uploaded contract -> http_json adapter for execute."""
+        state = workspace.state(check_run_id(run_id))
+        upload = Upload(contract.filename or "contract.yaml", await contract.read())
+        state = workspace.connect(state, url, upload)
+        return {"state": state.model_dump(mode="json")}
+
+    @app.delete("/api/runs/{run_id}/connection")
+    async def disconnect_product(run_id: str) -> dict[str, Any]:
+        state = workspace.state(check_run_id(run_id))
+        state = state.model_copy(update={"connection": None, "contract": None})
+        workspace.save_state(state)
+        return {"state": state.model_dump(mode="json")}
+
     @app.post("/api/runs/{run_id}/contract")
-    async def connect_product(run_id: str, body: ContractRequest) -> dict[str, Any]:
+    async def mock_contract(run_id: str, body: ContractRequest) -> dict[str, Any]:
+        """MOCK contract from a URL (D113): questions go to the LLM mock product."""
         state = workspace.state(check_run_id(run_id))
         inputs = workspace.load_inputs(run_id)
         contract = request_contract(body.url, inputs.product.product_id, settings.sql.dialect)
-        state = state.model_copy(update={"contract": contract})
+        state = state.model_copy(update={"contract": contract, "connection": None})
         workspace.save_state(state)
         return {
             "state": state.model_dump(mode="json"),
@@ -136,11 +194,22 @@ def create_app(settings: AppConfig) -> FastAPI:
     @app.post("/api/runs/{run_id}/steps/{step}")
     async def run_step(run_id: str, step: Step, body: StepRequest | None = None) -> dict[str, Any]:
         state = workspace.state(check_run_id(run_id))
+        needed = _PREREQUISITE.get(step)
+        if needed is not None and needed not in state.steps_done:
+            raise ConfigError(f"Run the '{needed.value}' step before '{step.value}'")
         inputs = workspace.load_inputs(run_id)
         count = body.count if body else None
         llm = create_llm_client(settings)
         product = (
-            _product_adapter(settings, llm, state.contract, inputs)
+            _product_adapter(
+                settings,
+                llm,
+                state.contract,
+                workspace.connection_options(state),
+                inputs,
+                env=environ,
+                transport=transport,
+            )
             if step is Step.EXECUTE
             else UnavailableAdapter()
         )
@@ -185,10 +254,10 @@ def create_app(settings: AppConfig) -> FastAPI:
             finally:
                 await pipeline.aclose()
             detail = {
-                "product": "mock (contract)" if state.contract else product.name,
+                "product": _product_label(state.contract, state.connection, product.name),
                 "executions": len(execute_step.executions),
             }
-        else:
+        elif step is Step.EVALUATE:
             evaluate_step = await pipeline.evaluate_executions(run_id, inputs, force=True)
             detail = {
                 "evaluations": len(evaluate_step.evaluations),
@@ -219,12 +288,29 @@ def create_app(settings: AppConfig) -> FastAPI:
 
 
 def _product_adapter(
-    settings: AppConfig, llm: LLMClient, contract: ProductContract | None, inputs: RunInputs
+    settings: AppConfig,
+    llm: LLMClient,
+    contract: ProductContract | None,
+    connection: HttpJsonOptions | None,
+    inputs: RunInputs,
+    *,
+    env: Mapping[str, str],
+    transport: Transport,
 ) -> ProductAdapter:
-    """Contract requested from a URL -> mock product behind that contract; else the
-    configured product adapter."""
+    """URL + uploaded contract -> the real product (http_json); mock contract -> mock product
+    behind it; else the configured product adapter."""
+    if connection is not None:
+        return HttpJsonAdapter(connection, env=env, transport=transport)
     if contract is not None:
         if inputs.reference_index is None:
             raise ConfigError("The mock product needs a reference index (its database schema)")
         return MockLLMAdapter(llm, contract, inputs.reference_index, inputs.product)
     return create_adapter(settings)
+
+
+def _product_label(
+    contract: ProductContract | None, connection: ProductConnection | None, adapter_name: str
+) -> str:
+    if connection is not None:
+        return f"{adapter_name} ({connection.product_url})"
+    return "mock (contract)" if contract is not None else adapter_name

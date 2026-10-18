@@ -4,6 +4,7 @@ Layout inside ``<artifacts_dir>/runs/<run_id>/``:
     inputs/persona.yaml, inputs/product.yaml      (uploaded or sample copy)
     inputs/reference_index.json                    (uploaded or sample copy; absent -> ungrounded)
     inputs/persona_queries.json                    (optional pasted queries)
+    inputs/product_contract.yaml                   (uploaded product contract, when connected)
     ui_state.json, results.csv, + the normal pipeline artifacts
 """
 
@@ -14,13 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from synthetic_user.adapters.contract import ProductContract
+from synthetic_user.adapters.http_json import HttpJsonOptions
 from synthetic_user.core.config import AppConfig
-from synthetic_user.core.exceptions import InputAssetError
+from synthetic_user.core.exceptions import InputAssetError, format_validation_error
 from synthetic_user.core.identifiers import new_run_id
-from synthetic_user.core.loaders import parse_asset
+from synthetic_user.core.loaders import parse_asset, parse_yaml_mapping
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord
@@ -45,6 +47,22 @@ MAX_UPLOAD_BYTES = 10_000_000  # full pre-built reference index JSONs are large
 MAX_PERSONA_QUERIES = 50
 RESULTS_CSV = "results.csv"
 UI_STATE = "ui_state.json"
+CONTRACT_FILE = "product_contract.yaml"
+
+
+class ProductConnection(StrictModel):
+    """A real product connection: product URL + uploaded contract (http_json, D180).
+
+    Only a summary is kept here (header NAMES, never values); the contract itself stays in
+    inputs/product_contract.yaml and is re-validated before every execute step."""
+
+    product_url: NonEmptyStr
+    contract_file: NonEmptyStr
+    method: NonEmptyStr
+    header_names: list[str] = Field(default_factory=list)
+    timeout: float
+    request_template: dict[str, Any] | list[Any]
+    response_mapping: dict[str, Any]
 
 
 class UiRunState(StrictModel):
@@ -53,7 +71,8 @@ class UiRunState(StrictModel):
     sources: dict[str, str]  # kind -> "sample" | "uploaded: <filename>" | "none"
     persona_queries: list[str] = Field(default_factory=list)
     reference_index_id: str | None = None
-    contract: ProductContract | None = None
+    contract: ProductContract | None = None  # mock contract (D113)
+    connection: ProductConnection | None = None  # real product: URL + uploaded contract
     steps_done: list[Step] = Field(default_factory=list)
 
 
@@ -85,6 +104,31 @@ def _parse(kind: str, text: str, source: str) -> BaseModel:
 
 def _file_name(kind: str) -> str:
     return f"{kind}.json" if kind == REFERENCE_INDEX else f"{kind}.yaml"
+
+
+def parse_contract(text: str, url: str, *, source: str) -> HttpJsonOptions:
+    """Validate a product contract (YAML or JSON): how to call the product and read its reply.
+
+    Shape = the http_json adapter options (method, headers, timeout, request_template,
+    response_mapping), optionally wrapped as ``{type: http_json, options: {...}}`` like a
+    ``*.adapter.yaml`` file. ``url`` (the UI field) wins over a ``url`` in the contract.
+    """
+    data = parse_yaml_mapping(text, InputAssetError, kind="Product contract", source=source)
+    if "options" in data:
+        extra = set(data) - {"type", "options"}
+        if extra or data.get("type", "http_json") != "http_json":
+            raise InputAssetError(
+                f"Product contract {source}: a wrapped contract must be "
+                f"{{type: http_json, options: {{...}}}} (got keys {sorted(data)})"
+            )
+        data = data["options"] if isinstance(data["options"], dict) else {}
+    product_url = url.strip() or str(data.get("url") or "").strip()
+    if not product_url:
+        raise InputAssetError("Enter the product URL (or set url in the contract)")
+    try:
+        return HttpJsonOptions.model_validate({**data, "url": product_url})
+    except ValidationError as exc:
+        raise InputAssetError(f"Product contract {source}: {format_validation_error(exc)}") from exc
 
 
 def clean_queries(text: str) -> list[str]:
@@ -186,6 +230,40 @@ class Workspace:
             examples = list(dict.fromkeys([*persona.example_utterances, *queries]))
             persona = persona.model_copy(update={"example_utterances": examples})
         return RunInputs(persona=persona, product=product, reference_index=index)
+
+    # --- product connection ----------------------------------------------------------------
+
+    def connect(self, state: UiRunState, url: str, upload: Upload) -> UiRunState:
+        """Validate URL + contract, save the contract and switch the run to the real product
+        (the mock contract, if any, is dropped)."""
+        if len(upload.content) > MAX_UPLOAD_BYTES:
+            raise InputAssetError(f"{upload.filename}: larger than {MAX_UPLOAD_BYTES:,} bytes")
+        try:
+            text = upload.content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise InputAssetError(f"{upload.filename}: not UTF-8 text") from exc
+        options = parse_contract(text, url, source=upload.filename)
+        self._store.write_text(self._input(state.run_id, CONTRACT_FILE), text)
+        connection = ProductConnection(
+            product_url=options.url,
+            contract_file=upload.filename,
+            method=options.method,
+            header_names=sorted(options.headers),
+            timeout=options.timeout,
+            request_template=options.request_template,
+            response_mapping=options.response_mapping.model_dump(mode="json", exclude_none=True),
+        )
+        updated = state.model_copy(update={"connection": connection, "contract": None})
+        self.save_state(updated)
+        return updated
+
+    def connection_options(self, state: UiRunState) -> HttpJsonOptions | None:
+        if state.connection is None:
+            return None
+        path = self._store.path_for(self._input(state.run_id, CONTRACT_FILE))
+        return parse_contract(
+            path.read_text(encoding="utf-8"), state.connection.product_url, source=CONTRACT_FILE
+        )
 
     # --- state -----------------------------------------------------------------------------
 

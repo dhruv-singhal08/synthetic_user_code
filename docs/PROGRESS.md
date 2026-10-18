@@ -268,3 +268,10 @@
 - Verified LIVE: `benchmark-evaluator --config config/app.gemini.yaml` -> agreement 0.88 (14/16): grounded sample_nl2sql 9/11, ungrounded sample_policy_chatbot 5/5. Disagreements: B01 (correct SQL; generic persona_fit fails "raw SQL to a low-SQL finance controller") and B09 (label inconclusive for an unverifiable table; the SQL also sums mixed currencies, judged fail). Before the D179 prompt fix B01 also failed goal_completeness.
 - Verified offline: `run --config config/app.fake.yaml` -> pass=2 (clarification, justified denial) fail=1 (wrong join) bug_candidates=1.
 - NOT verified: human review of the benchmark labels; SafeChain.
+
+## UI v2 (2026-10-18) - user request
+- Files: `web/static/{index.html,app.js,style.css}`, `web/static/product_contract_template.yaml` (new), `web/server.py` (POST/DELETE /connection, /contract-template, http_json execute, step-order guard, explicit step branches), `web/workspace.py` (ProductConnection, parse_contract, connect), `tests/web/test_server.py`, README (Web UI), D180-D182.
+- UI: formal navy/blue theme; inputs (persona sample/upload + queries; product upload only; reference index toggle + upload only); product connection (URL + uploaded contract, or mock product); 4-step pipeline with progress; results (KPIs, distribution, filters, search, CSV table, detail drawer, CSV/JSON downloads); the side rail shows the current run's inputs and product.
+- Gate: ruff check pass; ruff format --check pass (105 files); mypy src pass (74 files); pytest 468 passed, 2 deselected.
+- Verified: offline server (`serve` with the fake config) + headless Edge screenshots: fresh page, a reopened grounded run with all 4 steps done (3 rows, 1 fail + bug, CSV link), and a connected contract (endpoint, header names only). Execute through an uploaded contract tested with an injected transport (token sent in the header, absent from every API response).
+- NOT verified: a real product endpoint through the UI; click-through by a person (drag and drop, file pickers); browsers other than Edge.

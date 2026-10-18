@@ -31,6 +31,7 @@
       <b>Current run</b>
       <div id="rail-run" class="muted">No run started</div>
       <div id="rail-mode" class="chips"></div>
+      <div id="rail-sources" class="small"></div>
     </div>
   </nav>
 
@@ -121,17 +122,42 @@
         <span class="num">2</span>
         <div>
           <h2>Product connection</h2>
-          <p>Enter the product URL and request its API contract. Without a contract, the configured product adapter answers.</p>
+          <p>Point the test at the product under test: its URL and the contract that says how to call it and read its reply.</p>
         </div>
         <div class="right"><span id="conn-badge" class="badge info">Not connected</span></div>
       </div>
       <div class="card-body">
-        <div class="row">
-          <input id="product-url" type="url" class="grow" placeholder="https://product.example.com">
-          <button id="request-contract" class="btn navy" type="button" disabled>Request contract</button>
+        <div class="conn-grid">
+          <div class="conn-field">
+            <label class="field" for="product-url">Product URL</label>
+            <input id="product-url" type="url" placeholder="https://product.example.com/v1/ask">
+            <div class="small muted">The endpoint each question is sent to.</div>
+          </div>
+          <div class="conn-field">
+            <div class="panel-head">
+              <label class="field">Contract</label>
+              <div class="segmented" id="contract-source" role="group" aria-label="Contract source">
+                <button type="button" data-source="upload" class="on">Upload contract</button>
+                <button type="button" data-source="mock">Mock product</button>
+              </div>
+            </div>
+            <div id="contract-upload">
+              <label class="dropzone compact" data-contract-drop>
+                <input type="file" accept=".yaml,.yml,.json" hidden>
+                <b>Choose the contract YAML / JSON</b> or drop it here
+                <span id="contract-file" class="small muted">Request body template + where the answer is in the reply</span>
+              </label>
+              <a class="small" href="/api/contract-template" download>Download a contract template</a>
+            </div>
+            <div id="contract-mock" class="note hidden"><b>Mock product.</b> No real call: an LLM stand-in answers from the reference index (needs the index switched on). For demos only.</div>
+          </div>
+        </div>
+        <div class="row conn-actions">
+          <button id="connect" class="btn navy" type="button" disabled>Connect</button>
+          <button id="disconnect" class="btn" type="button" disabled>Disconnect</button>
+          <span id="adapter-note" class="small muted"></span>
         </div>
         <div id="contract"></div>
-        <div id="adapter-note" class="small muted" style="margin-top:10px"></div>
       </div>
     </section>
 

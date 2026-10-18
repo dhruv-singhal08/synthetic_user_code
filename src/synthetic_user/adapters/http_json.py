@@ -6,7 +6,7 @@ Options (``product_adapter.options``)::
     method: POST                      # GET sends no body
     headers: {Authorization: "Bearer ${PRODUCT_TOKEN}"}   # ${ENV_VAR} filled from env
     timeout: 30
-    request_template: {question: "{utterance}", session: "{session_id}"}
+    request_template: {question: "{utterance}", session: "{session_id}", trace: "{uuid}"}
     response_mapping:
       text: data.answer               # dotted paths; list items by index, e.g. data.items.0
       artifacts: [{kind: sql, path: data.sql}]
@@ -30,6 +30,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Self
@@ -52,7 +53,7 @@ from synthetic_user.models.execution import (
 _log = logging.getLogger(__name__)
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-_PLACEHOLDERS = ("utterance", "session_id")
+_PLACEHOLDERS = ("utterance", "session_id", "uuid")
 _MISSING = object()
 
 
@@ -305,13 +306,18 @@ def resolve_env_refs(headers: Mapping[str, str], env: Mapping[str, str]) -> dict
 
 
 def render_template(template: Any, req: ProductRequest) -> Any:
-    """Replace {utterance} / {session_id} in string values. A value that is exactly one
+    """Replace {utterance} / {session_id} / {uuid} in string values. {uuid} is one fresh
+    UUID4 per request (a new product session per question). A value that is exactly one
     placeholder becomes the raw value (so a missing session_id is JSON null)."""
-    values: dict[str, str | None] = {"utterance": req.utterance, "session_id": req.session_id}
+    values = {"utterance": req.utterance, "session_id": req.session_id, "uuid": str(uuid.uuid4())}
+    return _render(template, values)
+
+
+def _render(template: Any, values: Mapping[str, str | None]) -> Any:
     if isinstance(template, dict):
-        return {key: render_template(value, req) for key, value in template.items()}
+        return {key: _render(value, values) for key, value in template.items()}
     if isinstance(template, list):
-        return [render_template(value, req) for value in template]
+        return [_render(value, values) for value in template]
     if isinstance(template, str):
         for name in _PLACEHOLDERS:
             if template == "{" + name + "}":

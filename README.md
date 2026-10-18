@@ -176,7 +176,7 @@ API docs are at `/api/docs`.
    Each file is validated on upload and previewed.
 2. **Product connection:** the **product URL** plus a **contract** (YAML/JSON) that says how
    to call the product and read its reply: `method`, `headers` (`${ENV_VAR}` only for
-   secrets), `timeout`, `request_template` (`{utterance}`, `{session_id}`) and
+   secrets), `timeout`, `request_template` (`{utterance}`, `{uuid}` = fresh per question, `{session_id}`) and
    `response_mapping` (dotted paths for text / artifacts, clarification / denied conditions).
    It is the `http_json` adapter's options (a `*.adapter.yaml` file works too); download a
    template from the UI (`/api/contract-template`). The URL field wins over a `url` in the
@@ -252,7 +252,7 @@ models or the pipeline.
 | type | Use | Options |
 |---|---|---|
 | `fixture` | offline / captured answers | `path` |
-| `http_json` | any JSON-over-HTTP product, config only | `url`, `method`, `headers` (`${ENV_VAR}` filled from env), `timeout`, `request_template` (`{utterance}`, `{session_id}`), `response_mapping` (dotted paths + `path == value` rules) |
+| `http_json` | any JSON-over-HTTP product, config only | `url`, `method`, `headers` (`${ENV_VAR}` filled from env), `timeout`, `request_template` (`{utterance}`, `{uuid}` = fresh per question, `{session_id}`), `response_mapping` (dotted paths + `path == value` rules) |
 | `python` | anything else (SDK, websockets, custom auth) | `class: "pkg.module:Class"`, `init: {...}` (keyword args) |
 
 Examples: `config/products/sample_nl2sql.adapter.yaml` (fixture),

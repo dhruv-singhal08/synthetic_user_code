@@ -219,6 +219,14 @@ def test_template_placeholders() -> None:
     assert render_template(["{utterance}", 1], _req("x")) == ["x", 1]
 
 
+def test_uuid_placeholder_is_fresh_per_request_and_shared_within_one() -> None:
+    template = {"session_id": "{uuid}", "trace": "t-{uuid}", "history": []}
+    first = render_template(template, _req("hi"))
+    second = render_template(template, _req("hi"))
+    assert first["trace"] == f"t-{first['session_id']}" and first["history"] == []
+    assert len(first["session_id"]) == 36 and first["session_id"] != second["session_id"]
+
+
 async def test_get_sends_no_body() -> None:
     transport = StubTransport(body={"data": {"answer": "ok"}})
     await _http(transport, method="GET").send(_req())

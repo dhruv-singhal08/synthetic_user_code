@@ -8,3 +8,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 dist/
+
+# Amex-only files: never commit (SafeChain YAML, real reference index)
+config/safechain.yaml
+data/references/reference_index.json

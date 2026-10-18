@@ -10,10 +10,11 @@ headers:
   Authorization: "Bearer ${PRODUCT_API_TOKEN}"
 timeout: 30                           # seconds per question
 
-# Request body. {utterance} = the generated question, {session_id} = the session (or null).
+# Request body. {utterance} = the generated question; {uuid} = a fresh UUID per question
+# (use it for a session / request id); {session_id} = the tool's session (null in single-turn).
 request_template:
   question: "{utterance}"
-  session_id: "{session_id}"
+  session_id: "{uuid}"
 
 # Where the reply lives: dotted paths into the JSON body (list items by index, e.g. data.items.0).
 response_mapping:

@@ -1,0 +1,30 @@
+# NL2SQL product API (POST /generate/sql/), same call as the team's test script:
+#   payload {"user_query": ..., "session_id": str(uuid4()), "conversation_history": []}
+#   reply   {"result": <SQL>, ...}
+#
+# Web UI: upload this file as the contract in "Product connection" (the URL field wins over
+#   options.url below).
+# CLI:    product_adapter: ./config/products/generate_sql.adapter.yaml
+#
+# Run the Synthetic User UI on another port than the product (the product uses 8000):
+#   poetry run synthetic-user serve --config config/app.safechain.yaml --port 8001
+type: http_json
+options:
+  url: http://localhost:8000/generate/sql/
+  method: POST
+  timeout: 120                        # seconds per question (SQL generation can be slow)
+  request_template:
+    user_query: "{utterance}"
+    session_id: "{uuid}"              # a fresh session per question, like uuid.uuid4()
+    conversation_history: []
+  response_mapping:
+    artifacts:
+      - kind: sql                     # the SQL plugin evaluates it (grounded runs)
+        path: result                  # change if the SQL sits deeper, e.g. result.sql
+    # If the reply also has an explanation / answer text, map it, e.g.:
+    # text: result.explanation
+    # If the product signals clarification or unsupported questions, map them, e.g.:
+    # clarification_when: "status == clarification"
+    # clarification_message: message
+    # denied_when: "status == unsupported"
+    # denied_message: message

@@ -210,6 +210,10 @@ pre.sql { white-space: pre-wrap; }
 .kpi b { display: block; font-size: 24px; font-weight: 700; color: var(--navy); line-height: 1.1; }
 .kpi span { font-size: 12px; color: var(--muted); }
 .kpi.pass b { color: var(--pass); } .kpi.fail b { color: var(--fail); } .kpi.inconclusive b { color: var(--warn); }
+.kpis.metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.kpi small { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+.kpi-title { font-size: 14px; margin: 16px 0 8px; }
+td.score { text-align: center; font-variant-numeric: tabular-nums; }
 .dist { display: flex; height: 10px; border-radius: 999px; overflow: hidden; background: #e6ebf1; margin: 14px 0 6px; }
 .dist div { height: 100%; }
 .dist .pass { background: var(--pass); } .dist .fail { background: var(--fail); } .dist .inconclusive { background: #d4a72c; } .dist .recorded { background: #9aa5b3; }
@@ -255,7 +259,7 @@ td.id { font-family: Consolas, monospace; font-size: 12px; color: var(--ink-2); 
   .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; }
   .rail { display: none; }
   .grid-3, .steps { grid-template-columns: minmax(0, 1fr); }
-  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpis, .kpis.metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .contract, .conn-grid { grid-template-columns: minmax(0, 1fr); }
   .topbar { padding: 0 16px; }
 }

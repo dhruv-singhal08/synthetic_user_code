@@ -21,6 +21,7 @@ from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.scripted import ScriptedLLMClient
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord
+from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
 from synthetic_user.models.reference import CoreRef, ReferencePack, ReferencePackDraft
 from synthetic_user.models.run import RunManifest
@@ -138,18 +139,32 @@ async def test_full_run_files_types_refs_and_outcomes(
         evaluations=evaluations,
     )
 
-    # the wrong join fails reference_alignment with a bug, 1 clarification evaluation, the
-    # justified denial passes
+    # the wrong join fails correctness + hallucination with a bug; clarification and denial
+    # are recorded only
     failed = [e for e in evaluations if e.verdict == "fail"]
     assert failed and all(e.bug_candidates for e in failed)
-    assert [f.category for e in failed for f in e.findings] == ["reference_alignment"]
-    assert len([e for e in evaluations if e.clarification_evaluation is not None]) == 1
-    denied = [e for e in evaluations if e.product_outcome == "denied"]
-    assert [(e.verdict, e.evaluation_status) for e in denied] == [("pass", "evaluated")]
+    assert [f.category for e in failed for f in e.findings] == ["correctness", "hallucination_rate"]
+    recorded = [e.product_outcome for e in evaluations if e.verdict is None]
+    assert sorted(recorded) == ["clarification", "denied"]
     assert [b.bug_id for b in bugs] == [b.bug_id for e in evaluations for b in e.bug_candidates]
 
+    # run KPIs (kpis.json / kpis.csv)
+    kpis = RunKpis.model_validate_json((run_dir / "kpis.json").read_bytes())
+    assert kpis == summary.kpis
+    assert (kpis.judged, kpis.task_success_rate, kpis.availability) == (1, 0.0, 1.0)
+    means = {m.metric.value: m.mean for m in kpis.metrics}
+    assert means == {
+        "relevancy": 1.0,
+        "correctness": 0.0,
+        "groundedness": 0.667,
+        "hallucination_rate": 0.333,
+        "completeness": 1.0,
+    }
+    assert (kpis.new_bugs, kpis.new_bugs_by_severity["high"], kpis.known_gap_bugs) == (1, 1, 0)
+    assert "Hallucination rate (mean),0.333,1" in (run_dir / "kpis.csv").read_text(encoding="utf-8")
+
     assert summary.steps_run == list(Step)
-    assert summary.verdicts == {"pass": 2, "fail": 1, "inconclusive": 0, "recorded_only": 0}
+    assert summary.verdicts == {"pass": 0, "fail": 1, "inconclusive": 0, "recorded_only": 2}
     assert summary.outcomes["answered"] == 1
     assert len(product.asked) == len(questions) == 3
 
@@ -217,8 +232,9 @@ def test_cli_run_offline(fake_config: Path) -> None:
         app, ["--config", str(fake_config), "--log-level", "WARNING", "run", "--run-id", RUN_ID]
     )
     assert result.exit_code == 0, result.output
-    assert "verdicts pass=2 fail=1 inconclusive=0 recorded_only=0" in result.output
+    assert "verdicts pass=0 fail=1 inconclusive=0 recorded_only=2" in result.output
     assert "bug_candidates=1" in result.output
+    assert "kpi correctness mean=0 pass_rate=0 n=1" in result.output
     assert "run_folder=" in result.output
 
     again = CliRunner().invoke(

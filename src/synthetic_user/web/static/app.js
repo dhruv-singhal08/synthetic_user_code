@@ -2,20 +2,21 @@
 // Synthetic User UI. All data is inserted with textContent (never innerHTML) - inputs are untrusted.
 
 const STEPS = ["scenarios", "questions", "execute", "evaluate"];
-const CHECK_LABELS = {
-  relevance: "Relevance", goal_completeness: "Goal completeness", persona_fit: "Persona fit",
-  capability_consistency: "Capability consistency", clarification_handling: "Clarification handling",
-  safety_and_honesty: "Safety & honesty", reference_alignment: "Reference alignment",
+const METRICS = ["relevancy", "correctness", "groundedness", "hallucination_rate", "completeness"];
+const METRIC_LABELS = {
+  relevancy: "Answer relevancy", correctness: "Correctness", groundedness: "Groundedness",
+  hallucination_rate: "Hallucination rate", completeness: "Completeness",
 };
 const MAIN_COLUMNS = [
   ["question_id", "Question"], ["scenario_title", "Scenario"], ["question", "Asked"],
-  ["product_outcome", "Outcome"], ["final_verdict", "Verdict"], ["failed_checks", "Failed checks"],
-  ["bug_ids", "Bug"],
+  ["product_outcome", "Outcome"], ["final_verdict", "Verdict"],
+  ["relevancy", "Relevancy"], ["correctness", "Correct."], ["groundedness", "Grounded."],
+  ["hallucination_rate", "Halluc."], ["completeness", "Complete."], ["bug_ids", "Bug"],
 ];
 
 const state = {
   config: null, samplePersona: null, personaSource: "sample", useIndex: false, uploads: {},
-  runId: null, run: null, rows: [], scenarios: [], packs: [], evaluations: [], filter: "all", search: "",
+  runId: null, run: null, rows: [], scenarios: [], packs: [], evaluations: [], kpis: null, filter: "all", search: "",
   allColumns: false, busy: false, contractSource: "upload", contractFile: null,
 };
 
@@ -46,7 +47,14 @@ async function api(path, options = {}) {
 const postJson = (path, data) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
 const putJson = (path, data) => api(path, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
 const list = (items) => (items && items.length ? el("ul", {}, items.map((i) => el("li", { text: i }))) : el("span", { class: "muted", text: "—" }));
-const split = (value) => (value || "").split(" | ").filter(Boolean);
+// CSV cells list several items as "• item" lines (items may span lines, e.g. SQL).
+const split = (value) => {
+  const text = (value || "").trim();
+  if (!text) return [];
+  if (!text.startsWith("• ")) return [text];
+  return text.slice(2).split(/\n• /).map((item) => item.trim()).filter(Boolean);
+};
+const fmt = (v, pct = false) => (v == null ? "—" : pct ? `${Math.round(v * 100)}%` : String(v));
 
 // --- inputs -----------------------------------------------------------------------------------
 function previewOf(kind, d, raw) {
@@ -322,6 +330,9 @@ function updateUi() {
   const csv = $("#download-csv");
   csv.classList.toggle("disabled", !state.runId);
   csv.href = state.runId ? `/api/runs/${state.runId}/results.csv` : "#";
+  const kpiCsv = $("#download-kpis");
+  kpiCsv.classList.toggle("disabled", !state.kpis);
+  kpiCsv.href = state.kpis ? `/api/runs/${state.runId}/artifacts/kpis.csv` : "#";
   $("#rail-run").replaceChildren(state.runId ? el("code", { text: state.runId }) : document.createTextNode("No run started"));
   $("#rail-mode").replaceChildren(...(state.run ? [el("span", { class: `badge ${grounded ? "blue" : "info"}`, text: grounded ? "Grounded" : "Ungrounded" })] : []));
   const sources = el("dl");
@@ -339,7 +350,7 @@ function describe(step, detail) {
   if (step === "scenarios") return `${detail.accepted} accepted, ${detail.rejected} rejected${detail.reference_packs ? `, ${detail.reference_packs} reference pack(s)` : ""}`;
   if (step === "questions") return `${detail.accepted} questions, ${detail.rejected} rejected`;
   if (step === "execute") return `${detail.executions} answers via ${detail.product}`;
-  return `${detail.evaluations} evaluated, ${detail.bug_candidates} bug candidate(s)`;
+  return `${detail.evaluations} evaluated, ${detail.bug_candidates} bug candidate(s)${detail.task_success_rate != null ? `, task success ${fmt(detail.task_success_rate, true)}` : ""}`;
 }
 
 async function runStep(step) {
@@ -397,6 +408,7 @@ function applyRun(body) {
   state.rows = body.rows || [];
   state.scenarios = body.scenarios || [];
   state.packs = body.reference_packs || [];
+  state.kpis = body.kpis || null;
   state.evaluations = body.evaluations || [];
   renderConnection();
   renderResults(body);
@@ -415,18 +427,25 @@ function filteredRows() {
 function renderKpis() {
   const rows = state.rows.filter((r) => r.question_id);
   const by = (k, v) => rows.filter((r) => r[k] === v).length;
-  const recorded = by("final_verdict", "recorded_only");
+  const k = state.kpis;
+  const tile = (cls, value, label, sub) => el("div", { class: `kpi ${cls}` }, el("b", { text: String(value) }), el("span", { text: label }), sub ? el("small", { text: sub }) : null);
   const tiles = [
-    ["", new Set(state.rows.map((r) => r.scenario_id)).size, "Scenarios"],
-    ["", rows.length, "Questions"],
-    ["", by("product_outcome", "answered"), "Answered"],
-    ["pass", by("final_verdict", "pass"), "Pass"],
-    ["fail", by("final_verdict", "fail"), "Fail"],
-    ["inconclusive", by("final_verdict", "inconclusive"), "Inconclusive"],
-    ["fail", rows.filter((r) => r.bug_ids).length, "Bug candidates"],
+    tile("", new Set(state.rows.map((r) => r.scenario_id)).size, "Scenarios"),
+    tile("", rows.length, "Questions", k ? `${k.outcomes.answered} answered` : ""),
+    tile("pass", k ? fmt(k.task_success_rate, true) : "—", "Task success", k ? `${k.verdicts.pass} of ${k.judged} judged` : "pass / judged answers"),
+    tile("fail", by("final_verdict", "fail"), "Fail"),
+    tile("inconclusive", by("final_verdict", "inconclusive"), "Inconclusive"),
+    tile("", k ? fmt(k.availability, true) : "—", "Availability", k && k.latency_p50_ms != null ? `latency p50 ${Math.round(k.latency_p50_ms)} ms · p95 ${Math.round(k.latency_p95_ms)} ms` : ""),
+    tile("fail", k ? k.new_bugs : rows.filter((r) => r.bug_ids).length, "New bugs", k ? `${k.known_gap_bugs} known-gap bug(s)` : ""),
   ];
-  $("#kpis").replaceChildren(...tiles.map(([cls, n, label]) => el("div", { class: `kpi ${cls}` }, el("b", { text: String(n) }), el("span", { text: label }))));
-  const counts = { pass: by("final_verdict", "pass"), fail: by("final_verdict", "fail"), inconclusive: by("final_verdict", "inconclusive"), recorded };
+  $("#kpis").replaceChildren(...tiles);
+  $("#metric-kpis").replaceChildren(...METRICS.map((name) => {
+    const m = k && k.metrics.find((x) => x.metric === name);
+    if (!m || m.mean == null) return tile("", "—", METRIC_LABELS[name], m ? `n/a ${m.not_applicable} · inconclusive ${m.inconclusive}` : "not evaluated yet");
+    const best = m.lower_is_better ? "score 0" : "score 1";
+    return tile(m.lower_is_better ? (m.mean > 0 ? "fail" : "pass") : "", m.mean.toFixed(2), METRIC_LABELS[name], `${fmt(m.pass_rate, true)} ${best} · n=${m.n}`);
+  }));
+  const counts = { pass: by("final_verdict", "pass"), fail: by("final_verdict", "fail"), inconclusive: by("final_verdict", "inconclusive"), recorded: by("final_verdict", "recorded_only") };
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   $("#dist").replaceChildren(...Object.entries(counts).filter(([, n]) => n && total).map(([cls, n]) => el("div", { class: cls, style: `width:${(n / total) * 100}%`, title: `${cls}: ${n}` })));
 }
@@ -447,7 +466,7 @@ function renderTable() {
       if (key === "product_outcome") return el("td", {}, el("span", { class: "outcome", text: value }));
       if (key === "question_id" || key === "bug_ids") return el("td", { class: "id", text: value });
       if (key === "question") return el("td", { class: "q", text: value });
-      if (key === "failed_checks") return el("td", { text: split(value).map((c) => CHECK_LABELS[c] || c.replaceAll("_", " ")).join(", ") });
+      if (METRICS.includes(key)) return el("td", { class: "score", text: value || (row.final_verdict && row.final_verdict !== "recorded_only" ? "n/a" : "") });
       return el("td", { text: value.length > 300 ? `${value.slice(0, 300)}…` : value });
     }));
     tr.addEventListener("click", () => openDrawer(row));
@@ -528,30 +547,36 @@ function packSection(pack) {
   return section(title, ...content);
 }
 
-function checkTable(entries, rationale) {
-  const table = el("table", { class: "check-table" });
-  for (const [name, status] of entries) table.append(el("tr", {}, el("td", { text: CHECK_LABELS[name] || name.replaceAll("_", " ") }), el("td", {}, verdictBadge(status)), el("td", { text: rationale[name] || "" })));
-  return table;
-}
-
 function evaluationSections(ev) {
   const out = [];
   out.push(section(["Evaluation", verdictBadge(ev.verdict || "recorded_only")], pairs([
     ["Status", ev.evaluation_status.replaceAll("_", " ")], ["LLM opinion", ev.llm_verdict ? verdictBadge(ev.llm_verdict) : ""],
     ["Notes", ev.notes],
   ])));
-  if (ev.checks) {
-    const applicable = Object.entries(ev.checks).filter(([, s]) => s !== "not_applicable");
-    out.push(section("Checks", checkTable(applicable, ev.check_rationale)));
+  if (ev.metrics) {
+    const table = el("table", { class: "check-table" });
+    for (const name of METRICS) {
+      const m = ev.metrics[name];
+      const value = m.status === "scored" ? String(m.score) : m.status.replaceAll("_", " ");
+      table.append(el("tr", {}, el("td", { text: METRIC_LABELS[name] }), el("td", { class: "score", text: value }),
+        el("td", {}, m.rationale, m.evidence ? el("q", { text: m.evidence }) : null)));
+    }
+    out.push(section("Metrics", table));
+  }
+  if (ev.claims.length) {
+    const table = el("table", { class: "check-table" });
+    for (const c of ev.claims) table.append(el("tr", {}, el("td", {}, el("q", { text: c.text })), el("td", { text: c.status.replaceAll("_", " ") }),
+      el("td", { class: "muted", text: c.reason + (c.reference_quote ? ` — reference: "${c.reference_quote}"` : "") })));
+    out.push(section(`Claims (${ev.claims.length}) — basis of groundedness and hallucination rate`, table));
   }
   if (ev.criteria_results.length) {
     const table = el("table", { class: "check-table" });
     for (const c of ev.criteria_results) table.append(el("tr", {}, el("td", {}, verdictBadge(c.status)), el("td", { text: c.criterion }), el("td", { class: "muted", text: c.rationale })));
-    out.push(section("Goal completeness by success criterion", table));
+    out.push(section("Completeness by success criterion", table));
   }
   if (ev.findings.length) {
     out.push(section(`Findings (${ev.findings.length})`, ...ev.findings.map((f) => el("div", { class: `finding sev-${f.severity}` },
-      el("div", { class: "meta", text: `${f.finding_id} · ${f.category.replaceAll("_", " ")} · ${f.severity} · ${f.evidence_status} · ${f.source}${f.matches_known_gap ? " · known gap" : ""}` }),
+      el("div", { class: "meta", text: `${f.finding_id} · ${(METRIC_LABELS[f.category] || f.category).replaceAll("_", " ")} · ${f.severity} · ${f.evidence_status} · ${f.source}${f.matches_known_gap ? " · known gap" : ""}` }),
       el("div", { text: f.description }),
       el("div", { class: "muted small", text: `Expected: ${f.expected_behavior} — Observed: ${f.observed_behavior}` }),
       f.evidence ? el("q", { text: f.evidence }) : null))));

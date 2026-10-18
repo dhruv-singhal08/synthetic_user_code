@@ -11,12 +11,13 @@ from synthetic_user.adapters.contract import request_contract
 from synthetic_user.adapters.mock_llm import MockLLMAdapter, parse_mock_reply
 from synthetic_user.core.exceptions import LLMProviderError, ProductAdapterError
 from synthetic_user.llm.fake import FakeLLMClient
+from synthetic_user.models.evaluation import EvaluationResult
 from synthetic_user.models.execution import AnsweredResponse, ExecutionRecord
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.web.results_csv import COLUMNS, build_rows, to_csv
+from synthetic_user.web.results_csv import COLUMNS, build_rows, bullets, to_csv
 
 
 def _question(scenario: Scenario) -> QuestionCase:
@@ -65,13 +66,14 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
     assert all(list(r) == COLUMNS for r in rows)
     assert (rows[0]["question_id"], rows[0]["artifacts"], rows[0]["latency_ms"]) == (
         "Q_001",
-        "sql: SELECT 1",
+        "sql:\nSELECT 1",
         "12",
     )
     assert rows[0]["expected_behavior"] == "Rank the top spenders."
-    assert rows[0]["acceptable_variations"] == "a | b"
+    assert rows[0]["acceptable_variations"] == "• a\n• b"  # several items -> bullets
+    assert rows[0]["success_criteria"] == "names the top spenders"  # one item -> as is
     assert rows[0]["core_refs"] == (
-        "card_transactions.amount | card_transactions.currency_code | employees.full_name"
+        "• card_transactions.amount\n• card_transactions.currency_code\n• employees.full_name"
     )
     assert rows[0]["reference_rules"] == "never sum amounts across currencies"
     assert rows[0]["answer_text"] == "Here are the top spenders."
@@ -80,8 +82,17 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
 
 
 def test_columns_are_the_evaluation_view() -> None:
-    assert len(COLUMNS) == 24
+    assert len(COLUMNS) == 27
+    assert COLUMNS[-10:-5] == [
+        "relevancy",
+        "correctness",
+        "groundedness",
+        "hallucination_rate",
+        "completeness",
+    ]
     for removed in (
+        "failed_checks",
+        "inconclusive_checks",
         "task_type",
         "capability_rationale",
         "cheat_tables",
@@ -167,3 +178,61 @@ async def test_mock_product_works_without_reference(sample_chatbot: ProductDescr
 def test_contract_rejects_bad_urls(url: str) -> None:
     with pytest.raises(ProductAdapterError):
         request_contract(url, "p")
+
+
+def test_bullets_and_metric_cells(sample_scenarios: list[Scenario]) -> None:
+    assert bullets([]) == "" and bullets(["one"]) == "one"
+    assert bullets(["a", "", "b"]) == "• a\n• b"
+    question = _question(sample_scenarios[0])
+    execution = ExecutionRecord.model_validate(
+        {
+            "execution_id": "EXE_001",
+            "question_id": "Q_001",
+            "product_id": "p",
+            "adapter": "fixture",
+            "submitted_question": "Top spenders?",
+            "started_at": datetime(2026, 10, 14, tzinfo=UTC),
+            "response": {
+                "outcome": "answered",
+                "artifacts": [
+                    {"kind": "sql", "content": "SELECT 1"},
+                    {"kind": "tool_calls", "content": [{"name": "aggregate"}]},
+                ],
+            },
+        }
+    )
+    metric = {"status": "scored", "score": 1.0, "rationale": "ok"}
+    evaluation = EvaluationResult.model_validate(
+        {
+            "evaluation_id": "EVAL_001",
+            "question_id": "Q_001",
+            "scenario_id": "SCN_001",
+            "execution_id": "EXE_001",
+            "product_outcome": "answered",
+            "mode": "grounded",
+            "verdict": "inconclusive",
+            "evaluation_status": "evaluated",
+            "metrics": {
+                "relevancy": metric,
+                "correctness": {"status": "inconclusive", "rationale": "cannot tell"},
+                "groundedness": {"status": "not_applicable", "rationale": "no claims"},
+                "hallucination_rate": {**metric, "score": 0.25},
+                "completeness": {**metric, "score": 0.5},
+            },
+            "criteria_results": [
+                {"criterion": "names the top spenders", "status": "met", "rationale": "ok"},
+                {"criterion": "per currency", "status": "not_met", "rationale": "no"},
+            ],
+        }
+    )
+    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [evaluation])[0]
+    assert row["artifacts"].startswith("• sql:\nSELECT 1\n• tool_calls:\n[")
+    assert [row[m] for m in ("relevancy", "correctness", "groundedness")] == [
+        "1",
+        "inconclusive",
+        "",
+    ]
+    assert (row["hallucination_rate"], row["completeness"]) == ("0.25", "0.5")
+    assert row["criteria_results"] == "• met: names the top spenders\n• not_met: per currency"
+    parsed = list(csv.DictReader(io.StringIO(to_csv([row]))))
+    assert parsed == [row]  # multi-line cells survive the CSV round trip

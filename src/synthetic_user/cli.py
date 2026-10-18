@@ -27,7 +27,14 @@ from synthetic_user.adapters.base import ProductAdapter, UnavailableAdapter
 from synthetic_user.adapters.fixture import fixture_template
 from synthetic_user.adapters.registry import create_adapter
 from synthetic_user.benchmark import load_cases, load_scenarios, run_benchmark
-from synthetic_user.core.config import AppConfig, LLMProvider, load_adapter_file, load_config
+from synthetic_user.core.config import (
+    AppConfig,
+    LLMProvider,
+    WebSettings,
+    WebUi,
+    load_adapter_file,
+    load_config,
+)
 from synthetic_user.core.exceptions import (
     ArtifactIntegrityError,
     ConfigError,
@@ -36,6 +43,7 @@ from synthetic_user.core.exceptions import (
 from synthetic_user.core.identifiers import RUN_ID_PATTERN, SequentialIdGenerator, new_run_id
 from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.core.logging import get_run_logger, setup_logging
+from synthetic_user.kpis import METRIC_LABELS, compute_kpis, kpis_csv
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.fake import FakeLLMClient
@@ -43,9 +51,10 @@ from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
+from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
-from synthetic_user.models.run import RunManifest
+from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.pipeline import RunInputs, RunSummary, Step, SyntheticUserPipeline
@@ -442,7 +451,6 @@ async def _evaluate(
     if questions_path is None or executions_path is None or scenarios_path is None:
         raise ConfigError("File mode needs all of --questions --executions --scenarios")
     product = load_product(settings.inputs.product_path)
-    persona = load_persona(settings.inputs.persona_path)
     reference = _reference(settings, reference_path, guide_path)
     question_list = _read_file(questions_path, TypeAdapter(list[QuestionCase]))
     execution_items = _read_file(executions_path, TypeAdapter(list[ExecutionRecord]))
@@ -462,10 +470,20 @@ async def _evaluate(
         reference=reference,
         id_generator=SequentialIdGenerator(),
     )
-    results = await evaluator.evaluate_many(cases, product, persona)
+    results = await evaluator.evaluate_many(cases, product)
     bugs = [b for r in results for b in r.bug_candidates]
+    kpis = compute_kpis(
+        run_id="file-mode",
+        product_id=product.product_id,
+        mode=GenerationMode.GROUNDED if reference is not None else GenerationMode.UNGROUNDED,
+        scenarios=scenario_list,
+        executions=execution_items,
+        evaluations=results,
+    )
     out_store.write_models("evaluations.json", results, EvaluationResult)
     out_store.write_models("bug_candidates.json", bugs, BugCandidate)
+    out_store.write_model("kpis.json", kpis)
+    out_store.write_text("kpis.csv", kpis_csv(kpis))
     _print_evaluation(results, bugs, len(question_list), out_store.path_for("."))
 
 
@@ -563,7 +581,23 @@ def _print_summary(summary: RunSummary) -> None:
     typer.echo("outcomes " + " ".join(f"{k}={v}" for k, v in summary.outcomes.items()))
     typer.echo("verdicts " + " ".join(f"{k}={v}" for k, v in summary.verdicts.items()))
     typer.echo(f"bug_candidates={summary.bug_candidates}")
+    _print_kpis(summary.kpis)
     typer.echo(f"run_folder={summary.run_dir}")
+
+
+def _print_kpis(kpis: RunKpis) -> None:
+    def fmt(value: float | None) -> str:
+        return "-" if value is None else f"{value:g}"
+
+    typer.echo(f"kpi task_success_rate={fmt(kpis.task_success_rate)} judged={kpis.judged}")
+    for m in kpis.metrics:
+        name = METRIC_LABELS[m.metric].lower().replace(" ", "_")
+        typer.echo(f"kpi {name} mean={fmt(m.mean)} pass_rate={fmt(m.pass_rate)} n={m.n}")
+    typer.echo(
+        f"kpi availability={fmt(kpis.availability)} latency_p50_ms={fmt(kpis.latency_p50_ms)} "
+        f"latency_p95_ms={fmt(kpis.latency_p95_ms)} new_bugs={kpis.new_bugs} "
+        f"known_gap_bugs={kpis.known_gap_bugs} inconclusive_rate={fmt(kpis.inconclusive_rate)}"
+    )
 
 
 @app.command("serve")
@@ -575,6 +609,12 @@ def serve(
         "127.0.0.1"
     ),
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8000,
+    ui: Annotated[
+        WebUi | None,
+        typer.Option(
+            "--ui", help="UI served at / (default: web.ui). Both stay at /modern, /classic."
+        ),
+    ] = None,
 ) -> None:
     """Start the web UI + API (FastAPI) at http://HOST:PORT."""
     state = _state(ctx, config, log_level)
@@ -585,7 +625,11 @@ def serve(
         from synthetic_user.web.server import create_app
 
         settings = load_config(state.config_path)
-        typer.echo(f"Synthetic User UI on http://{host}:{port}  (Ctrl+C to stop)")
+        if ui is not None:
+            settings = settings.model_copy(update={"web": WebSettings(ui=ui)})
+        typer.echo(
+            f"Synthetic User UI ({settings.web.ui.value}) on http://{host}:{port}  (Ctrl+C to stop)"
+        )
         uvicorn.run(create_app(settings), host=host, port=port, log_level="warning")
 
     _guard(start)
@@ -631,7 +675,6 @@ async def _benchmark(state: CliState, cases_path: Path | None, scenarios_path: P
     reference = _reference(settings)
     product_paths = settings.inputs.benchmark_product_paths or [settings.inputs.product_path]
     products = {p.product_id: p for p in (load_product(path) for path in product_paths)}
-    persona = load_persona(settings.inputs.persona_path)
     evaluator = Evaluator(
         create_llm_client(settings),
         settings,
@@ -640,19 +683,21 @@ async def _benchmark(state: CliState, cases_path: Path | None, scenarios_path: P
         id_generator=SequentialIdGenerator(),
     )
     scenario_list, packs = load_scenarios(scenarios_path)
-    report = await run_benchmark(
-        evaluator, load_cases(cases_path), scenario_list, packs, products, persona
-    )
+    report = await run_benchmark(evaluator, load_cases(cases_path), scenario_list, packs, products)
     for row in report.rows:
-        mark = "ok  " if row.agrees else "DIFF"
+        mark = "ok  " if row.agrees else ("n/j " if not row.judged else "DIFF")
         typer.echo(
             f"{mark} {row.case_id} {row.mode} {row.product_id} label={row.label} "
             f"verdict={row.verdict}"
         )
     for group in sorted({(r.mode, r.product_id) for r in report.rows}):
         rows = [r for r in report.rows if (r.mode, r.product_id) == group]
-        typer.echo(f"  {group[0]} {group[1]}: {sum(r.agrees for r in rows)}/{len(rows)}")
-    typer.echo(f"agreement={report.agreement:.2f} ({report.agreed}/{len(report.rows)})")
+        judged = [r for r in rows if r.judged]
+        typer.echo(f"  {group[0]} {group[1]}: {sum(r.agrees for r in judged)}/{len(judged)}")
+    typer.echo(
+        f"agreement={report.agreement:.2f} ({report.agreed}/{len(report.judged)} judged; "
+        f"{len(report.rows) - len(report.judged)} not judged: clarification / denied)"
+    )
 
 
 # --- helpers ------------------------------------------------------------------------------

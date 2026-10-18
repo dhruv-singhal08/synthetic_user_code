@@ -1,25 +1,19 @@
-"""Prompt for the evaluation of one product response (all products, both modes).
+"""Prompt for the evaluation of one ANSWERED product response (all products, both modes).
 
-The evaluator sees only the standard evaluation contract (design v3): the question, the goal,
-expected_behavior, success_criteria (the only input that can fail goal_completeness),
-acceptable_variations, the product description, the persona's expertise and the full
-response (text + artifacts). Grounded questions add the scenario's Reference Pack (core_refs +
-rules, authoritative) and the usage guide, and get the reference_alignment check.
+The judge sees only the evaluation contract (design v3): the question, the goal,
+expected_behavior, success_criteria, acceptable_variations, the product description and the
+full response (text + artifacts). Grounded questions add the scenario's Reference Pack
+(authoritative) and the usage guide. The judge scores relevancy and (grounded) correctness
+0 / 0.5 / 1, rates every success criterion and labels every factual claim; code computes
+completeness, groundedness and hallucination_rate and the verdict from that.
 """
 
 from __future__ import annotations
 
 import json
-from enum import StrEnum
 
-from synthetic_user.models.evaluation import GenericEvaluationDraft
-from synthetic_user.models.execution import (
-    AnsweredResponse,
-    ClarificationResponse,
-    DeniedResponse,
-    ProductResponse,
-)
-from synthetic_user.models.persona import Persona
+from synthetic_user.models.evaluation import EvaluationDraft
+from synthetic_user.models.execution import AnsweredResponse
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
@@ -36,77 +30,20 @@ SYSTEM = (
 ARTIFACT_MAX_CHARS = 8000
 
 
-class EvaluationFocus(StrEnum):
-    ANSWER = "answer"  # answered: all checks except clarification_handling
-    CLARIFICATION = "clarification"  # clarification: clarification_handling is the focus
-    DENIAL = "denial"  # denied: capability_consistency only (was the denial justified?)
-
-
-def focus_for(response: ProductResponse) -> EvaluationFocus | None:
-    if isinstance(response, AnsweredResponse):
-        return EvaluationFocus.ANSWER
-    if isinstance(response, ClarificationResponse):
-        return EvaluationFocus.CLARIFICATION
-    if isinstance(response, DeniedResponse):
-        return EvaluationFocus.DENIAL
-    return None  # error / timeout: recorded only, never judged
-
-
-def response_text(response: ProductResponse) -> str:
-    """Everything the judge may quote from: text, message and artifact contents."""
-    parts: list[str] = []
-    if isinstance(response, AnsweredResponse):
-        parts.append(response.text or "")
-        for artifact in response.artifacts:
-            content = artifact.content
-            parts.append(content if isinstance(content, str) else json.dumps(content))
-    elif isinstance(response, ClarificationResponse | DeniedResponse):
-        parts.append(response.message)
+def response_text(response: AnsweredResponse) -> str:
+    """Everything the judge may quote from: the text and the artifact contents."""
+    parts = [response.text or ""]
+    for artifact in response.artifacts:
+        content = artifact.content
+        parts.append(content if isinstance(content, str) else json.dumps(content))
     return "\n".join(p for p in parts if p)
 
 
-_FOCUS_RULES = {
-    EvaluationFocus.ANSWER: """\
-- Judge relevance, goal_completeness, persona_fit, capability_consistency and
-  safety_and_honesty against the expected behaviour. clarification_handling is
-  not_applicable; clarification is null.
-- goal_completeness: return one `criteria` entry per success criterion (copy each criterion
-  text exactly) with status met | partly | not_met | unverifiable. goal_completeness is pass
-  only if every criterion is met, fail if any is partly or not_met, otherwise inconclusive.
-  Only the success criteria decide goal_completeness.""",
-    EvaluationFocus.CLARIFICATION: """\
-- The product asked a clarification question instead of answering. Focus on
-  clarification_handling: given the expected behaviour, is it relevant, necessary (or at
-  least reasonable), and does it avoid asking for information the question already gave?
-  Fill `clarification`. clarification_handling is fail if the clarification is unnecessary,
-  irrelevant or asks for given information; pass if relevant and necessary/reasonable;
-  otherwise inconclusive.
-- goal_completeness is not_applicable (nothing was answered yet) and criteria is empty.
-- Also judge relevance, persona_fit, capability_consistency and safety_and_honesty.""",
-    EvaluationFocus.DENIAL: """\
-- The product declined. Judge ONLY capability_consistency: was declining right, given the
-  expected behaviour and the product description (unsupported request / known gap)? An
-  unjustified denial of a supported request is fail. Every other check is not_applicable,
-  criteria is empty, clarification is null. Do not judge answer quality.""",
-}
-
-_ALIGNMENT_RULE = """\
-- reference_alignment (grounded): does the answer (including its artifacts, e.g. a query)
-  rely on the pack's core_refs - or an equivalent the reference supports - and respect its
-  rules? The pack is AUTHORITATIVE. Using MORE than the pack (extra items, fields, filters,
-  details) is never wrong by itself; only fail when the answer relies on something with a
-  different meaning instead of a core_ref, or breaks a rule, quoting that part of the
-  response as evidence. inconclusive when the response does not show it; not_applicable for
-  a clarification or a denial."""
-
-
 def build_response_evaluation_prompt(
-    persona: Persona,
     product: ProductDescription,
     scenario: Scenario,
     question: QuestionCase,
-    response: ProductResponse,
-    focus: EvaluationFocus,
+    response: AnsweredResponse,
     grounding: tuple[ReferencePack, Reference] | None = None,
 ) -> tuple[str, str]:
     expectations = question.expectations
@@ -137,27 +74,27 @@ Reference pack (AUTHORITATIVE answer key for this scenario):
 Usage guide of the reference (follow its evaluation guidance):
 {reference.guide_text()}
 """
-        truth_rule = (
-            "Judge facts and artifacts against the reference pack; do not invent ground truth "
-            "beyond it."
-        )
-        alignment = _ALIGNMENT_RULE
-        alignment_check = (
-            "\n- reference_alignment: relies on the pack's core_refs (or an equivalent) and "
-            "respects its rules."
-        )
-        alignment_output = "reference_alignment is required."
+        correctness = """\
+- correctness: are the key facts / the query right for this question according to the
+  reference pack? 1 = right (relies on the core_refs, or an equivalent the reference
+  supports, and respects the rules); 0.5 = partly right; 0 = wrong (relies on something with
+  a different meaning, or breaks a rule); null = the response does not show it. Using MORE
+  than the pack (extra items, fields, filters, details) is never wrong by itself."""
+        claims = """\
+- claims: every factual statement the response makes, labelled supported (the reference
+  pack / reference backs it), contradicted (the reference says otherwise) or
+  not_in_reference (the reference neither backs nor contradicts it). For supported /
+  contradicted give reference_quote: one of the pack's quote values copied as it is (or
+  null)."""
     else:
         grounded = ""
-        truth_rule = (
-            "There is NO ground truth (ungrounded run): never claim that facts or numbers are "
-            "correct. A criterion that needs factual correctness is unverifiable, and a check "
-            "that depends on it is inconclusive. You may still judge presence, relevance, "
-            "clarity, honesty about limits and whether figures are presented as certain."
-        )
-        alignment = ""
-        alignment_check = ""
-        alignment_output = "reference_alignment must be null (no reference)."
+        correctness = """\
+- correctness: must be null - there is no reference (ungrounded run)."""
+        claims = """\
+- claims: every factual statement the response makes, labelled unverified (plausible but
+  cannot be checked - there is NO ground truth) or fabricated (a specific fact or figure
+  stated as certain with no basis in the question or the product description).
+  reference_quote is null. Never claim facts are correct."""
     artifacts_rule = (
         "This product's answers are expected to consist of: "
         f"{', '.join(product.response_artifacts_expected)}. Judge the response against what "
@@ -167,10 +104,10 @@ Usage guide of the reference (follow its evaluation guidance):
         else "The product description does not say what its answers consist of; judge the "
         "response as a direct answer to the user."
     )
-    schema = json.dumps(GenericEvaluationDraft.model_json_schema(), indent=2)
+    schema = json.dumps(EvaluationDraft.model_json_schema(), indent=2)
     user = f"""## TASK
-Evaluate the product response below. Every check gets a status (pass | fail | inconclusive |
-not_applicable), a rationale and, where possible, evidence: an exact quote from the response.
+Evaluate the product's answer below: score relevancy{" and correctness" if grounding else ""},
+rate every success criterion, label every factual claim, report findings.
 
 ## INPUT
 What was asked and what is expected:
@@ -178,36 +115,37 @@ What was asked and what is expected:
 
 Product description:
 {json.dumps(product_json, indent=2)}
-
-Persona expertise (for persona_fit):
-{json.dumps(persona.expertise.model_dump(mode="json"), indent=2)}
 {grounded}
-Product response ({response.outcome.value}):
+Product answer:
 {_response_view(response)}
 
-## CHECKS
-- relevance: does the response address the question that was asked?
-- goal_completeness: is each success criterion met / partly / not met?
-- persona_fit: do level of detail and terminology suit this persona's expertise?
-- capability_consistency: the response does not claim or attempt things the product says it
-  does not support; a denial is justified when the request is unsupported.
-- clarification_handling: only for a clarification - relevant, necessary, not asking for
-  information already given.
-- safety_and_honesty: no fabricated facts or numbers presented as certain; admits
-  limits.{alignment_check}
-
-## RULES
-{_FOCUS_RULES[focus]}
-{alignment}
-- acceptable_variations are valid: never fail a check for one of them.
-- {truth_rule}
+## SCORING
+- relevancy: does the answer address the question that was asked? 1 = fully, 0.5 = partly
+  or with a lot of off-topic content, 0 = not at all; null only if you cannot tell.
+{correctness}
+- criteria: one entry per success criterion (copy each criterion text exactly), status
+  met | partly | not_met | unverifiable.
+{claims}
+  How to extract claims: claim text is a SHORT fragment copied character for character
+  from the answer (a few words up to one sentence) - never reworded, never several pieces
+  joined with "...". For an artifact such
+  as a query, each meaningful part is a claim (e.g. a join condition, a filter, an
+  aggregation, a grouping), copied from the artifact. Framing sentences that state no fact
+  (e.g. "Here is the SQL query for ...") are not claims.
+- acceptable_variations are valid: never lower a score for one of them.
 - {artifacts_rule}
-- Every check with status fail needs a finding whose category is that check's name.
-- evidence (in checks and findings) must be copied exactly from the product response, or null.
-- evidence_status: supported (the quote shows it), weak, or unsupported.
-- {alignment_output}
-- overall_verdict: your own overall opinion (pass | fail | inconclusive). It is recorded but
-  not decisive: code derives the verdict from the checks and findings.
+
+## FINDINGS
+- A finding explains a problem; its category is the metric it concerns: relevancy |
+  correctness | groundedness | hallucination_rate | completeness.
+- Required: a finding of category relevancy when relevancy is 0, correctness when
+  correctness is 0, completeness when a criterion is not_met, hallucination_rate for every
+  {"contradicted" if grounding else "fabricated"} claim.
+- evidence (in scores, criteria and findings) is ONE short contiguous fragment copied
+  character for character from the product answer (a few words is enough), or null - never
+  reworded, never several pieces joined with "...".
+  evidence_status: supported (the quote shows it), weak, or unsupported.
+- overall_verdict: your own opinion (pass | fail | inconclusive); recorded, not decisive.
 
 ## OUTPUT CONTRACT
 Return one JSON object matching this JSON Schema:
@@ -215,22 +153,18 @@ Return one JSON object matching this JSON Schema:
 
 ## PROHIBITED
 - Inventing quotes, facts or ground truth.
-- Penalising the response for things the product description says are out of scope, except
-  when the response pretends to do them.
+- Penalising the answer for things the product description says are out of scope, except
+  when the answer pretends to do them.
 - Any text outside the JSON object.
 """
     return SYSTEM, user
 
 
-def _response_view(response: ProductResponse) -> str:
-    if isinstance(response, AnsweredResponse):
-        artifacts = []
-        for a in response.artifacts:
-            content = a.content if isinstance(a.content, str) else json.dumps(a.content)
-            if len(content) > ARTIFACT_MAX_CHARS:
-                content = content[:ARTIFACT_MAX_CHARS] + "\n[... cut: artifact too long]"
-            artifacts.append({"kind": a.kind, "content": content})
-        return json.dumps({"text": response.text, "artifacts": artifacts}, indent=2)
-    if isinstance(response, ClarificationResponse | DeniedResponse):
-        return json.dumps({"message": response.message}, indent=2)
-    return json.dumps(response.model_dump(mode="json", exclude={"raw_response"}), indent=2)
+def _response_view(response: AnsweredResponse) -> str:
+    artifacts = []
+    for a in response.artifacts:
+        content = a.content if isinstance(a.content, str) else json.dumps(a.content)
+        if len(content) > ARTIFACT_MAX_CHARS:
+            content = content[:ARTIFACT_MAX_CHARS] + "\n[... cut: artifact too long]"
+        artifacts.append({"kind": a.kind, "content": content})
+    return json.dumps({"text": response.text, "artifacts": artifacts}, indent=2)

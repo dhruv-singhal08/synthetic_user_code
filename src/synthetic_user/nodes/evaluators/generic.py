@@ -1,18 +1,24 @@
-"""Generic evaluation (all products, both modes): one LLM judgement of a product response.
+"""Generic evaluation of one ANSWERED response (all products, both modes): one LLM judgement,
+then metric scores and the verdict computed by code.
 
-GenericEvaluator returns the validated LLM draft (no ids); nodes/evaluator.py turns it into
-GenericChecks, check rationale, criterion results and findings (source llm). Drafts are
-checked before they are accepted (bounded retry via llm/structured.py):
-- every failed check has a finding of that check's category; categories are generic checks;
-- evidence quotes occur in the response (whitespace/case-insensitive);
-- answer: one criterion result per success criterion, goal_completeness consistent with them,
-  clarification_handling not_applicable;
-- clarification: clarification detail present and consistent with clarification_handling,
-  goal_completeness not_applicable;
-- denial: only capability_consistency judged, everything else not_applicable;
-- reference_alignment: given (and, for an answer, applicable) exactly when the question is
-  grounded; null otherwise; not_applicable for a clarification.
+Draft checks before acceptance (bounded retry via llm/structured.py):
+- correctness given exactly for grounded questions;
+- one criterion result per success criterion;
+- every quote (scores, criteria, claims, findings) occurs in the response; a claim's
+  reference_quote occurs in the reference; claim statuses fit the mode;
+- finding categories are metric names; required findings: relevancy 0, correctness 0, a
+  not_met criterion, every hallucinated claim.
 After the last retry the evaluation is inconclusive with the errors as notes (never guessed).
+
+Scores (MetricName): relevancy / correctness = the judge's 0 / 0.5 / 1; completeness = mean
+of criteria (met 1, partly 0.5, not_met 0; unverifiable left out); groundedness = supported /
+all claims; hallucination_rate = (contradicted + fabricated) / all claims. No claims ->
+groundedness and hallucination_rate not_applicable.
+
+Verdict: a metric FAILS when relevancy, correctness or completeness is 0, or
+hallucination_rate > 0 (groundedness alone never fails: statements the reference does not
+cover are not errors). A failing metric backed by a supported finding of that category ->
+fail; otherwise any failing or inconclusive metric -> inconclusive; else pass.
 """
 
 from __future__ import annotations
@@ -27,170 +33,228 @@ from synthetic_user.core.exceptions import LLMOutputValidationError
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.evaluation import (
-    CheckStatus,
-    ClarificationEvaluation,
-    ClarificationNecessity,
-    ClarificationRelevance,
+    GROUNDED_CLAIM_STATUSES,
+    HALLUCINATED,
+    UNGROUNDED_CLAIM_STATUSES,
+    ClaimStatus,
     CriterionStatus,
+    EvaluationDraft,
     EvidenceStatus,
     Finding,
-    GenericChecks,
-    GenericEvaluationDraft,
+    JudgedScore,
+    MetricName,
+    MetricResult,
+    Metrics,
+    MetricStatus,
     Verdict,
 )
-from synthetic_user.models.execution import ProductResponse
-from synthetic_user.models.persona import Persona
+from synthetic_user.models.execution import AnsweredResponse
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.prompts.response_evaluation import (
-    EvaluationFocus,
     build_response_evaluation_prompt,
     response_text,
 )
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
-CHECK_NAMES = tuple(GenericChecks.model_fields)
-NA = CheckStatus.NOT_APPLICABLE
+METRIC_NAMES = tuple(m.value for m in MetricName)
+# Added to quote errors so the retry knows how to fix them.
+COPY_HINT = (
+    'copy ONE shorter contiguous fragment character for character from the answer, without "..."'
+)
+_CRITERION_SCORE = {
+    CriterionStatus.MET: 1.0,
+    CriterionStatus.PARTLY: 0.5,
+    CriterionStatus.NOT_MET: 0.0,
+}
 
 
 @dataclass
 class GenericJudgement:
-    focus: EvaluationFocus
-    draft: GenericEvaluationDraft | None = None
+    draft: EvaluationDraft | None = None
     notes: list[str] = field(default_factory=list)
 
 
-# --- pure helpers ---------------------------------------------------------------------------
+# --- draft checks -----------------------------------------------------------------------------
 
 
-def expected_goal_status(statuses: Sequence[CriterionStatus]) -> CheckStatus:
-    if any(s in (CriterionStatus.NOT_MET, CriterionStatus.PARTLY) for s in statuses):
-        return CheckStatus.FAIL
-    if not statuses or any(s is CriterionStatus.UNVERIFIABLE for s in statuses):
-        return CheckStatus.INCONCLUSIVE
-    return CheckStatus.PASS
-
-
-def expected_clarification_status(detail: ClarificationEvaluation) -> CheckStatus:
-    if (
-        detail.necessity is ClarificationNecessity.UNNECESSARY
-        or detail.relevance is ClarificationRelevance.IRRELEVANT
-        or detail.asks_for_given_info
-    ):
-        return CheckStatus.FAIL
-    if detail.relevance is ClarificationRelevance.RELEVANT and detail.necessity in (
-        ClarificationNecessity.NECESSARY,
-        ClarificationNecessity.REASONABLE,
-    ):
-        return CheckStatus.PASS
-    return CheckStatus.INCONCLUSIVE
-
-
-def check_generic_evaluation(
-    draft: GenericEvaluationDraft,
-    focus: EvaluationFocus,
+def check_evaluation(
+    draft: EvaluationDraft,
     criteria: Sequence[str],
     response: str,
-    *,
-    grounded: bool = False,
+    reference: Reference | None = None,
 ) -> list[str]:
-    """Problems with a generic evaluation draft (empty list = acceptable)."""
+    """Problems with an evaluation draft (empty list = acceptable). ``reference`` is given
+    exactly for grounded questions."""
+    grounded = reference is not None
     errors: list[str] = []
-    judgements = draft.judgements()
-    alignment = draft.reference_alignment
-    if grounded and alignment is None:
-        errors.append("reference_alignment is required for a grounded question")
-    if not grounded and alignment is not None:
-        errors.append("reference_alignment must be null: the question has no reference")
-    if (
-        grounded
-        and focus is EvaluationFocus.ANSWER
-        and alignment is not None
-        and alignment.status is NA
-    ):
-        errors.append("reference_alignment must be judged for a grounded answer")
-    if (
-        focus is EvaluationFocus.CLARIFICATION
-        and alignment is not None
-        and alignment.status is not NA
-    ):
-        errors.append("clarification: reference_alignment must be not_applicable")
-    for i, finding in enumerate(draft.findings, start=1):
-        if finding.category not in CHECK_NAMES:
-            errors.append(f"finding {i}: category {finding.category!r} is not one of {CHECK_NAMES}")
-        if finding.evidence and not _quoted(finding.evidence, response):
-            errors.append(f"finding {i}: evidence {finding.evidence!r} is not in the response")
+    if grounded and draft.correctness is None:
+        errors.append("correctness is required for a grounded question")
+    if not grounded and draft.correctness is not None:
+        errors.append("correctness must be null: the question has no reference")
+
+    scores = {"relevancy": draft.relevancy, "correctness": draft.correctness}
+    for name, judged in scores.items():
+        if judged and judged.evidence and not _quoted(judged.evidence, response):
+            errors.append(
+                f"{name}: evidence {judged.evidence!r} is not in the response ({COPY_HINT})"
+            )
+
+    wanted = {_normalise(c): c for c in criteria}
+    got = [_normalise(r.criterion) for r in draft.criteria]
+    missing = [c for key, c in wanted.items() if key not in got]
+    extra = [r.criterion for r in draft.criteria if _normalise(r.criterion) not in wanted]
+    repeated = sorted({g for g in got if got.count(g) > 1})
+    if missing or extra or repeated:
+        errors.append(
+            f"criteria must list each success criterion once: missing {missing}, "
+            f"unknown {extra}, repeated {repeated}"
+        )
     for result in draft.criteria:
         if result.evidence and not _quoted(result.evidence, response):
-            errors.append(f"criterion {result.criterion!r}: evidence is not in the response")
-    for name, judgement in judgements.items():
-        if judgement.evidence and not _quoted(judgement.evidence, response):
-            errors.append(f"{name}: evidence {judgement.evidence!r} is not in the response")
-        if judgement.status is CheckStatus.FAIL and not any(
-            f.category == name for f in draft.findings
-        ):
-            errors.append(f"check {name} is fail but no finding has category {name!r}")
+            errors.append(
+                f"criterion {result.criterion!r}: evidence {result.evidence!r} is not in the "
+                f"response ({COPY_HINT})"
+            )
 
-    if focus is EvaluationFocus.DENIAL:
-        for name, judgement in judgements.items():
-            if name != "capability_consistency" and judgement.status is not NA:
-                errors.append(f"denial: {name} must be not_applicable (only capability judged)")
-        if judgements["capability_consistency"].status is NA:
-            errors.append("denial: capability_consistency must be judged")
-        if draft.criteria or draft.clarification is not None:
-            errors.append("denial: criteria must be empty and clarification null")
-        return errors
+    allowed = GROUNDED_CLAIM_STATUSES if grounded else UNGROUNDED_CLAIM_STATUSES
+    for i, claim in enumerate(draft.claims, start=1):
+        if not _quoted(claim.text, response):
+            errors.append(
+                f"claim {i}: text {claim.text!r} is not copied from the response ({COPY_HINT})"
+            )
+        if claim.status not in allowed:
+            errors.append(
+                f"claim {i}: status {claim.status.value!r} must be one of "
+                f"{sorted(s.value for s in allowed)}"
+            )
+        if claim.reference_quote:
+            if reference is None:
+                errors.append(f"claim {i}: reference_quote must be null (no reference)")
+            elif not reference.contains(claim.reference_quote):
+                errors.append(
+                    f"claim {i}: reference_quote is not in the reference (use one of the "
+                    "pack's quote values as it is, or null)"
+                )
 
-    if focus is EvaluationFocus.ANSWER:
-        if draft.clarification_handling.status is not NA or draft.clarification is not None:
+    for i, finding in enumerate(draft.findings, start=1):
+        if finding.category not in METRIC_NAMES:
             errors.append(
-                "answer: clarification_handling must be not_applicable, clarification null"
+                f"finding {i}: category {finding.category!r} is not one of {METRIC_NAMES}"
             )
-        wanted = {_normalise(c): c for c in criteria}
-        got = [_normalise(r.criterion) for r in draft.criteria]
-        missing = [c for key, c in wanted.items() if key not in got]
-        extra = [r.criterion for r in draft.criteria if _normalise(r.criterion) not in wanted]
-        repeated = sorted({g for g in got if got.count(g) > 1})
-        if missing or extra or repeated:
+        if finding.evidence and not _quoted(finding.evidence, response):
             errors.append(
-                f"criteria must list each success criterion once: missing {missing}, "
-                f"unknown {extra}, repeated {repeated}"
+                f"finding {i}: evidence {finding.evidence!r} is not in the response ({COPY_HINT})"
             )
-        expected = expected_goal_status([r.status for r in draft.criteria])
-        if not (missing or extra or repeated) and draft.goal_completeness.status is not expected:
-            errors.append(
-                f"goal_completeness must be {expected.value} given the criteria results, "
-                f"not {draft.goal_completeness.status.value}"
-            )
-        return errors
-
-    # clarification
-    if draft.goal_completeness.status is not NA or draft.criteria:
-        errors.append("clarification: goal_completeness not_applicable and criteria empty")
-    if draft.clarification is None:
-        errors.append("clarification: the clarification detail is required")
-    else:
-        expected = expected_clarification_status(draft.clarification)
-        if draft.clarification_handling.status is not expected:
-            errors.append(
-                f"clarification_handling must be {expected.value} given the clarification "
-                f"detail, not {draft.clarification_handling.status.value}"
-            )
+    categories = {f.category for f in draft.findings}
+    required = {
+        "relevancy": draft.relevancy.score == 0,
+        "correctness": draft.correctness is not None and draft.correctness.score == 0,
+        "completeness": any(r.status is CriterionStatus.NOT_MET for r in draft.criteria),
+        "hallucination_rate": any(c.status in HALLUCINATED for c in draft.claims),
+    }
+    for name, needed in required.items():
+        if needed and name not in categories:
+            errors.append(f"a finding with category {name!r} is required")
     return errors
 
 
-def generic_verdict(checks: GenericChecks, findings: Sequence[Finding]) -> Verdict:
-    """A failed check backed by a supported finding -> fail; else any failed (unsupported) or
-    inconclusive check -> inconclusive; else pass. not_applicable checks are ignored."""
+# --- scores and verdict -----------------------------------------------------------------------
+
+
+def compute_metrics(draft: EvaluationDraft, *, grounded: bool) -> Metrics:
+    """Metric results from an accepted draft (pure, deterministic)."""
+    na = MetricStatus.NOT_APPLICABLE
+
+    def judged(score: JudgedScore) -> MetricResult:
+        if score.score is None:
+            return MetricResult(
+                status=MetricStatus.INCONCLUSIVE, rationale=score.rationale, evidence=score.evidence
+            )
+        return MetricResult(
+            status=MetricStatus.SCORED,
+            score=float(score.score),
+            rationale=score.rationale,
+            evidence=score.evidence,
+        )
+
+    correctness = (
+        judged(draft.correctness)
+        if grounded and draft.correctness is not None
+        else MetricResult(status=na, rationale="no reference (ungrounded)")
+    )
+
+    counted = [_CRITERION_SCORE[r.status] for r in draft.criteria if r.status in _CRITERION_SCORE]
+    if counted:
+        met = sum(1 for r in draft.criteria if r.status is CriterionStatus.MET)
+        completeness = MetricResult(
+            status=MetricStatus.SCORED,
+            score=_round(sum(counted) / len(counted)),
+            rationale=f"{met} of {len(draft.criteria)} success criteria met "
+            f"({len(draft.criteria) - len(counted)} unverifiable)",
+        )
+    else:
+        completeness = MetricResult(
+            status=MetricStatus.INCONCLUSIVE, rationale="no success criterion could be verified"
+        )
+
+    claims = draft.claims
+    if not claims:
+        no_claims = "the answer makes no factual claims"
+        groundedness = MetricResult(status=na, rationale=no_claims)
+        hallucination = MetricResult(status=na, rationale=no_claims)
+    else:
+        supported = sum(1 for c in claims if c.status is ClaimStatus.SUPPORTED)
+        bad = [c for c in claims if c.status in HALLUCINATED]
+        groundedness = (
+            MetricResult(
+                status=MetricStatus.SCORED,
+                score=_round(supported / len(claims)),
+                rationale=f"{supported} of {len(claims)} claims backed by the reference",
+            )
+            if grounded
+            else MetricResult(status=na, rationale="no reference (ungrounded)")
+        )
+        hallucination = MetricResult(
+            status=MetricStatus.SCORED,
+            score=_round(len(bad) / len(claims)),
+            rationale=f"{len(bad)} of {len(claims)} claims "
+            f"{'contradict the reference' if grounded else 'are fabricated'}",
+            evidence=bad[0].text if bad else None,
+        )
+    return Metrics(
+        relevancy=judged(draft.relevancy),
+        correctness=correctness,
+        groundedness=groundedness,
+        hallucination_rate=hallucination,
+        completeness=completeness,
+    )
+
+
+def failing_metrics(metrics: Metrics) -> list[MetricName]:
+    """Metrics that fail the question (see the module docstring)."""
+    failing: list[MetricName] = []
+    for name, result in metrics.by_name().items():
+        if result.status is not MetricStatus.SCORED or result.score is None:
+            continue
+        if name is MetricName.HALLUCINATION_RATE:
+            if result.score > 0:
+                failing.append(name)
+        elif name is not MetricName.GROUNDEDNESS and result.score == 0:
+            failing.append(name)
+    return failing
+
+
+def metrics_verdict(metrics: Metrics, findings: Sequence[Finding]) -> Verdict:
     supported = {f.category for f in findings if f.evidence_status is EvidenceStatus.SUPPORTED}
-    statuses = dict(checks)
-    failed = [name for name, status in statuses.items() if status is CheckStatus.FAIL]
-    if any(name in supported for name in failed):
+    failing = failing_metrics(metrics)
+    if any(name.value in supported for name in failing):
         return Verdict.FAIL
-    if failed or CheckStatus.INCONCLUSIVE in statuses.values():
+    undecided = any(r.status is MetricStatus.INCONCLUSIVE for r in metrics.by_name().values())
+    if failing or undecided:
         return Verdict.INCONCLUSIVE
     return Verdict.PASS
 
@@ -216,6 +280,10 @@ def _keywords(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9_]+", text.lower()) if len(w) >= 4} - _GAP_STOPWORDS
 
 
+def _round(value: float) -> float:
+    return round(value, 3)
+
+
 def _quoted(fragment: str, text: str) -> bool:
     return _normalise(fragment) in _normalise(text)
 
@@ -235,36 +303,31 @@ class GenericEvaluator:
 
     async def judge(
         self,
-        persona: Persona,
         product: ProductDescription,
         scenario: Scenario,
         question: QuestionCase,
-        response: ProductResponse,
-        focus: EvaluationFocus,
+        response: AnsweredResponse,
         grounding: tuple[ReferencePack, Reference] | None = None,
     ) -> GenericJudgement:
         criteria = question.expectations.success_criteria
         quotable = response_text(response)
-        grounded = grounding is not None
+        reference = grounding[1] if grounding is not None else None
         system, user = build_response_evaluation_prompt(
-            persona, product, scenario, question, response, focus, grounding
+            product, scenario, question, response, grounding
         )
-        judgement = GenericJudgement(focus)
+        judgement = GenericJudgement()
         try:
             judgement.draft = await generate_structured(
                 self._llm,
                 system,
                 user,
-                GenericEvaluationDraft,
+                EvaluationDraft,
                 max_retries=self._settings.llm.max_validation_retries,
-                post_validate=lambda d: check_generic_evaluation(
-                    d, focus, criteria, quotable, grounded=grounded
-                ),
+                post_validate=lambda d: check_evaluation(d, criteria, quotable, reference),
             )
         except LLMOutputValidationError as exc:
-            self._log.warning("%s: generic evaluation failed", question.question_id)
+            self._log.warning("%s: evaluation failed", question.question_id)
             judgement.notes.append(
-                f"generic evaluation failed after {exc.attempts} attempt(s): "
-                + "; ".join(exc.errors)
+                f"evaluation failed after {exc.attempts} attempt(s): " + "; ".join(exc.errors)
             )
         return judgement

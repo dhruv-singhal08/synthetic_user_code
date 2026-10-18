@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -114,48 +115,13 @@ def _executions() -> list[ExecutionRecord]:
     ]
 
 
-def _judge(system: str, user: str) -> dict[str, Any]:
-    """Approves, except that the broken query fails reference_alignment with evidence."""
-    ok = {"status": "pass", "rationale": "fine"}
-    block = user.split("What was asked and what is expected:\n", 1)[1]
-    criteria = json.loads(block.split("\n\nProduct description", 1)[0])["success_criteria"]
-    broken = "SELEC broken" in user
-    alignment = (
-        {"status": "fail", "rationale": "uses none of the core refs", "evidence": "SELEC broken"}
-        if broken
-        else ok
-    )
-    findings = (
-        [
-            {
-                "category": "reference_alignment",
-                "description": "query does not use the core columns",
-                "expected_behavior": "uses card_transactions.amount and employees.full_name",
-                "observed_behavior": "unusable query",
-                "evidence": "SELEC broken",
-                "severity": "high",
-                "evidence_status": "supported",
-            }
-        ]
-        if broken
-        else []
-    )
-    return {
-        "relevance": ok,
-        "goal_completeness": ok,
-        "criteria": [{"criterion": c, "status": "met", "rationale": "fine"} for c in criteria],
-        "persona_fit": ok,
-        "capability_consistency": ok,
-        "clarification_handling": {"status": "not_applicable", "rationale": "n/a"},
-        "safety_and_honesty": ok,
-        "reference_alignment": alignment,
-        "findings": findings,
-        "overall_verdict": "fail" if broken else "pass",
-    }
+@pytest.fixture
+def judge(judge_factory: Callable[..., Any]) -> Any:
+    return judge_factory(fail_on="SELEC broken")
 
 
-def _llm(monkeypatch: pytest.MonkeyPatch) -> FakeLLMClient:
-    llm = FakeLLMClient([_judge] * 10)
+def _llm(monkeypatch: pytest.MonkeyPatch, judge: Any) -> FakeLLMClient:
+    llm = FakeLLMClient([judge] * 10)
     monkeypatch.setattr(cli, "create_llm_client", lambda settings: llm)
     return llm
 
@@ -171,8 +137,9 @@ def test_evaluate_file_mode(
     monkeypatch: pytest.MonkeyPatch,
     sample_scenarios: list[Scenario],
     sample_packs: list[ReferencePack],
+    judge: Any,
 ) -> None:
-    llm = _llm(monkeypatch)
+    llm = _llm(monkeypatch, judge)
     q = _write(
         tmp_path / "questions.json",
         [x.model_dump(mode="json") for x in _questions(sample_scenarios)],
@@ -214,7 +181,10 @@ def test_evaluate_file_mode(
     assert [(b["bug_id"], b["question_id"], b["execution_id"]) for b in bugs] == [
         ("BUG_001", "Q_002", "EXE_002")
     ]
-    assert [x["checks"]["reference_alignment"] for x in evaluations] == ["pass", "fail"]
+    assert [x["metrics"]["correctness"]["score"] for x in evaluations] == [1.0, 0.0]
+    kpis = json.loads((out / "kpis.json").read_text(encoding="utf-8"))
+    assert kpis["task_success_rate"] == 0.5 and kpis["judged"] == 2
+    assert (out / "kpis.csv").read_text(encoding="utf-8").startswith("kpi,value,n")
     # one generic judgement per response; no SQL plugin call (design v3)
     assert len(llm.calls) == 2
     assert all("Reference pack (AUTHORITATIVE" in c.user for c in llm.calls)
@@ -225,8 +195,9 @@ def test_grounded_file_mode_needs_the_packs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sample_scenarios: list[Scenario],
+    judge: Any,
 ) -> None:
-    _llm(monkeypatch)
+    _llm(monkeypatch, judge)
     q = _write(
         tmp_path / "questions.json",
         [x.model_dump(mode="json") for x in _questions(sample_scenarios)],
@@ -256,8 +227,9 @@ def test_evaluate_run_mode_updates_manifest(
     sample_scenarios: list[Scenario],
     sample_packs: list[ReferencePack],
     sample_reference: Reference,
+    judge: Any,
 ) -> None:
-    _llm(monkeypatch)
+    _llm(monkeypatch, judge)
     store = JsonArtifactStore(tmp_path / "artifacts")
     store.write_models(run_artifact(RUN_ID, "scenarios.json"), sample_scenarios, Scenario)
     store.write_models(run_artifact(RUN_ID, "reference_packs.json"), sample_packs, ReferencePack)
@@ -305,8 +277,9 @@ def test_execution_for_unknown_question(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sample_scenarios: list[Scenario],
+    judge: Any,
 ) -> None:
-    _llm(monkeypatch)
+    _llm(monkeypatch, judge)
     q = _write(tmp_path / "questions.json", [])
     e = _write(
         tmp_path / "executions.json",

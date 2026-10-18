@@ -1,19 +1,15 @@
 """Node 5: evaluate product executions (routing + assembly).
 
-Routing by outcome (one LLM call per judged response, design v3):
-- answered      -> all generic checks; grounded questions also get reference_alignment
-                   against the scenario's Reference Pack.
-- clarification -> generic checks with the clarification_handling focus.
-- denied        -> verdict from capability_consistency only (was the denial justified?).
-- error/timeout -> recorded_only, verdict None, no LLM call.
+Routing by outcome (design v3 KPIs):
+- answered -> one LLM judgement, then the 5 metrics (relevancy, correctness, groundedness,
+              hallucination_rate, completeness), claims and the verdict computed by code
+              (nodes/evaluators/generic.py). Grounded questions are judged against the
+              scenario's Reference Pack.
+- clarification / denied / error / timeout -> recorded_only, verdict None, no LLM call.
 
 Artifact plugins (nodes/evaluators/plugins/) are disconnected for now: every product goes
-through this one generic path.
-
-Verdict: any failed check backed by a finding with evidence_status supported -> fail; else any
-inconclusive applicable check (or a failed check without supported evidence) ->
-inconclusive; else pass. not_applicable checks are ignored. The LLM's own opinion is stored
-as llm_verdict and is never decisive.
+through this one generic path. The LLM's own opinion is stored as llm_verdict and is never
+decisive.
 Bug candidates: one per failed evaluation, from its findings with severity >= medium and
 evidence supported (most severe first), status needs_review, carrying question / scenario /
 execution / finding ids, the reproduction utterance and the product_id.
@@ -40,12 +36,10 @@ from synthetic_user.models.evaluation import (
     EvidenceStatus,
     Finding,
     FindingSource,
-    GenericChecks,
     Severity,
     Verdict,
 )
-from synthetic_user.models.execution import ExecutionRecord
-from synthetic_user.models.persona import Persona
+from synthetic_user.models.execution import AnsweredResponse, ExecutionRecord
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
@@ -54,10 +48,10 @@ from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluators.generic import (
     GenericEvaluator,
     GenericJudgement,
-    generic_verdict,
+    compute_metrics,
     matches_known_gap,
+    metrics_verdict,
 )
-from synthetic_user.prompts.response_evaluation import focus_for
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
@@ -88,20 +82,16 @@ class Evaluator:
         self._reference = reference
         self._generic = GenericEvaluator(llm, settings, logger)
 
-    async def evaluate(
-        self, case: EvaluationCase, product: ProductDescription, persona: Persona
-    ) -> EvaluationResult:
-        return (await self.evaluate_many([case], product, persona))[0]
+    async def evaluate(self, case: EvaluationCase, product: ProductDescription) -> EvaluationResult:
+        return (await self.evaluate_many([case], product))[0]
 
     async def evaluate_many(
-        self, cases: Sequence[EvaluationCase], product: ProductDescription, persona: Persona
+        self, cases: Sequence[EvaluationCase], product: ProductDescription
     ) -> list[EvaluationResult]:
         for case in cases:
             _check_links(case, self._reference)
         semaphore = asyncio.Semaphore(self._settings.llm.max_concurrency)
-        judgements = await asyncio.gather(
-            *(self._judge(c, product, persona, semaphore) for c in cases)
-        )
+        judgements = await asyncio.gather(*(self._judge(c, product, semaphore) for c in cases))
         results = [self._assemble(c, j, product) for c, j in zip(cases, judgements, strict=True)]
         self._log.info(
             "Evaluated %d execution(s): %s",
@@ -119,12 +109,11 @@ class Evaluator:
         self,
         case: EvaluationCase,
         product: ProductDescription,
-        persona: Persona,
         semaphore: asyncio.Semaphore,
     ) -> GenericJudgement | None:
-        focus = focus_for(case.execution.response)
-        if focus is None:
-            return None  # error / timeout
+        response = case.execution.response
+        if not isinstance(response, AnsweredResponse):
+            return None  # clarification / denied / error / timeout: recorded only
         grounding = (
             (case.pack, self._reference)
             if case.pack is not None and self._reference is not None
@@ -132,13 +121,7 @@ class Evaluator:
         )
         async with semaphore:
             return await self._generic.judge(
-                persona,
-                product,
-                case.scenario,
-                case.question,
-                case.execution.response,
-                focus,
-                grounding,
+                product, case.scenario, case.question, response, grounding
             )
 
     # --- phase 2: assembly (sequential, assigns ids) --------------------------------------
@@ -167,7 +150,7 @@ class Evaluator:
         verdict = Verdict.INCONCLUSIVE
         draft = judgement.draft
         if draft is not None:
-            checks = GenericChecks(**{n: j.status for n, j in draft.judgements().items()})
+            metrics = compute_metrics(draft, grounded=case.pack is not None)
             findings = [
                 Finding(
                     finding_id=self._ids.next(IdKind.FINDING),
@@ -184,14 +167,11 @@ class Evaluator:
                 for f in draft.findings
             ]
             fields = {
-                "checks": checks,
-                "check_rationale": {n: j.rationale for n, j in draft.judgements().items()},
+                "metrics": metrics,
+                "claims": draft.claims,
                 "criteria_results": draft.criteria,
-                "clarification_evaluation": draft.clarification,
             }
-            # denied: only capability_consistency is judged, so the same rule yields the
-            # verdict "was the denial justified?" (the other checks are not_applicable).
-            verdict = generic_verdict(checks, findings)
+            verdict = metrics_verdict(metrics, findings)
         return EvaluationResult(
             **ids,
             verdict=verdict,

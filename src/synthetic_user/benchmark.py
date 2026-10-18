@@ -3,7 +3,9 @@
 Cases (tests/fixtures/benchmark/labeled_cases.jsonl) cover both modes (taken from each case's
 scenario) and several product types (each case names its product_id). A case states what the
 product answered (answered text and/or artifacts such as a query, clarification or denial
-message), what the product was expected to do, and the expected verdict. The scenarios file
+message), what the product was expected to do, and the expected verdict. Only answered
+responses are judged (design v3 KPIs); clarification / denied cases are reported as not
+judged and left out of the agreement. The scenarios file
 holds {"scenarios": [...], "reference_packs": [...]} (packs for the grounded scenarios).
 """
 
@@ -21,7 +23,6 @@ from synthetic_user.core.exceptions import InputAssetError, format_validation_er
 from synthetic_user.models.base import AmbiguityLevel, NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import Verdict
 from synthetic_user.models.execution import ExecutionRecord
-from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
     Expectations,
@@ -91,6 +92,10 @@ class BenchmarkRow:
     verdict: Verdict | None
 
     @property
+    def judged(self) -> bool:
+        return self.verdict is not None
+
+    @property
     def agrees(self) -> bool:
         return self.verdict == self.label
 
@@ -100,12 +105,17 @@ class BenchmarkReport:
     rows: list[BenchmarkRow]
 
     @property
+    def judged(self) -> list[BenchmarkRow]:
+        return [r for r in self.rows if r.judged]
+
+    @property
     def agreed(self) -> int:
-        return sum(1 for r in self.rows if r.agrees)
+        return sum(1 for r in self.judged if r.agrees)
 
     @property
     def agreement(self) -> float:
-        return self.agreed / len(self.rows) if self.rows else 0.0
+        """Agreement over judged cases (recorded-only outcomes are not judged)."""
+        return self.agreed / len(self.judged) if self.judged else 0.0
 
 
 def load_cases(path: Path) -> list[BenchmarkCase]:
@@ -197,7 +207,6 @@ async def run_benchmark(
     scenarios: Sequence[Scenario],
     packs: Sequence[ReferencePack],
     products: Mapping[str, ProductDescription],
-    persona: Persona,
 ) -> BenchmarkReport:
     """Evaluate every case with its own product description; rows keep the case order."""
     missing = sorted({c.product_id for c in cases} - set(products))
@@ -213,7 +222,7 @@ async def run_benchmark(
         ]
         if not selected:
             continue
-        results = await evaluator.evaluate_many([e for _, e in selected], product, persona)
+        results = await evaluator.evaluate_many([e for _, e in selected], product)
         for (case, _), result in zip(selected, results, strict=True):
             verdicts[case.case_id] = result.verdict
     return BenchmarkReport(

@@ -33,10 +33,12 @@ from synthetic_user.core.exceptions import (
     ArtifactNotFoundError,
 )
 from synthetic_user.core.identifiers import SequentialIdGenerator, new_run_id
+from synthetic_user.kpis import compute_kpis, kpis_csv
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
+from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
@@ -77,7 +79,12 @@ STEP_ARTIFACTS: dict[Step, dict[str, str]] = {
         "questions_rejected": "questions_rejected.json",
     },
     Step.EXECUTE: {"executions": "executions.json"},
-    Step.EVALUATE: {"evaluations": "evaluations.json", "bug_candidates": "bug_candidates.json"},
+    Step.EVALUATE: {
+        "evaluations": "evaluations.json",
+        "bug_candidates": "bug_candidates.json",
+        "kpis": "kpis.json",
+        "kpis_csv": "kpis.csv",
+    },
 }
 # Raw product responses (when the adapter supplies them): runs/<run_id>/raw/<execution_id>.json
 RAW_DIR = "raw"
@@ -133,6 +140,7 @@ class ExecuteStep:
 class EvaluateStep:
     evaluations: list[EvaluationResult]
     bug_candidates: list[BugCandidate]
+    kpis: RunKpis
     reused: bool
 
 
@@ -150,6 +158,7 @@ class RunSummary(StrictModel):
     outcomes: dict[str, int]
     verdicts: dict[str, int]
     bug_candidates: int
+    kpis: RunKpis
 
 
 def steps_from(step: Step) -> set[Step]:
@@ -428,7 +437,8 @@ class SyntheticUserPipeline:
                 evaluations=evaluations,
             )
             bugs = [b for e in evaluations for b in e.bug_candidates]
-            return EvaluateStep(evaluations, bugs, reused=True)
+            kpis = self._store.read_model(self._file(run_id, "kpis"), RunKpis)
+            return EvaluateStep(evaluations, bugs, kpis, reused=True)
 
         scenario_by_id = {s.id: s for s in scenarios}
         question_by_id = {q.question_id: q for q in questions}
@@ -452,12 +462,22 @@ class SyntheticUserPipeline:
             reference=inputs.reference,
             id_generator=self._ids(),
         )
-        evaluations = await evaluator.evaluate_many(cases, inputs.product, inputs.persona)
+        evaluations = await evaluator.evaluate_many(cases, inputs.product)
         bugs = [b for e in evaluations for b in e.bug_candidates]
+        kpis = compute_kpis(
+            run_id=run_id,
+            product_id=inputs.product.product_id,
+            mode=inputs.mode,
+            scenarios=scenarios,
+            executions=executions,
+            evaluations=evaluations,
+        )
         self._store.write_models(self._file(run_id, "evaluations"), evaluations, EvaluationResult)
         self._store.write_models(self._file(run_id, "bug_candidates"), bugs, BugCandidate)
+        self._store.write_model(self._file(run_id, "kpis"), kpis)
+        self._store.write_text(self._file(run_id, "kpis_csv"), kpis_csv(kpis))
         self._save_manifest(manifest, Step.EVALUATE)
-        return EvaluateStep(evaluations, bugs, reused=False)
+        return EvaluateStep(evaluations, bugs, kpis, reused=False)
 
     # --- full run ----------------------------------------------------------------------
 
@@ -538,6 +558,7 @@ class SyntheticUserPipeline:
                 v: verdicts.get(v, 0) for v in ("pass", "fail", "inconclusive", "recorded_only")
             },
             bug_candidates=len(evaluate_step.bug_candidates),
+            kpis=evaluate_step.kpis,
         )
 
     # --- artifact helpers --------------------------------------------------------------

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from synthetic_user.adapters.http_json import HttpRequest, HttpResult
 from synthetic_user.core.config import load_config
+from synthetic_user.core.exceptions import ConfigError
 from synthetic_user.web.results_csv import COLUMNS
 from synthetic_user.web.server import create_app
 from synthetic_user.web.workspace import Workspace
@@ -94,6 +95,43 @@ def test_index_page_and_static(client: TestClient) -> None:
     page = client.get("/")
     assert page.status_code == 200 and "Synthetic User" in page.text
     assert client.get("/static/app.js").status_code == 200
+
+
+def test_both_uis_are_served_and_web_ui_picks_the_default(config_path: Path) -> None:
+    client = TestClient(create_app(load_config(config_path, env={})))
+    modern, classic = client.get("/modern").text, client.get("/classic").text
+    assert "/static/modern/app.js" in modern and "/static/app.js" in classic
+    assert client.get("/").text == modern  # default web.ui: modern
+    assert client.get("/api/config").json()["ui"] == "modern"
+    for asset in ("/static/modern/app.js", "/static/modern/app.css", "/static/style.css"):
+        assert client.get(asset).status_code == 200, asset
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["web"] = {"ui": "classic"}
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    client = TestClient(create_app(load_config(config_path, env={})))
+    assert client.get("/").text == classic and client.get("/modern").text == modern
+    assert client.get("/api/config").json()["ui"] == "classic"
+
+    data["web"] = {"ui": "fancy"}
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(config_path, env={})
+
+
+def test_recent_runs_newest_first_with_kpis(client: TestClient) -> None:
+    assert client.get("/api/runs").json() == {"runs": []}
+    first = _run(client, grounded=False)
+    second = _run(client)
+    _steps(client, second, "scenarios", "questions", "execute", "evaluate")
+    runs = client.get("/api/runs").json()["runs"]
+    assert [r["run_id"] for r in runs] == sorted([first, second], reverse=True)
+    by_id = {r["run_id"]: r for r in runs}
+    assert by_id[first]["steps_done"] == [] and by_id[first]["task_success_rate"] is None
+    assert by_id[first]["sources"]["reference"] == "off"
+    done = by_id[second]
+    assert done["steps_done"][-1] == "evaluate" and done["product_id"] == "sample_nl2sql"
+    assert done["judged"] is not None
 
 
 def test_config_and_samples(client: TestClient) -> None:
@@ -306,7 +344,7 @@ def test_execute_through_connected_product(config_path: Path) -> None:
     rows = [r for r in body["rows"] if r["question_id"]]
     assert asked == {r["question"] for r in rows}
     assert all(r["product_outcome"] == "answered" for r in rows)
-    assert all(r["artifacts"] == "sql: SELECT 1" for r in rows)
+    assert all(r["artifacts"] == "sql:\nSELECT 1" for r in rows)
     assert TOKEN not in json.dumps(body)
 
 
@@ -340,9 +378,14 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
 
     final = _steps(client, run_id, "evaluate")
     verdicts = sorted(r["final_verdict"] or "-" for r in final["rows"])
-    assert verdicts == ["fail", "pass", "pass"]  # the justified denial passes (C10)
+    assert verdicts == ["fail", "recorded_only", "recorded_only"]  # clarification + denial
     failed = next(r for r in final["rows"] if r["final_verdict"] == "fail")
-    assert failed["bug_ids"] == "BUG_001" and failed["failed_checks"] == "reference_alignment"
+    assert failed["bug_ids"] == "BUG_001"
+    assert (failed["correctness"], failed["hallucination_rate"]) == ("0", "0.333")
+    assert final["detail"]["task_success_rate"] == 0.0
+    assert final["kpis"]["judged"] == 1 and final["kpis"]["new_bugs"] == 1
+    assert {"kpis.json", "kpis.csv"} <= set(final["artifacts"])
+    assert client.get(f"/api/runs/{run_id}/artifacts/kpis.csv").status_code == 200
     assert final["state"]["steps_done"] == [
         "reference",
         "scenarios",

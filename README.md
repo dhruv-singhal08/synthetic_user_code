@@ -25,7 +25,7 @@ Persona + Product [+ Reference file + Usage guide] ──> [reference check] ─
 | 2 Scenarios | Business goal + success criteria (guidance) for tasks this persona would do with this product. Grounded: also a **Reference Pack** - `core_refs` (what a correct answer must rely on) and `rules`, each with a verbatim quote that code checks against the reference (items whose quote is missing are dropped and recorded; no valid core_ref -> scenario rejected). Saved in `reference_packs.json`, editable in the UI. | yes |
 | 3 Questions | Natural-language questions in the persona's voice, each with its own `expected_behavior` (written), 1-4 `success_criteria` and `acceptable_variations`. Grounded: the pack + guide inform the question; identifier-like pack names must not leak into it. | yes |
 | 4 Product executor | Sends each question through the configured product adapter and records answered (text + artifacts, e.g. SQL) / clarification / denied / error / timeout. Artifacts are **never executed**. | no |
-| 5 Evaluator | One generic judge for every product, given only the evaluation contract (question, goal, expected behaviour, success criteria, acceptable variations, product, persona expertise, full response): relevance, goal completeness per criterion, persona fit, capability consistency, clarification handling, safety & honesty; grounded adds `reference_alignment` against the pack (extras are never wrong by themselves). Evidence is quoted from the response. Denied = capability consistency only; error/timeout recorded only. The judge's own opinion is `llm_verdict`, never decisive. Failed evaluations with supported evidence become bug candidates. | yes |
+| 5 Evaluator | One generic judge per **answered** response, given only the evaluation contract (question, goal, expected behaviour, success criteria, acceptable variations, product, full response with artifacts; grounded: the Reference Pack + guide). It scores **answer relevancy** and **correctness** (0 / 0.5 / 1), rates each success criterion and labels each factual claim; code computes **completeness**, **groundedness** and **hallucination rate**, the verdict and bug candidates. Clarification / denied / error / timeout are recorded only. Run KPIs (task success, metric means and pass rates, availability, latency, new vs known-gap bugs) go to `kpis.json` / `kpis.csv`. See design doc section 11. | yes |
 
 One orchestrator (`src/synthetic_user/pipeline.py`) runs the nodes; nodes are plain classes.
 
@@ -136,7 +136,7 @@ Global options `--config PATH`, `--log-level LEVEL` (also accepted after the com
 | `evaluate` | `--run-id`, **or** `--questions --executions --scenarios` (+ `--reference-packs` for grounded questions, `--out-dir`, default: executions file's folder) | Node 5 |
 | `run` | `--run-id` (new), `--reference-index`, `--from-step STEP`, `--force-step STEP` (repeatable), `--scenario-count`, `--question-count` | Full pipeline with reuse |
 | `benchmark-evaluator` | `--cases`, `--scenarios` (from `inputs.benchmark_*`; products from `inputs.benchmark_product_paths`) | **Live only**: evaluator agreement with labeled cases, per mode/product and overall |
-| `serve` | `--host` (`127.0.0.1`), `--port` (`8000`) | Web UI + API (see [Web UI](#web-ui)) |
+| `serve` | `--host` (`127.0.0.1`), `--port` (`8000`), `--ui modern\|classic` (`web.ui`) | Web UI + API (see [Web UI](#web-ui)) |
 
 Steps: `index`, `scenarios`, `questions`, `execute`, `evaluate`.
 
@@ -167,6 +167,14 @@ A local FastAPI server (`src/synthetic_user/web/`) with a single-page UI. It bin
 `127.0.0.1` by default and has no authentication, so do not expose it on a network.
 API docs are at `/api/docs`.
 
+Two UIs over the same API (D199): the **modern** UI (default; `static/modern/`) - workflow
+sidebar, one page per step (Test setup, Product connection, Run tests, Test report), recent
+runs, and a printable test report (executive summary, the 5 quality metrics, bug candidates,
+breakdown by task type / capability, results table) - and the **classic** single-page UI
+(`static/`). `/` serves the one named by `web.ui` (`modern` | `classic`, or `serve --ui`); both
+stay reachable at `/modern` and `/classic`, so switching back is one config line. Steps below
+apply to both.
+
 1. **Inputs:**
    - **Persona:** the sample persona or your own YAML upload, plus optional **sample queries**
      (one per line) that are added to the persona's example utterances to mimic the user's
@@ -191,8 +199,11 @@ API docs are at `/api/docs`.
    everything after it. After scenarios, open a row to **review or edit its Reference Pack**
    (JSON; quotes are re-checked against the reference); saving makes questions and later
    steps stale.
-4. **Results:** KPI tiles, verdict distribution, filters/search and one row per question - the
-   same table as `runs/<run_id>/results.csv`, which is rewritten after every step. Click a row
+4. **Results:** KPI scorecard (task success, availability + latency, new bugs, and the 5
+   quality metrics with pass rate and n), verdict distribution, filters/search and one row per
+   question - the same table as `runs/<run_id>/results.csv` (27 columns; cells with several
+   items use "• " bullet lines), rewritten after every step; **Download kpis.csv** for the
+   run-level KPIs. Click a row
    for every field (scenario, reference pack, question + expectations, response, checks,
    findings, bug). The table and CSV show only what evaluation uses;
    download the CSV or any step's JSON. Reload-safe: the run id is kept in the URL (`?run=`).
@@ -214,8 +225,9 @@ artifacts/
     executions.json           # ExecutionRecord[] (response: answered | clarification | denied | error | timeout)
     raw/<execution_id>.json   # raw product response body, when the adapter supplies one (never headers)
     fixture_template.json     # from export-fixture-template
-    evaluations.json          # EvaluationResult[] (checks incl. reference_alignment + rationale, criteria results, findings, verdict)
+    evaluations.json          # EvaluationResult[] (5 metrics, claims, criteria results, findings, verdict)
     bug_candidates.json       # BugCandidate[] (status needs_review, full id chain)
+    kpis.json, kpis.csv       # run KPIs for product managers (code-computed)
   notebook_runs/<run_id>/     # notebooks/pipeline_walkthrough.ipynb output
 ```
 
@@ -357,6 +369,8 @@ Tests run fully offline (scripted fake LLM + fixture product). Rules for contrib
 - **No code-level SQL checks** (design v3): SQL and other artifacts are judged only by the LLM
   against the Reference Pack; a broken query or a made-up column is caught only if the judge
   notices it. The artifact plugin hook is kept but disconnected.
+- **Only answers are judged:** clarifications and denials are recorded, not scored (a wrongly
+  declined supported request is not flagged).
 - **LLM judgements are not calibrated:** confidence values are uncalibrated, and the
   benchmark labels in `tests/fixtures/benchmark/` were drafted by the assistant and still
   need human review.

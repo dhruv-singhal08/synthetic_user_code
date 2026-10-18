@@ -81,6 +81,9 @@ Changed: `reference_cheat_sheet` -> `reference_pack_id`.
 
 ## 6. Evaluation contract (exactly what the evaluator sees)
 
+> The checks listed at the end of this section were replaced by the 5 KPI metrics in
+> section 11 (the evaluator no longer sees the persona; non-answers are recorded only).
+
 Generic (all products, both modes):
 1. `question` (utterance)
 2. `goal` (scenario.business_goal)
@@ -150,3 +153,47 @@ code. In exchange, every product and every reference format goes through one pat
 | Max reference size | 200 KB |
 | Reference pack editable in the UI before questions | yes |
 | Plugin hook | kept but disconnected (`nodes/evaluators/plugins/`: protocol + empty registry; the evaluator does not call it) |
+
+## 11. Evaluation KPIs (agreed 2026-10-18, implemented: D194-D198)
+
+Audience: the product manager of the product under test.
+
+### 11.1 Quality metrics (per answer 0..1; per run: mean, pass rate, n)
+
+| Metric | Measures | Applies to | Scored by |
+|---|---|---|---|
+| Answer relevancy | does the answer address what was asked | every answer | judge: 0 / 0.5 / 1 |
+| Correctness | key facts / query right according to the Reference Pack (extras never wrong by themselves) | grounded answers (N/A otherwise) | judge: 0 / 0.5 / 1 |
+| Groundedness | supported claims / all claims | grounded answers (N/A otherwise) | code, from the judge's claim labels |
+| Hallucination rate | contradicted (grounded) or fabricated (ungrounded) claims / all claims; lower is better | every answer | code, from claim labels |
+| Completeness | success criteria met (met 1, partly 0.5, not met 0; unverifiable left out) | every answer | code, from criteria results |
+
+Claims: the judge splits the answer into short fragments copied exactly from it (for a query:
+its joins, filters, aggregations; framing sentences are not claims) and labels each
+supported / contradicted / not_in_reference (grounded) or unverified / fabricated
+(ungrounded). No claims -> groundedness and hallucination rate N/A.
+
+### 11.2 Per question
+- Final verdict (code): a metric FAILS when relevancy, correctness or completeness is 0, or
+  hallucination rate > 0 (groundedness alone never fails); a failing metric backed by a
+  supported finding of that category -> fail; else any failing or inconclusive metric ->
+  inconclusive; else pass. Only answered responses are judged: clarification / denied / error
+  / timeout are recorded only (persona fit, capability consistency and clarification handling
+  were removed at the user's request).
+- Also kept: criteria results, claims, findings (category = metric), bug candidates,
+  llm_verdict (recorded, not decisive).
+
+### 11.3 Operational KPIs (code only)
+Task success rate (pass / judged), availability (1 - (error + timeout) / asked), latency
+p50 / p95, new bugs (by severity) vs known-gap bugs (every finding matches a known gap),
+inconclusive rate. Breakdowns by task type and capability in kpis.json.
+
+### 11.4 Outputs
+- `kpis.json` (RunKpis) and `kpis.csv` (one row per KPI: value, n, excluded, note), written by
+  the evaluate step; UI scorecard (task success, availability + latency, new bugs, the 5
+  metric means with pass rate and n); CLI prints the KPI lines after a run.
+- `results.csv`: 27 columns (run 1, scenario 4, question 5, reference 2, product 5, metrics 5,
+  evaluation 5); a cell with several items lists them as "• item" lines.
+
+Not included (can be added later): product-specific custom metrics, targets / colours,
+run-to-run comparison.

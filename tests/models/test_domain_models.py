@@ -13,6 +13,7 @@ from synthetic_user.models.evaluation import (
     EvaluationResult,
     EvaluationStatus,
     Finding,
+    MetricName,
     Verdict,
 )
 from synthetic_user.models.persona import Persona
@@ -185,25 +186,22 @@ def test_valid_payloads_parse() -> None:
 # --- invariants --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("outcome", ["denied", "error", "timeout"])
-def test_verdict_none_allowed_for_recorded_only_outcomes(outcome: str) -> None:
+@pytest.mark.parametrize("outcome", ["clarification", "denied", "error", "timeout"])
+def test_non_answers_are_recorded_only(outcome: str) -> None:
     result = EvaluationResult.model_validate(
         _evaluation(product_outcome=outcome, verdict=None, evaluation_status="recorded_only")
     )
     assert result.evaluation_status is EvaluationStatus.RECORDED_ONLY
+    with pytest.raises(ValidationError, match="recorded only"):
+        EvaluationResult.model_validate(_evaluation(product_outcome=outcome, verdict="pass"))
 
 
-@pytest.mark.parametrize("outcome", ["answered", "clarification"])
-def test_verdict_none_rejected_for_judged_outcomes(outcome: str) -> None:
-    with pytest.raises(ValidationError, match="verdict may be None only"):
+def test_answers_need_a_verdict() -> None:
+    with pytest.raises(ValidationError, match="an answered response needs a verdict"):
         EvaluationResult.model_validate(
-            _evaluation(product_outcome=outcome, verdict=None, evaluation_status="recorded_only")
+            _evaluation(verdict=None, evaluation_status="recorded_only")
         )
-
-
-def test_denied_may_still_carry_a_verdict() -> None:
-    result = EvaluationResult.model_validate(_evaluation(product_outcome="denied", verdict="pass"))
-    assert result.verdict is Verdict.PASS
+    assert EvaluationResult.model_validate(_evaluation(verdict="pass")).verdict is Verdict.PASS
 
 
 def test_status_must_match_verdict_presence() -> None:
@@ -414,54 +412,63 @@ def test_question_expectations_shape(expectations: dict[str, Any]) -> None:
         QuestionCase.model_validate(_question(expectations=expectations))
 
 
-_GENERIC = {
-    "relevance": "pass",
-    "goal_completeness": "pass",
-    "persona_fit": "pass",
-    "capability_consistency": "not_applicable",
-    "clarification_handling": "not_applicable",
-    "safety_and_honesty": "pass",
-}
+def _metric(score: float | None = 1.0, status: str = "scored") -> dict[str, Any]:
+    return {"status": status, "score": score, "rationale": "checked"}
 
 
-def test_evaluation_checks_include_reference_alignment() -> None:
+def _metrics(**overrides: dict[str, Any]) -> dict[str, Any]:
+    base = {name: _metric() for name in ("relevancy", "correctness", "groundedness")}
+    base |= {"hallucination_rate": _metric(0.0), "completeness": _metric()}
+    return {**base, **overrides}
+
+
+NA = _metric(None, "not_applicable")
+
+
+def test_evaluation_carries_metrics_and_claims() -> None:
     result = EvaluationResult.model_validate(
         _evaluation(
             verdict="pass",
-            checks={**_GENERIC, "reference_alignment": "pass"},
-            check_rationale={"relevance": "answers the question", "reference_alignment": "ok"},
+            metrics=_metrics(),
+            claims=[{"text": "USD 250", "status": "supported", "reason": "in the policy"}],
         )
     )
-    assert result.checks is not None and result.checks.reference_alignment == "pass"
-    # absent -> not_applicable (e.g. evaluations stored without it)
-    default = EvaluationResult.model_validate(_evaluation(verdict="pass", checks=_GENERIC))
-    assert default.checks is not None and default.checks.reference_alignment == "not_applicable"
+    assert result.metrics is not None
+    assert result.metrics.by_name()[MetricName.HALLUCINATION_RATE].score == 0.0
+    assert result.claims[0].status == "supported"
 
 
-def test_ungrounded_evaluation_has_no_reference_alignment() -> None:
-    ungrounded = _evaluation(mode="ungrounded", verdict="pass", checks=_GENERIC)
-    assert EvaluationResult.model_validate(ungrounded).mode is GenerationMode.UNGROUNDED
-    with pytest.raises(ValidationError, match="ungrounded evaluations have no reference_alignment"):
+def test_metric_score_iff_scored_and_bounded() -> None:
+    with pytest.raises(ValidationError, match="score is set exactly when status is scored"):
         EvaluationResult.model_validate(
-            {**ungrounded, "checks": {**_GENERIC, "reference_alignment": "pass"}}
+            _evaluation(verdict="pass", metrics=_metrics(relevancy=_metric(None)))
         )
-
-
-def test_rationale_must_name_a_known_check_and_v2_fields_are_gone() -> None:
-    with pytest.raises(ValidationError, match="check_rationale for unknown checks"):
-        EvaluationResult.model_validate(_evaluation(check_rationale={"vibes": "good"}))
-    for field in ("grounded_checks", "plugins_applied", "plugin_analysis"):
-        with pytest.raises(ValidationError, match="Extra inputs"):
-            EvaluationResult.model_validate(_evaluation(**{field: {}}))
-
-
-def test_generic_checks_reject_missing_or_extra_criteria() -> None:
     with pytest.raises(ValidationError):
         EvaluationResult.model_validate(
-            _evaluation(checks={k: v for k, v in _GENERIC.items() if k != "relevance"})
+            _evaluation(verdict="pass", metrics=_metrics(relevancy=_metric(1.5)))
         )
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        EvaluationResult.model_validate(_evaluation(checks={**_GENERIC, "sql_syntax": "pass"}))
+
+
+def test_ungrounded_evaluation_has_no_correctness_groundedness_or_reference_claims() -> None:
+    ok = _evaluation(
+        mode="ungrounded",
+        verdict="pass",
+        metrics=_metrics(correctness=NA, groundedness=NA),
+        claims=[{"text": "USD 250", "status": "unverified", "reason": "no ground truth"}],
+    )
+    assert EvaluationResult.model_validate(ok).mode is GenerationMode.UNGROUNDED
+    with pytest.raises(ValidationError, match="ungrounded evaluations have no correctness"):
+        EvaluationResult.model_validate({**ok, "metrics": _metrics(groundedness=NA)})
+    with pytest.raises(ValidationError, match="do not fit mode ungrounded"):
+        EvaluationResult.model_validate(
+            {**ok, "claims": [{"text": "x", "status": "supported", "reason": "r"}]}
+        )
+
+
+def test_old_check_fields_are_gone() -> None:
+    for field in ("checks", "check_rationale", "grounded_checks", "clarification_evaluation"):
+        with pytest.raises(ValidationError, match="Extra inputs"):
+            EvaluationResult.model_validate(_evaluation(verdict="pass", **{field: {}}))
 
 
 SAMPLE_CHATBOT = Path(__file__).resolve().parents[2] / "data" / "products" / "sample_chatbot.yaml"

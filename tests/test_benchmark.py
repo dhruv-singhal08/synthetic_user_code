@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,6 @@ from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import InputAssetError
 from synthetic_user.core.identifiers import SequentialIdGenerator
 from synthetic_user.llm.fake import FakeLLMClient
-from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
 from synthetic_user.nodes.evaluator import Evaluator
@@ -44,62 +43,17 @@ def test_bad_case_line_reports_line_number(tmp_path: Path) -> None:
         load_cases(path)
 
 
-def _approve_generic(user: str) -> dict[str, Any]:
-    """A generic judge that approves everything (criteria copied from the prompt)."""
-    ok = {"status": "pass", "rationale": "fine"}
-    na = {"status": "not_applicable", "rationale": "n/a"}
-    block = user.split("What was asked and what is expected:\n", 1)[1]
-    criteria = json.loads(block.split("\n\nProduct description", 1)[0])["success_criteria"]
-    clarification = "Product response (clarification)" in user
-    grounded = "Reference pack (AUTHORITATIVE" in user
-    if "Product response (denied)" in user:
-        na = {"status": "not_applicable", "rationale": "n/a"}
-        return {
-            **{k: na for k in ("relevance", "goal_completeness", "persona_fit")},
-            "capability_consistency": ok,
-            "clarification_handling": na,
-            "safety_and_honesty": na,
-            "reference_alignment": na if grounded else None,
-            "overall_verdict": "pass",
-        }
-    return {
-        "relevance": ok,
-        "goal_completeness": na if clarification else ok,
-        "criteria": []
-        if clarification
-        else [{"criterion": c, "status": "met", "rationale": "fine"} for c in criteria],
-        "persona_fit": ok,
-        "capability_consistency": ok,
-        "clarification_handling": ok if clarification else na,
-        "clarification": {
-            "relevance": "relevant",
-            "necessity": "necessary",
-            "reason": "fine",
-        }
-        if clarification
-        else None,
-        "safety_and_honesty": ok,
-        "reference_alignment": (na if clarification else ok) if grounded else None,
-        "findings": [],
-        "overall_verdict": "pass",
-    }
-
-
 async def test_agreement_computed_with_scripted_llm(
     app_config: AppConfig,
     sample_reference: Reference,
     sample_product: ProductDescription,
     sample_chatbot: ProductDescription,
-    sample_persona: Persona,
+    judge_factory: Callable[..., Any],
 ) -> None:
-    """With a judge that approves everything, every case passes: agreement = pass labels.
-    (There are no deterministic SQL rules any more - design v3.)"""
-
-    def approve(system: str, user: str) -> dict[str, Any]:
-        return _approve_generic(user)
-
+    """A judge that approves everything: every answered case passes, so agreement = pass
+    labels among judged cases; clarification / denied cases are not judged (design v3)."""
     evaluator = Evaluator(
-        FakeLLMClient([approve] * 20),
+        FakeLLMClient([judge_factory()] * 20),
         app_config,
         logging.getLogger("test"),
         reference=sample_reference,
@@ -113,13 +67,15 @@ async def test_agreement_computed_with_scripted_llm(
         scenarios,
         packs,
         {p.product_id: p for p in (sample_product, sample_chatbot)},
-        sample_persona,
     )
-    assert {r.verdict for r in report.rows} == {"pass"}
+    answered = [c for c in cases if c.outcome == "answered"]
+    assert {r.verdict for r in report.judged} == {"pass"}
+    assert len(report.judged) == len(answered) < len(cases)
+    assert all(r.verdict is None for r in report.rows if not r.judged)
     assert {(r.mode, r.product_id) for r in report.rows} == {
         ("grounded", "sample_nl2sql"),
         ("ungrounded", "sample_policy_chatbot"),
     }
-    passes = sum(1 for c in cases if c.label == "pass")
+    passes = sum(1 for c in answered if c.label == "pass")
     assert report.agreed == passes
-    assert report.agreement == pytest.approx(passes / len(cases))
+    assert report.agreement == pytest.approx(passes / len(answered))

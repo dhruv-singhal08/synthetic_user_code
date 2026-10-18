@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -218,3 +220,49 @@ def sample_scenarios(
         )
         for i, draft in enumerate(scenario_drafts, start=1)
     ]
+
+
+Judge = Callable[[str, str], dict[str, Any]]
+
+
+def scripted_judge(fail_on: str | None = None) -> Judge:
+    """A FakeLLM responder for the evaluation prompt: every metric passes (criteria copied
+    from the prompt, no claims), except answers containing ``fail_on``, which get a
+    correctness 0 (grounded) or relevancy 0 (ungrounded) backed by a supported finding."""
+
+    def judge(system: str, user: str) -> dict[str, Any]:
+        block = user.split("What was asked and what is expected:\n", 1)[1]
+        criteria = json.loads(block.split("\n\nProduct description", 1)[0])["success_criteria"]
+        grounded = "Reference pack (AUTHORITATIVE" in user
+        bad = fail_on is not None and fail_on in user.split("Product answer:", 1)[1]
+        metric = "correctness" if grounded else "relevancy"
+        failed = {"score": 0, "rationale": "wrong", "evidence": fail_on}
+        ok = {"score": 1, "rationale": "fine"}
+        return {
+            "relevancy": failed if bad and metric == "relevancy" else ok,
+            "correctness": (failed if bad else ok) if grounded else None,
+            "criteria": [{"criterion": c, "status": "met", "rationale": "fine"} for c in criteria],
+            "claims": [],
+            "findings": [
+                {
+                    "category": metric,
+                    "description": "the answer is wrong",
+                    "expected_behavior": "a correct answer",
+                    "observed_behavior": "a wrong answer",
+                    "evidence": fail_on,
+                    "severity": "high",
+                    "evidence_status": "supported",
+                }
+            ]
+            if bad
+            else [],
+            "overall_verdict": "fail" if bad else "pass",
+        }
+
+    return judge
+
+
+@pytest.fixture
+def judge_factory() -> Callable[..., Judge]:
+    """``judge_factory(fail_on=...)`` -> a scripted evaluation judge (see scripted_judge)."""
+    return scripted_judge

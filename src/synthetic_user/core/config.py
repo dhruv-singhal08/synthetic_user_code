@@ -50,6 +50,13 @@ class ProductAdapterType(StrEnum):
     PYTHON = "python"
 
 
+class WebUi(StrEnum):
+    """Which web UI ``/`` serves; both stay reachable at /modern and /classic (D199)."""
+
+    MODERN = "modern"
+    CLASSIC = "classic"
+
+
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -95,6 +102,10 @@ class ProductAdapterSettings(_Section):
 class ReferenceSettings(_Section):
     # The whole reference goes into the prompts, so its size is capped (characters).
     max_chars: int = Field(default=200_000, ge=1_000)
+
+
+class WebSettings(_Section):
+    ui: WebUi = WebUi.MODERN
 
 
 class ScenarioGenerationSettings(_Section):
@@ -147,6 +158,7 @@ class AppConfig(_Section):
     paths: PathsSettings
     inputs: InputsSettings
     secrets: SecretsSettings = Field(default_factory=SecretsSettings)
+    web: WebSettings = Field(default_factory=WebSettings)
 
     @model_validator(mode="after")
     def _provider_has_credentials(self) -> Self:

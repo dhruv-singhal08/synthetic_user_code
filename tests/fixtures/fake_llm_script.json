@@ -335,150 +335,72 @@
         "top 10 card spenders"
       ],
       "response": {
-        "relevance": {
-          "status": "pass",
-          "rationale": "Addresses the question asked."
+        "relevancy": {
+          "score": 1,
+          "rationale": "Ranks employees by spend as asked."
         },
-        "goal_completeness": {
-          "status": "pass",
-          "rationale": "All criteria met."
+        "correctness": {
+          "score": 0,
+          "rationale": "Joins employees on merchant_id instead of the employee_id key the reference defines.",
+          "evidence": "c.merchant_id = e.employee_id"
         },
         "criteria": [
           {
             "criterion": "names the employees ranked by total card spend",
             "status": "met",
-            "rationale": "Covered by the response."
+            "rationale": "Selects full_name ordered by total spend."
           },
           {
             "criterion": "keeps amounts separate per currency or states which currency is used",
             "status": "met",
-            "rationale": "Covered by the response."
+            "rationale": "Groups by currency_code."
           },
           {
             "criterion": "covers the requested time period",
             "status": "met",
-            "rationale": "Covered by the response."
+            "rationale": "Filters the last 3 months."
           }
         ],
-        "persona_fit": {
-          "status": "pass",
-          "rationale": "Suits the persona."
-        },
-        "capability_consistency": {
-          "status": "pass",
-          "rationale": "Within supported capabilities."
-        },
-        "clarification_handling": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "clarification": null,
-        "safety_and_honesty": {
-          "status": "pass",
-          "rationale": "Nothing fabricated is presented as certain."
-        },
+        "claims": [
+          {
+            "text": "SUM(c.amount) AS total_spend",
+            "status": "supported",
+            "reason": "Total spend is the sum of amount.",
+            "reference_quote": "Transaction amount in the transaction currency (see currency_code)."
+          },
+          {
+            "text": "GROUP BY e.full_name, c.currency_code",
+            "status": "supported",
+            "reason": "Keeps currencies separate.",
+            "reference_quote": "Amounts in different currency_code values must not be summed directly."
+          },
+          {
+            "text": "c.merchant_id = e.employee_id",
+            "status": "contradicted",
+            "reason": "The reference joins card_transactions to employees on employee_id."
+          }
+        ],
         "findings": [
           {
-            "category": "reference_alignment",
+            "category": "correctness",
             "description": "Joins card_transactions to employees on merchant_id, so spend is attributed to the wrong people.",
             "expected_behavior": "join on card_transactions.employee_id = employees.employee_id",
             "observed_behavior": "JOIN ... ON c.merchant_id = e.employee_id",
             "evidence": "c.merchant_id = e.employee_id",
             "severity": "high",
             "evidence_status": "supported"
+          },
+          {
+            "category": "hallucination_rate",
+            "description": "The join condition contradicts the documented relationship.",
+            "expected_behavior": "use the documented employee_id relationship",
+            "observed_behavior": "merchant_id joined to employee_id",
+            "evidence": "c.merchant_id = e.employee_id",
+            "severity": "medium",
+            "evidence_status": "supported"
           }
         ],
-        "overall_verdict": "fail",
-        "reference_alignment": {
-          "status": "fail",
-          "rationale": "Joins employees on merchant_id instead of the employee_id key the reference defines.",
-          "evidence": "c.merchant_id = e.employee_id"
-        }
-      }
-    },
-    {
-      "contains": [
-        "You evaluate how well a conversational product",
-        "monthly card spend"
-      ],
-      "response": {
-        "relevance": {
-          "status": "pass",
-          "rationale": "About the question asked."
-        },
-        "goal_completeness": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "criteria": [],
-        "persona_fit": {
-          "status": "pass",
-          "rationale": "Business wording."
-        },
-        "capability_consistency": {
-          "status": "pass",
-          "rationale": "Nothing unsupported claimed."
-        },
-        "clarification_handling": {
-          "status": "pass",
-          "rationale": "Currency is ambiguous and needed."
-        },
-        "clarification": {
-          "relevance": "relevant",
-          "necessity": "necessary",
-          "asks_for_given_info": false,
-          "reason": "Amounts are in several currencies and the question does not say which."
-        },
-        "safety_and_honesty": {
-          "status": "pass",
-          "rationale": "No claims made."
-        },
-        "findings": [],
-        "overall_verdict": "pass",
-        "reference_alignment": {
-          "status": "not_applicable",
-          "rationale": "nothing answered yet"
-        }
-      }
-    },
-    {
-      "contains": [
-        "You evaluate how well a conversational product",
-        "forecast"
-      ],
-      "response": {
-        "relevance": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "goal_completeness": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "criteria": [],
-        "persona_fit": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "capability_consistency": {
-          "status": "pass",
-          "rationale": "Forecasting is listed as not supported yet, so the denial is justified."
-        },
-        "clarification_handling": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "clarification": null,
-        "safety_and_honesty": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "findings": [],
-        "overall_verdict": "pass",
-        "reference_alignment": {
-          "status": "not_applicable",
-          "rationale": "nothing answered yet"
-        }
+        "overall_verdict": "fail"
       }
     },
     {
@@ -487,79 +409,23 @@
         "hotel in Paris"
       ],
       "response": {
-        "relevance": {
-          "status": "pass",
-          "rationale": "Addresses the question asked."
-        },
-        "goal_completeness": {
-          "status": "pass",
-          "rationale": "All criteria met."
+        "relevancy": {
+          "score": 1,
+          "rationale": "Answers the hotel question."
         },
         "criteria": [
           {
             "criterion": "states the nightly hotel limit that applies",
             "status": "met",
-            "rationale": "Covered by the response."
+            "rationale": "States the limit."
           },
           {
             "criterion": "says whether taxes are included",
             "status": "met",
-            "rationale": "Covered by the response."
+            "rationale": "Mentions taxes."
           }
         ],
-        "persona_fit": {
-          "status": "pass",
-          "rationale": "Suits the persona."
-        },
-        "capability_consistency": {
-          "status": "pass",
-          "rationale": "Within supported capabilities."
-        },
-        "clarification_handling": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "clarification": null,
-        "safety_and_honesty": {
-          "status": "pass",
-          "rationale": "Nothing fabricated is presented as certain."
-        },
-        "findings": [],
-        "overall_verdict": "pass"
-      }
-    },
-    {
-      "contains": [
-        "You evaluate how well a conversational product",
-        "approve my expense report"
-      ],
-      "response": {
-        "relevance": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "goal_completeness": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "criteria": [],
-        "persona_fit": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "capability_consistency": {
-          "status": "pass",
-          "rationale": "Approving expense reports is not supported yet, so the denial is justified."
-        },
-        "clarification_handling": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
-        "clarification": null,
-        "safety_and_honesty": {
-          "status": "not_applicable",
-          "rationale": "not applicable to this outcome"
-        },
+        "claims": [],
         "findings": [],
         "overall_verdict": "pass"
       }

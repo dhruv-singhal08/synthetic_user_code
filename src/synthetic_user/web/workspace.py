@@ -21,12 +21,17 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from synthetic_user.adapters.contract import ProductContract
 from synthetic_user.adapters.http_json import HttpJsonOptions
 from synthetic_user.core.config import AppConfig
-from synthetic_user.core.exceptions import InputAssetError, format_validation_error
-from synthetic_user.core.identifiers import new_run_id
+from synthetic_user.core.exceptions import (
+    ArtifactNotFoundError,
+    InputAssetError,
+    format_validation_error,
+)
+from synthetic_user.core.identifiers import RUN_ID_PATTERN, new_run_id
 from synthetic_user.core.loaders import parse_asset, parse_yaml_mapping
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord
+from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
@@ -35,7 +40,7 @@ from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.pipeline import RunInputs, Step, steps_from
 from synthetic_user.references.loader import parse_reference, reference_format
 from synthetic_user.storage.json_store import JsonArtifactStore
-from synthetic_user.storage.runs import run_artifact
+from synthetic_user.storage.runs import RUNS_DIR, run_artifact
 from synthetic_user.web.results_csv import build_rows, to_csv
 
 REFERENCE = "reference"  # optional input kind (.json/.txt/.md); absent -> ungrounded
@@ -305,6 +310,41 @@ class Workspace:
     def save_state(self, state: UiRunState) -> None:
         self._store.write_model(run_artifact(state.run_id, UI_STATE), state)
 
+    def recent_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Newest UI runs first (runs without a readable ui_state.json are skipped)."""
+        runs_dir = self._store.path_for(Path(RUNS_DIR))
+        names = (
+            sorted(
+                (p.name for p in runs_dir.iterdir() if RUN_ID_PATTERN.fullmatch(p.name)),
+                reverse=True,
+            )
+            if runs_dir.is_dir()
+            else []
+        )
+        runs: list[dict[str, Any]] = []
+        for run_id in names:
+            if len(runs) >= limit:
+                break
+            if not self._store.exists(run_artifact(run_id, UI_STATE)):
+                continue
+            try:
+                state = self.state(run_id)
+                kpis = self._read(run_id, "kpis.json", RunKpis)
+            except (ArtifactNotFoundError, ValidationError, ValueError):
+                continue
+            runs.append(
+                {
+                    "run_id": run_id,
+                    "created_at": state.created_at.isoformat(),
+                    "sources": state.sources,
+                    "steps_done": [s.value for s in state.steps_done],
+                    "task_success_rate": kpis.task_success_rate if kpis else None,
+                    "judged": kpis.judged if kpis else None,
+                    "product_id": kpis.product_id if kpis else None,
+                }
+            )
+        return runs
+
     def mark_done(self, state: UiRunState, step: Step) -> UiRunState:
         """Record ``step``; later steps are no longer done (the pipeline cascades)."""
         later = steps_from(step) - {step}
@@ -322,11 +362,13 @@ class Workspace:
         executions = self._read(run_id, "executions.json", list[ExecutionRecord]) or []
         evaluations = self._read(run_id, "evaluations.json", list[EvaluationResult]) or []
         packs = self._read(run_id, "reference_packs.json", list[ReferencePack]) or []
+        kpis = self._read(run_id, "kpis.json", RunKpis)
         rows = build_rows(run_id, scenarios, questions, executions, evaluations, packs)
         self._store.write_text(run_artifact(run_id, RESULTS_CSV), to_csv(rows))
         details = {
             "scenarios": [s.model_dump(mode="json") for s in scenarios],
             "reference_packs": [p.model_dump(mode="json") for p in packs],
+            "kpis": kpis.model_dump(mode="json") if kpis is not None else None,
             "evaluations": [e.model_dump(mode="json") for e in evaluations],
         }
         rejected_scenarios = self._read(run_id, "scenarios_rejected.json", list[RejectedScenario])

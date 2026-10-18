@@ -29,6 +29,9 @@ product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.
 reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 
+web:
+  ui: modern                 # modern | classic: the UI served at / (both stay at /modern and /classic)
+
 generation:
   scenario:
     scenario_count: 10                  # scenarios per run

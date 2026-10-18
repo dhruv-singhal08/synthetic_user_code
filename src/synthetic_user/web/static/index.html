@@ -238,17 +238,20 @@
           <p>One row per question - the same table as <code>results.csv</code>. Click a row for the full evaluation.</p>
         </div>
         <div class="right">
+          <a id="download-kpis" class="btn disabled" href="#">Download kpis.csv</a>
           <a id="download-csv" class="btn primary disabled" href="#">Download results.csv</a>
         </div>
       </div>
       <div class="card-body">
         <div class="kpis" id="kpis"></div>
+        <h3 class="kpi-title">Answer quality <span class="small muted">(mean score over judged answers · pass rate · n)</span></h3>
+        <div class="kpis metrics" id="metric-kpis"></div>
         <div class="dist" id="dist"></div>
         <div class="legend">
           <span><i style="background:var(--pass)"></i>Pass</span>
           <span><i style="background:var(--fail)"></i>Fail</span>
           <span><i style="background:#d4a72c"></i>Inconclusive</span>
-          <span><i style="background:#9aa5b3"></i>Recorded only (error / timeout)</span>
+          <span><i style="background:#9aa5b3"></i>Recorded only (clarification / denied / error / timeout)</span>
         </div>
         <div class="toolbar">
           <div class="segmented" id="filter" role="group" aria-label="Filter by verdict">

@@ -1,6 +1,11 @@
 """The single results table: one row per question, columns filled in as steps complete.
 
-Scenarios without an accepted question still get one row (question columns blank).
+Scenarios without an accepted question still get one row (question columns blank). Only what
+evaluation uses is shown (design v3); the full detail stays in the JSON artifacts.
+
+Cell format (readable in Excel): a cell holding several items lists them as bullet points,
+one per line ("• item"); a single item is written as is. Metric cells hold the score (0..1),
+"inconclusive", or stay empty when the metric does not apply.
 """
 
 from __future__ import annotations
@@ -10,19 +15,21 @@ import io
 import json
 from collections.abc import Sequence
 
-from synthetic_user.models.evaluation import CheckStatus, EvaluationResult
+from synthetic_user.models.evaluation import EvaluationResult, MetricName, MetricStatus
 from synthetic_user.models.execution import (
     AnsweredResponse,
     ClarificationResponse,
     DeniedResponse,
     ErrorResponse,
     ExecutionRecord,
+    ResponseArtifact,
 )
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import ReferencePack
 from synthetic_user.models.scenario import Scenario
 
-# Only what evaluation uses (design v3); the full detail stays in the JSON artifacts.
+BULLET = "• "
+
 SCENARIO_COLUMNS = ["scenario_id", "mode", "scenario_title", "business_goal"]
 QUESTION_COLUMNS = [
     "question_id",
@@ -39,11 +46,10 @@ EXECUTION_COLUMNS = [
     "product_message",
     "latency_ms",
 ]
+METRIC_COLUMNS = [m.value for m in MetricName]
 EVALUATION_COLUMNS = [
     "final_verdict",
     "criteria_results",
-    "failed_checks",
-    "inconclusive_checks",
     "findings",
     "bug_ids",
     "evaluation_notes",
@@ -54,10 +60,17 @@ COLUMNS = [
     *QUESTION_COLUMNS,
     *REFERENCE_COLUMNS,
     *EXECUTION_COLUMNS,
+    *METRIC_COLUMNS,
     *EVALUATION_COLUMNS,
 ]
 
-_SEP = " | "
+
+def bullets(items: Sequence[str]) -> str:
+    """Several items -> one bullet per line; one item -> as is; none -> empty."""
+    items = [i for i in items if i]
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return "\n".join(f"{BULLET}{item}" for item in items)
 
 
 def build_rows(
@@ -69,8 +82,8 @@ def build_rows(
     packs: Sequence[ReferencePack] = (),
 ) -> list[dict[str, str]]:
     execution_by_question = {e.question_id: e for e in executions}
-    pack_by_id = {p.pack_id: p for p in packs}
     evaluation_by_execution = {e.execution_id: e for e in evaluations}
+    pack_by_id = {p.pack_id: p for p in packs}
     rows: list[dict[str, str]] = []
     for scenario in scenarios:
         pack = pack_by_id.get(scenario.reference_pack_id or "")
@@ -116,8 +129,8 @@ def _pack_cells(pack: ReferencePack | None) -> dict[str, str]:
     if pack is None:
         return {}
     return {
-        "core_refs": _SEP.join(r.name for r in pack.core_refs),
-        "reference_rules": _SEP.join(r.rule for r in pack.rules),
+        "core_refs": bullets([r.name for r in pack.core_refs]),
+        "reference_rules": bullets([r.rule for r in pack.rules]),
     }
 
 
@@ -127,9 +140,14 @@ def _question_cells(q: QuestionCase) -> dict[str, str]:
         "question_id": q.question_id,
         "question": q.utterance,
         "expected_behavior": e.expected_behavior,
-        "success_criteria": _SEP.join(e.success_criteria),
-        "acceptable_variations": _SEP.join(e.acceptable_variations),
+        "success_criteria": bullets(e.success_criteria),
+        "acceptable_variations": bullets(e.acceptable_variations),
     }
+
+
+def _artifact(a: ResponseArtifact) -> str:
+    content = a.content if isinstance(a.content, str) else json.dumps(a.content, indent=1)
+    return f"{a.kind}:\n{content.strip()}"
 
 
 def _execution_cells(e: ExecutionRecord) -> dict[str, str]:
@@ -138,10 +156,7 @@ def _execution_cells(e: ExecutionRecord) -> dict[str, str]:
     text, message, artifacts = "", "", ""
     if isinstance(response, AnsweredResponse):
         text = response.text or ""
-        artifacts = _SEP.join(
-            f"{a.kind}: {a.content if isinstance(a.content, str) else json.dumps(a.content)}"
-            for a in response.artifacts
-        )
+        artifacts = bullets([_artifact(a) for a in response.artifacts])
     elif isinstance(response, ClarificationResponse | DeniedResponse):
         message = response.message
     elif isinstance(response, ErrorResponse):
@@ -155,21 +170,28 @@ def _execution_cells(e: ExecutionRecord) -> dict[str, str]:
     }
 
 
+def _metric_cell(ev: EvaluationResult, name: MetricName) -> str:
+    if ev.metrics is None:
+        return ""
+    result = ev.metrics.by_name()[name]
+    if result.status is MetricStatus.INCONCLUSIVE:
+        return "inconclusive"
+    return f"{result.score:g}" if result.score is not None else ""
+
+
 def _evaluation_cells(ev: EvaluationResult) -> dict[str, str]:
-    checks = ev.checks.model_dump() if ev.checks else {}
     return {
+        **{m.value: _metric_cell(ev, m) for m in MetricName},
         "final_verdict": ev.verdict.value if ev.verdict else "recorded_only",
-        "criteria_results": _SEP.join(
-            f"{c.status.value}: {c.criterion}" for c in ev.criteria_results
+        "criteria_results": bullets(
+            [f"{c.status.value}: {c.criterion}" for c in ev.criteria_results]
         ),
-        "failed_checks": _SEP.join(k for k, v in checks.items() if v == CheckStatus.FAIL),
-        "inconclusive_checks": _SEP.join(
-            k for k, v in checks.items() if v == CheckStatus.INCONCLUSIVE
+        "findings": bullets(
+            [
+                f"{f.finding_id} [{f.severity.value}] {f.category}: {f.description}"
+                for f in ev.findings
+            ]
         ),
-        "findings": _SEP.join(
-            f"{f.finding_id} [{f.severity.value}] {f.category}: {f.description}"
-            for f in ev.findings
-        ),
-        "bug_ids": _SEP.join(b.bug_id for b in ev.bug_candidates),
-        "evaluation_notes": _SEP.join(ev.notes),
+        "bug_ids": bullets([b.bug_id for b in ev.bug_candidates]),
+        "evaluation_notes": bullets(list(ev.notes)),
     }

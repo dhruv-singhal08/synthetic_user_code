@@ -26,7 +26,7 @@ from synthetic_user.adapters.http_json import (
 )
 from synthetic_user.adapters.mock_llm import MockLLMAdapter
 from synthetic_user.adapters.registry import create_adapter
-from synthetic_user.core.config import AppConfig
+from synthetic_user.core.config import AppConfig, WebUi
 from synthetic_user.core.exceptions import (
     ArtifactNotFoundError,
     ConfigError,
@@ -50,6 +50,11 @@ from synthetic_user.web.workspace import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
+# Two UIs over the same API (D199): web.ui picks which one "/" serves.
+UI_PAGES = {
+    WebUi.MODERN: STATIC_DIR / "modern" / "index.html",
+    WebUi.CLASSIC: STATIC_DIR / "index.html",
+}
 CONTRACT_TEMPLATE = STATIC_DIR / "product_contract_template.yaml"
 # UI steps run in order (D115); scenarios runs the reference check itself.
 _PREREQUISITE = {
@@ -95,7 +100,15 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(UI_PAGES[settings.web.ui])
+
+    @app.get("/modern", include_in_schema=False)
+    async def modern_ui() -> FileResponse:
+        return FileResponse(UI_PAGES[WebUi.MODERN])
+
+    @app.get("/classic", include_in_schema=False)
+    async def classic_ui() -> FileResponse:
+        return FileResponse(UI_PAGES[WebUi.CLASSIC])
 
     @app.get("/api/config")
     async def config() -> dict[str, Any]:
@@ -107,6 +120,7 @@ def create_app(
             "scenario_count": settings.generation.scenario.scenario_count,
             "question_count": settings.generation.question.question_count,
             "steps": [s.value for s in Step],
+            "ui": settings.web.ui.value,
         }
 
     @app.get("/api/samples")
@@ -155,6 +169,10 @@ def create_app(
             uploads[kind] = Upload(file.filename or kind, await file.read()) if file else None
         state = workspace.create_run(uploads, persona_queries, use_reference=use_reference)
         return {"state": state.model_dump(mode="json"), **workspace.results(state.run_id)}
+
+    @app.get("/api/runs")
+    async def list_runs() -> dict[str, Any]:
+        return {"runs": workspace.recent_runs()}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str) -> dict[str, Any]:
@@ -265,6 +283,7 @@ def create_app(
             detail = {
                 "evaluations": len(evaluate_step.evaluations),
                 "bug_candidates": len(evaluate_step.bug_candidates),
+                "task_success_rate": evaluate_step.kpis.task_success_rate,
             }
 
         state = workspace.mark_done(state, step)

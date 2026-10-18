@@ -45,13 +45,18 @@ SAFECHAIN_MODEL_ID=1                       # 1 = gpt-5.2, 3 = gpt-5-mini (keys i
 SAFECHAIN_CONFIG_PATH=./config/safechain.yaml
 CIBIS_CONSUMER_INTEGRATION_ID=<same value as in your starter .env>
 CIBIS_CONSUMER_SECRET=<same value as in your starter .env>
-CONFIG_PATH=./config/app.yaml              # this app's config - NOT the SafeChain yaml
+PRODUCT_API_TOKEN=                         # only if your product contract uses ${PRODUCT_API_TOKEN}
 ```
 
+Do **not** add `CONFIG_PATH` to `.env`: SafeChain reads `CONFIG_PATH` as *its* YAML and may
+reload `.env`, which then points it at this app's config ("No models defined in config"). Pick
+this app's config with `--config` instead, as every command below does.
+
 **Your reference index:** copy your full index JSON (same format as
-`data/references/reference_index_sample_v2.json`) to `data\references\reference_index.json` -
-`config\app.safechain.yaml` already points there (`inputs.reference_index_file`). Remove that
-line to run ungrounded (no index, no cheat sheets).
+`data/references/reference_index_sample_v2.json`) to `data\references\reference_index.json`.
+The **CLI** reads it from there (`inputs.reference_index_file` in `config\app.safechain.yaml`;
+remove that line to run the CLI ungrounded). The **Web UI** does not read it: you upload the
+index in the UI (toggle on = grounded, off = ungrounded).
 
 Check it loads before running anything else:
 
@@ -87,14 +92,30 @@ live log of every step and LLM call. Stop the server with **Ctrl+C**.
 - More detail in the log: add `--log-level DEBUG`
 - Offline demo (no SafeChain): `poetry run synthetic-user serve --config config/app.fake.yaml`
 
-In the UI: create a run (optionally upload persona / product YAML and your reference index JSON),
-then run the steps in order: **index -> scenarios -> questions -> execute -> evaluate**. Download the results CSV at
-the end. Run folders are under `artifacts\runs\<run_id>\`.
+In the UI (top to bottom):
+
+1. **Inputs** - Persona: keep the sample or upload your YAML; optionally paste sample queries
+   (one per line). Product description: upload your YAML (required, no sample). Reference
+   index: switch **on** and upload your index JSON for a grounded run, or leave it **off** for
+   an ungrounded run. Then **Start run**.
+2. **Product connection** - enter the product URL, upload a contract (YAML/JSON: request
+   template + where the answer is in the reply; **Download a contract template** shows the
+   format) and click **Connect**. Put tokens in `.env` and reference them as
+   `${PRODUCT_API_TOKEN}` in the contract headers - never paste a token into the file.
+   **Mock product** is for demos only (an LLM stand-in answers from the index). Without a
+   connection the configured fixture product answers, and it only knows the offline demo
+   questions: live questions come back as `error` (recorded only).
+3. **Test pipeline** - Generate scenarios -> Generate questions -> Run on product -> Evaluate,
+   or **Run all remaining steps**.
+4. **Results** - filter, search, click a row for details, **Download results.csv**.
+
+Run folders are under `artifacts\runs\<run_id>\`.
 
 ## 6. CLI instead of the UI (optional)
 
 ```powershell
-poetry run synthetic-user run --config config/app.safechain.yaml          # all steps
+poetry run synthetic-user run --config config/app.safechain.yaml          # all steps (uses data\references\reference_index.json)
+poetry run synthetic-user run --config config/app.safechain.yaml --reference-index <path\to\index.json>
 poetry run synthetic-user run --config config/app.safechain.yaml --from-step questions
 poetry run synthetic-user --help
 ```

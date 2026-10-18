@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "synthetic-user"
 version = "0.1.0"
-description = "Synthetic User that tests an NL2SQL product."
+description = "Synthetic User for automated testing of conversational products."
 authors = ["synthetic-user maintainers"]
 packages = [{ include = "synthetic_user", from = "src" }]
 

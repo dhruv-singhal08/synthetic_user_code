@@ -44,7 +44,8 @@ def test_repo_config_loads_with_documented_defaults() -> None:
     assert cfg.llm.provider is LLMProvider.FAKE
     assert cfg.llm.max_validation_retries == 2
     assert cfg.product_adapter.type is ProductAdapterType.FIXTURE
-    assert cfg.product.timeout_seconds == 30
+    assert cfg.product.timeout_seconds == 300
+    assert cfg.product.max_concurrency == 1
     assert cfg.sql.dialect == "bigquery"
     assert cfg.generation.question.ambiguity_level is AmbiguityLevel.LOW
     assert cfg.secrets.google_api_key is None

@@ -10,7 +10,7 @@ Depends only on the ProductAdapter protocol. Per question:
 - raw_response (if the adapter supplies one) is handed to ``raw_writer`` and cleared from the
   stored response; the record keeps the returned path.
 Responses (and any SQL artifact) are recorded, never executed. ``execute_many`` runs calls
-under ``llm.max_concurrency``, keeps question order (EXE_ ids assigned afterwards) and always
+under ``product.max_concurrency``, keeps question order (EXE_ ids assigned afterwards) and always
 calls ``adapter.aclose()``.
 """
 
@@ -73,7 +73,7 @@ class ProductExecutor:
     ) -> list[ExecutionRecord]:
         """One ExecutionRecord per question, in question order. ``product_id`` comes from the
         product description. The adapter is always closed, even if something fails."""
-        semaphore = asyncio.Semaphore(self._settings.llm.max_concurrency)
+        semaphore = asyncio.Semaphore(self._settings.product.max_concurrency)
         try:
             raw = await asyncio.gather(*(self._ask(q, product_id, semaphore) for q in questions))
         finally:

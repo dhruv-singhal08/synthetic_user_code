@@ -105,11 +105,11 @@ In the UI (top to bottom):
    **Mock product** is for demos only (an LLM stand-in answers from the index). Without a
    connection the configured fixture product answers, and it only knows the offline demo
    questions: live questions come back as `error` (recorded only).
-   **Your NL2SQL API (`POST /generate/sql/`):** upload
-   `config\products\generate_sql.adapter.yaml` as the contract and enter its URL. The product
-   already uses port 8000, so start this UI on another port:
-   `poetry run synthetic-user serve --config config/app.safechain.yaml --port 8001`. If the call
-   fails with a proxy error, add `NO_PROXY=localhost,127.0.0.1` to `.env` and restart.
+   **Your NL2SQL API (nlsql agent, `POST /generate/sql/?timeout=10` on port 8007):** upload
+   `config\products\generate_sql.adapter.yaml` as the contract; leave the URL empty to use
+   `http://127.0.0.1:8007/generate/sql/?timeout=10` from the file, or type another one. Start the
+   product first. If the call fails with a proxy error, add `NO_PROXY=localhost,127.0.0.1` to
+   `.env` and restart. The UI and the product must not share a port (UI default 8000).
 3. **Test pipeline** - Generate scenarios -> Generate questions -> Run on product -> Evaluate,
    or **Run all remaining steps**.
 4. **Results** - filter, search, click a row for details, **Download results.csv**.

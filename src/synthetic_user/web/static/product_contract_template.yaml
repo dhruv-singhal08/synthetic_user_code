@@ -8,7 +8,8 @@
 method: POST                          # GET sends no body
 headers:
   Authorization: "Bearer ${PRODUCT_API_TOKEN}"
-timeout: 30                           # seconds per question
+timeout: 300                          # HTTP seconds per question (product.timeout_seconds in
+                                      # the app config also applies; the lower one wins)
 
 # Request body. {utterance} = the generated question; {uuid} = a fresh UUID per question
 # (use it for a session / request id); {session_id} = the tool's session (null in single-turn).

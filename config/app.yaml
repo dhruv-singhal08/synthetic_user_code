@@ -16,7 +16,8 @@ llm:
 # provider; required when LLM_PROVIDER switches provider), SAFECHAIN_CONFIG_PATH.
 
 product:
-  timeout_seconds: 30         # per product call (the executor's timeout, any adapter)
+  timeout_seconds: 300        # per product call (the executor's timeout, any adapter)
+  max_concurrency: 1          # questions sent to the product at once (1 = one by one)
 
 # Which adapter talks to the product: fixture | http_json | python (see config/products/).
 # Inline {type, options}, or a path to a config/products/<product_id>.adapter.yaml file.

@@ -80,6 +80,9 @@ class LLMSettings(_Section):
 
 class ProductSettings(_Section):
     timeout_seconds: float = Field(default=30.0, gt=0)  # per product call (executor)
+    # Questions in flight at once. Separate from llm.max_concurrency: a local product often
+    # answers one request at a time, and queued requests would use up their timeout (D184).
+    max_concurrency: int = Field(default=1, ge=1, le=32)
 
 
 class ProductAdapterSettings(_Section):

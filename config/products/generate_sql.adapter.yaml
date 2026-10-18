@@ -10,7 +10,8 @@ type: http_json
 options:
   url: http://127.0.0.1:8007/generate/sql/?timeout=10   # ?timeout = the product's own limit
   method: POST
-  timeout: 120                        # seconds this tool waits per question
+  timeout: 300                        # HTTP wait per question; the app config's
+                                      # product.timeout_seconds is also a limit (lower wins)
   request_template:
     input: "{utterance}"
     session_id: "{uuid}"              # a fresh session per question (no shared history)

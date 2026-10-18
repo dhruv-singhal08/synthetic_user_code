@@ -141,6 +141,35 @@ async def test_order_kept_under_concurrency(
     assert [r.question_id for r in records] == [f"Q_00{i}" for i in range(1, 7)]
 
 
+async def test_product_max_concurrency_limits_requests_in_flight(
+    app_config: AppConfig, sample_scenarios: list[Scenario]
+) -> None:
+    texts = [f"q{i}" for i in range(5)]
+    in_flight = peak = 0
+
+    class CountingAdapter(ScriptedAdapter):
+        async def send(self, req: ProductRequest) -> ProductResponse:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                return await super().send(req)
+            finally:
+                in_flight -= 1
+
+    adapter = CountingAdapter(
+        {t: AnsweredResponse(text=t) for t in texts}, delays=dict.fromkeys(texts, 0.01)
+    )
+    for limit in (1, 3):
+        peak = 0
+        settings = app_config.model_copy(
+            update={"product": app_config.product.model_copy(update={"max_concurrency": limit})}
+        )
+        records = await _run(adapter, settings, sample_scenarios[0], *texts)
+        assert [r.response.outcome for r in records] == ["answered"] * 5
+        assert peak == limit
+
+
 async def test_adapter_error_and_unexpected_exception(
     app_config: AppConfig, sample_scenarios: list[Scenario], caplog: pytest.LogCaptureFixture
 ) -> None:

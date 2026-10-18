@@ -13,6 +13,7 @@ llm:
   fake_script_path: ./tests/fixtures/fake_llm_script.json
 product:
   timeout_seconds: 30
+  max_concurrency: 4
 product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
   type: fixture             # fixture | http_json | python
   options:

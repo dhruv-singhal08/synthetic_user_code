@@ -12,7 +12,8 @@ llm:
   fake_script_path: null
   safechain_config_path: ./config/safechain.yaml
 product:
-  timeout_seconds: 30
+  timeout_seconds: 300       # per question; the contract `timeout` must not be lower
+  max_concurrency: 1         # questions sent to the product at once
 product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
   type: fixture             # fixture | http_json | python
   options:

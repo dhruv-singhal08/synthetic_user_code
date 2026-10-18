@@ -1,0 +1,41 @@
+# Voice of Customer (VoC) product API, from its Swagger page:
+#   POST https://voc-dev.aexp.com/api/query/ask
+#   body  {"question": "<question>", "session": "<id>", "request_id": "<id>",
+#          "channel": "api", "is_admin": false}
+#   200 -> {"text": "<markdown answer>",
+#           "tool_calls": [{"name": "aggregate_feedback",
+#                           "input": {"source": "complaints", "group_by": "journey",
+#                                     "metric": "count", "sort": "desc",
+#                                     "filters": {"atwork_scope": "atwork"}}}, ...]}
+#
+# Web UI: upload this file as the contract in "Product connection" (the URL field wins over
+#   options.url below).
+# CLI:    product_adapter: ./config/products/voc.adapter.yaml
+type: http_json
+options:
+  url: https://voc-dev.aexp.com/api/query/ask
+  method: POST
+  timeout: 300                        # HTTP wait per question; the app config's
+                                      # product.timeout_seconds is also a limit (lower wins)
+  headers:
+    accept: "*/*"
+    # If the API needs a token, put it in .env and reference it here - never the value itself:
+    # Authorization: "Bearer ${VOC_API_TOKEN}"
+  request_template:
+    question: "{utterance}"
+    session: "{uuid}"                 # a fresh session per question (no shared history)
+    request_id: "synthetic-{uuid}"    # same uuid as the session, prefixed
+    channel: api
+    is_admin: false
+  response_mapping:
+    text: text                        # the answer, judged by the generic checks
+    artifacts:
+      - kind: tool_calls              # which tools / filters the product used (source,
+        path: tool_calls              #   group_by, metric, filters): evidence for
+                                      #   reference_alignment in grounded runs
+    # When you know how the API signals a clarification question or an unsupported request,
+    # map it so those replies are not judged as answers - for example:
+    # clarification_when: "type == clarification"
+    # clarification_message: text
+    # denied_when: "type == unsupported"
+    # denied_message: text

@@ -27,13 +27,12 @@ class ProductContract(StrictModel):
     contract_version: NonEmptyStr
     product_id: NonEmptyStr
     product_url: NonEmptyStr
-    sql_dialect: NonEmptyStr
     ask: ContractEndpoint
     outcomes: list[NonEmptyStr]
     mock: bool
 
 
-def request_contract(url: str, product_id: str, sql_dialect: str) -> ProductContract:
+def request_contract(url: str, product_id: str) -> ProductContract:
     """MOCK: validate the URL and return the contract the product is expected to publish."""
     parsed = urlparse(url.strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -42,7 +41,6 @@ def request_contract(url: str, product_id: str, sql_dialect: str) -> ProductCont
         contract_version="mock-1",
         product_id=product_id,
         product_url=url.strip(),
-        sql_dialect=sql_dialect,
         ask=ContractEndpoint(
             method="POST",
             path="/v1/ask",
@@ -50,8 +48,8 @@ def request_contract(url: str, product_id: str, sql_dialect: str) -> ProductCont
             response_fields={
                 "outcome": "answered | clarification | denied | error",
                 "text": "string - optional answer text when outcome is answered",
-                "artifacts": 'list of {kind, content, metadata} - e.g. kind "sql" holds the '
-                "generated SQL",
+                "artifacts": "list of {kind, content, metadata} - product-specific payloads "
+                '(e.g. kind "sql" for a generated query)',
                 "message": "string - clarification question or denial reason",
             },
         ),

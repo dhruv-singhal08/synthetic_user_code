@@ -14,16 +14,19 @@ from synthetic_user.core.identifiers import SequentialIdGenerator
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference
 from synthetic_user.nodes.evaluator import Evaluator
-from synthetic_user.nodes.evaluators.plugins.sql.models import SqlChecks
 
 BENCH = Path(__file__).resolve().parent / "fixtures" / "benchmark"
 
 
 def test_labeled_cases_are_valid() -> None:
     cases = load_cases(BENCH / "labeled_cases.jsonl")
-    scenarios = {s.id: s for s in load_scenarios(BENCH / "scenarios.json")}
+    scenario_list, packs = load_scenarios(BENCH / "scenarios.json")
+    scenarios = {s.id: s for s in scenario_list}
+    assert {p.pack_id for p in packs} == {
+        s.reference_pack_id for s in scenario_list if s.reference_pack_id
+    }
     assert 14 <= len(cases) <= 18
     assert len({c.case_id for c in cases}) == len(cases)
     assert {c.scenario_id for c in cases} <= set(scenarios)
@@ -45,9 +48,10 @@ def _approve_generic(user: str) -> dict[str, Any]:
     """A generic judge that approves everything (criteria copied from the prompt)."""
     ok = {"status": "pass", "rationale": "fine"}
     na = {"status": "not_applicable", "rationale": "n/a"}
-    block = user.split("Success criteria (for goal_completeness):", 1)[1]
-    criteria = json.loads(block.split("Product response", 1)[0])
+    block = user.split("What was asked and what is expected:\n", 1)[1]
+    criteria = json.loads(block.split("\n\nProduct description", 1)[0])["success_criteria"]
     clarification = "Product response (clarification)" in user
+    grounded = "Reference pack (AUTHORITATIVE" in user
     if "Product response (denied)" in user:
         na = {"status": "not_applicable", "rationale": "n/a"}
         return {
@@ -55,6 +59,7 @@ def _approve_generic(user: str) -> dict[str, Any]:
             "capability_consistency": ok,
             "clarification_handling": na,
             "safety_and_honesty": na,
+            "reference_alignment": na if grounded else None,
             "overall_verdict": "pass",
         }
     return {
@@ -74,6 +79,7 @@ def _approve_generic(user: str) -> dict[str, Any]:
         if clarification
         else None,
         "safety_and_honesty": ok,
+        "reference_alignment": (na if clarification else ok) if grounded else None,
         "findings": [],
         "overall_verdict": "pass",
     }
@@ -81,44 +87,39 @@ def _approve_generic(user: str) -> dict[str, Any]:
 
 async def test_agreement_computed_with_scripted_llm(
     app_config: AppConfig,
-    sample_index: ReferenceIndex,
+    sample_reference: Reference,
     sample_product: ProductDescription,
     sample_chatbot: ProductDescription,
     sample_persona: Persona,
 ) -> None:
-    """With an LLM that always approves, only deterministic rules can disagree with it."""
-    all_pass = dict.fromkeys(SqlChecks.model_fields, "pass")
+    """With a judge that approves everything, every case passes: agreement = pass labels.
+    (There are no deterministic SQL rules any more - design v3.)"""
 
     def approve(system: str, user: str) -> dict[str, Any]:
-        if "Success criteria (for goal_completeness)" in user:
-            return _approve_generic(user)
-        return {"checks": all_pass, "findings": [], "verdict": "pass"}
+        return _approve_generic(user)
 
     evaluator = Evaluator(
-        FakeLLMClient([approve] * 60),
+        FakeLLMClient([approve] * 20),
         app_config,
         logging.getLogger("test"),
-        index=sample_index,
+        reference=sample_reference,
         id_generator=SequentialIdGenerator(),
     )
+    cases = load_cases(BENCH / "labeled_cases.jsonl")
+    scenarios, packs = load_scenarios(BENCH / "scenarios.json")
     report = await run_benchmark(
         evaluator,
-        load_cases(BENCH / "labeled_cases.jsonl"),
-        load_scenarios(BENCH / "scenarios.json"),
-        sample_index,
+        cases,
+        scenarios,
+        packs,
         {p.product_id: p for p in (sample_product, sample_chatbot)},
         sample_persona,
     )
-    verdicts = {r.case_id: r.verdict for r in report.rows}
-    # Deterministic rules decide these regardless of the LLM:
-    assert verdicts["B03"] == "fail"  # wrong join vs verified relationship
-    assert verdicts["B09"] == "inconclusive"  # table not in the reference index
-    assert verdicts["B13"] == "fail"  # syntax error
-    assert verdicts["B14"] == "fail"  # unknown column
-    assert verdicts["B18"] == "pass"  # justified denial (capability judged only)
+    assert {r.verdict for r in report.rows} == {"pass"}
     assert {(r.mode, r.product_id) for r in report.rows} == {
         ("grounded", "sample_nl2sql"),
         ("ungrounded", "sample_policy_chatbot"),
     }
-    assert report.agreed == 8
-    assert report.agreement == pytest.approx(8 / 16)
+    passes = sum(1 for c in cases if c.label == "pass")
+    assert report.agreed == passes
+    assert report.agreement == pytest.approx(passes / len(cases))

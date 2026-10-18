@@ -9,13 +9,13 @@ synthetic-user. Synthetic User for automated testing of conversational products
 - Log: `docs/PROGRESS.md`.
 - Decisions: `docs/DECISIONS.md` (one line per non-obvious choice).
 
-Pipeline (single-turn):
+Pipeline (single-turn, design v3: `docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md`):
 
 ```
-Persona + Product [+ pre-built Reference Index]
-  -> [1] Scenarios (+ Cheat Sheet only when grounded) -> [2] Questions
-  -> [3] Product Executor (ProductAdapter) -> [4] Evaluator (generic criteria
-     + grounded checks + plugins, e.g. SQL) -> Bug Candidates
+Persona + Product [+ Reference file (any JSON/TXT/MD) + optional Usage guide]
+  -> [1] Scenarios (+ Reference Pack only when grounded) -> [2] Questions
+  -> [3] Product Executor (ProductAdapter) -> [4] Evaluator (one generic judge;
+     + reference_alignment against the pack when grounded) -> Bug Candidates
 ```
 
 One orchestrator. Nodes are classes, not agents.
@@ -24,19 +24,20 @@ One orchestrator. Nodes are classes, not agents.
 
 1. PRODUCT AGNOSTIC. The tool tests ANY conversational product, not only NL2SQL.
    - No NL2SQL / SQL wording in generic models, prompts or nodes.
-   - SQL is an optional PLUGIN, used only when a product response contains a
-     SQL artifact. All SQL code (parsing, rules, SQL evaluation prompt, SQL
-     models) lives in the plugin, never in the generic path.
-2. REFERENCE INDEX OPTIONAL. Mode is automatic: index given -> `grounded`,
-   else `ungrounded`.
-   - `grounded`: persona + product + reference index -> scenarios WITH cheat
-     sheet -> questions -> evaluation uses cheat sheet + reference snapshot +
-     plugins.
-   - `ungrounded`: persona + product only -> scenarios WITHOUT cheat sheet ->
-     questions -> evaluation only on generic criteria (relevance, goal
-     completeness, etc.). No cheat sheet, no SQL correctness verdict.
-   - The index is a PRE-BUILT file supplied by the user; the tool never
-     generates one (no LLM indexing).
+   - Artifacts (e.g. SQL) are judged by the generic evaluator against the
+     Reference Pack; there is no product-specific evaluation code. The artifact
+     plugin hook (`nodes/evaluators/plugins/`) is kept but DISCONNECTED.
+2. REFERENCE OPTIONAL. Mode is automatic: reference given -> `grounded`, else
+   `ungrounded`.
+   - The reference is ANY user-supplied file (.json / .txt / .md), plus an
+     optional usage guide (.md / .txt) telling the LLM how to read it. The
+     tool never generates or rewrites a reference (no LLM indexing) and has no
+     special format for it.
+   - `grounded`: scenarios WITH a Reference Pack (core_refs + rules) -> questions
+     -> evaluation adds `reference_alignment` against the pack.
+   - Every pack item quotes the reference VERBATIM; code checks each quote and
+     rejects (and records) items whose quote is not found.
+   - `ungrounded`: persona + product only -> no pack -> generic criteria only.
    - The mode is recorded in every scenario, question, evaluation and the run
      manifest.
 3. CLEAN PRODUCT ADAPTER LAYER. The executor talks only to a `ProductAdapter`

@@ -8,15 +8,8 @@ from typing import Any, Self
 from pydantic import Field, model_validator
 
 from synthetic_user.models.base import AmbiguityLevel, NonEmptyStr, StrictModel
-from synthetic_user.models.reference import ReferenceSnapshot
 from synthetic_user.models.run import GenerationMode, mode_mismatch
 from synthetic_user.models.scenario import TaskType
-
-
-class ClarificationExpectation(StrEnum):
-    REQUIRED = "required"
-    CONDITIONAL = "conditional"
-    NOT_EXPECTED = "not_expected"
 
 
 class QuestionStyle(StrEnum):
@@ -40,12 +33,25 @@ class QuestionCharacteristics(StrictModel):
     language: NonEmptyStr = "en"
 
 
+MAX_SUCCESS_CRITERIA = 4
+
+
 class Expectations(StrictModel):
-    clarification: ClarificationExpectation
-    acceptable_behaviors: list[NonEmptyStr] = Field(min_length=1)
-    unacceptable_behaviors: list[NonEmptyStr] = Field(default_factory=list)
-    # Copied or refined from the scenario; a QuestionCase requires at least one.
-    success_criteria: list[NonEmptyStr] = Field(default_factory=list)
+    """What the evaluator judges against (design v3). The question owns these."""
+
+    expected_behavior: NonEmptyStr = Field(
+        description="1-3 sentences: what the product should do for this exact question"
+    )
+    success_criteria: list[NonEmptyStr] = Field(
+        min_length=1,
+        max_length=MAX_SUCCESS_CRITERIA,
+        description="must-haves of a goal-complete answer; may be negative "
+        '("does not mix currencies")',
+    )
+    acceptable_variations: list[NonEmptyStr] = Field(
+        default_factory=list,
+        description="valid interpretations / behaviours that must NOT be penalised",
+    )
 
 
 class QuestionCase(StrictModel):
@@ -53,35 +59,23 @@ class QuestionCase(StrictModel):
     scenario_id: NonEmptyStr = Field(pattern=r"^SCN_\d{3,}$")
     persona_id: NonEmptyStr
     mode: GenerationMode
-    reference_snapshot_id: NonEmptyStr | None = None
+    reference_pack_id: NonEmptyStr | None = None
     utterance: NonEmptyStr
     intended_goal: NonEmptyStr
     intent: QuestionIntent
     question_characteristics: QuestionCharacteristics
     expectations: Expectations
-    interpretation_notes: list[NonEmptyStr] = Field(default_factory=list)
-    schema_leak_warnings: list[NonEmptyStr] = Field(default_factory=list)
+    # Reference names (identifier-like core_ref names) the utterance repeats.
+    leak_warnings: list[NonEmptyStr] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        problems = [
-            mode_mismatch(
-                self.mode, self.reference_snapshot_id is not None, "a reference_snapshot_id"
-            ),
-            None if self.expectations.success_criteria else "expectations.success_criteria empty",
-        ]
-        found = [p for p in problems if p]
-        if found:
-            raise ValueError(f"question {self.question_id}: {'; '.join(found)}")
+        problem = mode_mismatch(
+            self.mode, self.reference_pack_id is not None, "a reference_pack_id"
+        )
+        if problem:
+            raise ValueError(f"question {self.question_id}: {problem}")
         return self
-
-
-class QuestionGenerationConfig(StrictModel):
-    question_count: int = Field(ge=1)
-    ambiguity_level: AmbiguityLevel
-    language: NonEmptyStr
-    allow_vague_questions: bool
-    reject_schema_leaks: bool
 
 
 class QuestionDraft(StrictModel):
@@ -91,7 +85,6 @@ class QuestionDraft(StrictModel):
     intent: QuestionIntent
     question_characteristics: QuestionCharacteristics
     expectations: Expectations
-    interpretation_notes: list[NonEmptyStr] = Field(default_factory=list)
 
 
 class QuestionBatchDraft(StrictModel):
@@ -107,6 +100,5 @@ class RejectedQuestion(StrictModel):
 
 
 class QuestionGenerationResult(StrictModel):
-    snapshots: list[ReferenceSnapshot] = Field(default_factory=list)
     questions: list[QuestionCase] = Field(default_factory=list)
     rejected: list[RejectedQuestion] = Field(default_factory=list)

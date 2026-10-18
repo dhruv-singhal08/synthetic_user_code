@@ -18,7 +18,7 @@ options:
   response_mapping:
     text: message                     # the product's explanation, judged by the generic checks
     artifacts:
-      - kind: sql                     # the SQL plugin evaluates it (grounded runs)
+      - kind: sql                     # judged against the reference pack (grounded runs)
         path: result
       - kind: widget_title            # kept for the record / evidence
         path: widget_title

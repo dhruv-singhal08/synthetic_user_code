@@ -1,7 +1,9 @@
 """Prompt for Node 3: natural-language questions for one scenario (any product type).
 
-Both modes: persona + product + scenario. Grounded adds the scenario's cheat sheet and its
-reference snapshot (for the model's understanding only - names are never quoted).
+Both modes: persona + product + scenario. Grounded adds the scenario's Reference Pack and the
+usage guide (for the model's understanding only - reference names are never quoted).
+Each question owns its expectations: expected_behavior (written), 1-4 success_criteria and
+acceptable_variations (design v3).
 """
 
 from __future__ import annotations
@@ -12,8 +14,8 @@ from dataclasses import dataclass
 from synthetic_user.models.base import AmbiguityLevel
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.question import QuestionBatchDraft
-from synthetic_user.models.reference import ReferenceSnapshot
+from synthetic_user.models.question import MAX_SUCCESS_CRITERIA, QuestionBatchDraft
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
 
 SYSTEM = (
@@ -44,12 +46,12 @@ def build_question_prompt(
     persona: Persona,
     product: ProductDescription,
     scenario: Scenario,
-    snapshot: ReferenceSnapshot | None,
+    grounding: tuple[ReferencePack, Reference] | None,
     options: QuestionPromptOptions,
 ) -> tuple[str, str]:
     """Return (system, user) asking for ``options.count`` questions for ``scenario``.
 
-    ``snapshot`` is given for grounded scenarios and None for ungrounded ones.
+    ``grounding`` (pack + reference) is given for grounded scenarios, None for ungrounded.
     """
     persona_json = persona.model_dump(
         mode="json",
@@ -94,27 +96,26 @@ def build_question_prompt(
     schema = json.dumps(QuestionBatchDraft.model_json_schema(), indent=2)
     style_mix = _STYLE_MIX[options.ambiguity_level]
 
-    if snapshot is not None and scenario.reference_cheat_sheet is not None:
-        sheet = scenario.reference_cheat_sheet.model_dump(mode="json")
-        reference = f"""
-Reference cheat sheet (for YOUR understanding only - never quote its names):
-{json.dumps(sheet, indent=2)}
+    if grounding is not None:
+        pack, reference = grounding
+        reference_block = f"""
+Usage guide of the reference (for YOUR understanding):
+{reference.guide_text()}
 
-Reference snapshot (for YOUR understanding only - never quote its names):
-{json.dumps(_snapshot_view(snapshot), indent=2)}
+Reference pack of this scenario (for YOUR understanding only - never quote its names):
+{json.dumps(pack.view(), indent=2)}
 """
         missing = (
-            "If the snapshot lists missing_references or the scenario depends on unknown "
-            "relationships,\nreflect that in interpretation_notes and expectations (e.g. the "
-            "product should ask for\nclarification or state its assumption). Do not guess "
-            "silently."
+            "If the pack shows the goal depends on something ambiguous, say in "
+            "expected_behavior\nwhether the product should ask or state its assumption, and "
+            "list the valid readings in\nacceptable_variations. Do not guess silently."
         )
     else:
-        reference = ""
+        reference_block = ""
         missing = (
             "No reference data is available: do not invent names, fields or numbers. If the "
-            "goal could\nbe read several ways, list the readings in interpretation_notes and "
-            "say in expectations\nwhether the product should ask for clarification."
+            "goal could\nbe read several ways, list the readings in acceptable_variations and "
+            "say in expected_behavior\nwhether the product should ask for clarification."
         )
 
     user = f"""## TASK
@@ -131,18 +132,22 @@ Product:
 
 Scenario:
 {json.dumps(scenario_json, indent=2)}
-{reference}
+{reference_block}
 ## CONSTRAINTS
 - Sound like the persona: their role, vocabulary, expertise and behaviour.
 - {identifiers_rule}
 - Style mix for ambiguity level "{options.ambiguity_level.value}": {style_mix}
   Set question_characteristics.style to precise | vague | investigative and
   ambiguity_level to low | medium | high for each question. {vague_rule}
-- For each question give: intent, interpretation_notes (a question may have several valid
-  interpretations - list them), expectations.clarification (required | conditional |
-  not_expected), acceptable_behaviors and unacceptable_behaviors for the product.
-  expectations.success_criteria: copy the scenario's success_criteria, refined to this
-  exact question if needed (leave empty to copy them unchanged).
+- For each question give its intent and expectations:
+  - expected_behavior: 1-3 plain sentences describing what the product should do for THIS
+    question (what it should return or do; whether asking a clarification or declining
+    would be right or wrong). Not a label.
+  - success_criteria: 1-{MAX_SUCCESS_CRITERIA} short, checkable must-haves of a goal-complete
+    answer, refined from the scenario's success_criteria to this exact question. Include an
+    important "must not" as a negative criterion (e.g. "does not mix currencies").
+  - acceptable_variations: valid readings or behaviours the evaluator must NOT penalise
+    (e.g. "calendar or fiscal quarter", "may add extra columns").
 - The intended goal is the scenario's business_goal (code copies it; do not restate it).
 - Questions must differ meaningfully from each other.
 
@@ -153,34 +158,10 @@ Return one JSON object matching this JSON Schema:
 ## PROHIBITED
 - Copying or lightly rewording the persona's example utterances:
 {examples}
-- ids, goals, schema-leak warnings, timestamps (code adds these).
+- ids, goals, leak warnings, timestamps (code adds these).
 - Any text outside the JSON object.
 
 ## MISSING INFO
 {missing}
 """
     return SYSTEM, user
-
-
-def _snapshot_view(snapshot: ReferenceSnapshot) -> dict[str, object]:
-    return {
-        "tables": [
-            t.model_dump(
-                mode="json",
-                exclude={
-                    "extras": True,
-                    "relationships": True,
-                    "columns": {"__all__": {"extras"}},
-                    "metrics": {"__all__": {"extras"}},
-                    "dimensions": {"__all__": {"extras"}},
-                    "time_columns": {"__all__": {"extras"}},
-                },
-                exclude_defaults=True,
-            )
-            for t in snapshot.tables
-        ],
-        "relationships": [
-            r.model_dump(mode="json", exclude={"extras"}) for r in snapshot.relationships
-        ],
-        "missing_references": snapshot.missing_references,
-    }

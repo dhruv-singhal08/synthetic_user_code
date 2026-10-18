@@ -1,164 +1,152 @@
-[
-  {
-    "id": "SCN_001",
-    "persona_id": "finance_controller",
-    "product_id": "sample_nl2sql",
-    "mode": "grounded",
-    "reference_index_id": "IDX_20261013_120000_0001",
-    "business_goal": "Identify which employees drive the most corporate card spend so finance can review outliers",
-    "title": "Top spenders by employee",
-    "task_type": "ranking",
-    "capability": "supported",
-    "capability_rationale": "Product supports 'ranking and top-N' and 'joins over documented relationships'",
-    "success_criteria": [
-      "names the employees ranked by total card spend",
-      "keeps amounts separate per currency or states which currency is used",
-      "covers the requested time period"
-    ],
-    "reference_cheat_sheet": {
-      "tables": [
-        "card_transactions",
-        "employees"
+{
+  "scenarios": [
+    {
+      "id": "SCN_001",
+      "persona_id": "finance_controller",
+      "product_id": "sample_nl2sql",
+      "mode": "grounded",
+      "business_goal": "Identify which employees drive the most corporate card spend so finance can review outliers",
+      "title": "Top spenders by employee",
+      "task_type": "ranking",
+      "capability": "supported",
+      "capability_rationale": "Product supports 'ranking and top-N' and 'joins over documented relationships'",
+      "success_criteria": [
+        "names the employees ranked by total card spend",
+        "keeps amounts separate per currency or states which currency is used",
+        "covers the requested time period"
       ],
-      "columns": [
-        "card_transactions.amount",
-        "card_transactions.currency_code",
-        "employees.full_name"
+      "question_guidance": {
+        "intent": "rank employees by total card spend",
+        "expected_ambiguity": "medium",
+        "phrasing_hints": [],
+        "terms_to_avoid": []
+      },
+      "signature": "benchmark-1",
+      "reference_id": "sample_card_spend_index-a40ecd4f",
+      "reference_pack_id": "RP_SCN_001"
+    },
+    {
+      "id": "SCN_002",
+      "persona_id": "finance_controller",
+      "product_id": "sample_nl2sql",
+      "mode": "grounded",
+      "business_goal": "Track how monthly card spend per merchant category evolves to spot budget drift",
+      "title": "Monthly spend trend by merchant category",
+      "task_type": "trend",
+      "capability": "supported",
+      "capability_rationale": "Product supports 'single-table aggregation' and 'filtering by date range'",
+      "success_criteria": [
+        "shows card spend per merchant category for each month",
+        "covers the requested period"
       ],
-      "relationships": [
+      "question_guidance": {
+        "intent": "monthly spend trend by category",
+        "expected_ambiguity": "low",
+        "phrasing_hints": [],
+        "terms_to_avoid": []
+      },
+      "signature": "benchmark-2",
+      "reference_id": "sample_card_spend_index-a40ecd4f",
+      "reference_pack_id": "RP_SCN_002"
+    },
+    {
+      "id": "SCN_003",
+      "persona_id": "finance_controller",
+      "product_id": "sample_policy_chatbot",
+      "mode": "ungrounded",
+      "business_goal": "Find out how much may be spent per night on a hotel in Paris before booking",
+      "title": "Hotel limit for a Paris trip",
+      "task_type": "explanation",
+      "capability": "supported",
+      "capability_rationale": "Product supports 'explain per-diem and hotel limits'",
+      "success_criteria": [
+        "states a nightly hotel limit for Paris",
+        "says whether taxes are included"
+      ],
+      "question_guidance": {
+        "intent": "learn the hotel cap for Paris"
+      },
+      "signature": "explanation|book hotel limit night paris spent|supported",
+      "reference_id": null,
+      "reference_pack_id": null
+    },
+    {
+      "id": "SCN_004",
+      "persona_id": "finance_controller",
+      "product_id": "sample_policy_chatbot",
+      "mode": "ungrounded",
+      "business_goal": "Get an expense report approved without leaving the chat",
+      "title": "Approve my expense report",
+      "task_type": "how_to",
+      "capability": "unsupported",
+      "capability_rationale": "Product lists 'submitting or approving expense reports' under not_supported_yet",
+      "success_criteria": [
+        "says clearly that it cannot approve reports",
+        "explains where approval is done"
+      ],
+      "question_guidance": {
+        "intent": "approve a report via chat"
+      },
+      "signature": "how_to|approved chat expense leaving report without|unsupported",
+      "reference_id": null,
+      "reference_pack_id": null
+    }
+  ],
+  "reference_packs": [
+    {
+      "pack_id": "RP_SCN_001",
+      "scenario_id": "SCN_001",
+      "reference_id": "sample_card_spend_index-a40ecd4f",
+      "core_refs": [
         {
-          "source": "card_transactions.employee_id",
-          "target": "employees.employee_id",
-          "verification": "verified"
+          "name": "card_transactions.amount",
+          "quote": "Transaction amount in the transaction currency (see currency_code).",
+          "why": "spend is the sum of amount"
+        },
+        {
+          "name": "card_transactions.currency_code",
+          "quote": "ISO 4217 currency of amount.",
+          "why": "amounts must stay per currency"
+        },
+        {
+          "name": "employees.full_name",
+          "quote": "Employee full name.",
+          "why": "the ranking is by employee"
         }
       ],
-      "metrics": [
+      "rules": [
         {
-          "name": "total_spend",
-          "definition": "sum of amount within one currency",
-          "columns": [
-            "card_transactions.amount"
-          ]
+          "rule": "never sum amounts across currencies",
+          "quote": "Amounts in different currency_code values must not be summed directly."
         }
       ],
-      "dimensions": [
-        "employees.full_name",
-        "card_transactions.currency_code"
-      ],
-      "operations": [
-        "join",
-        "group by",
-        "sum",
-        "order by desc",
-        "limit"
-      ],
-      "optional_filters": [
-        "transaction_date range"
-      ],
-      "semantic_considerations": [
-        "amounts are in mixed currencies"
-      ]
+      "rejected_items": [],
+      "edited": false
     },
-    "question_guidance": {
-      "intent": "rank employees by total card spend",
-      "expected_ambiguity": "medium",
-      "phrasing_hints": [],
-      "terms_to_avoid": []
-    },
-    "signature": "benchmark-1"
-  },
-  {
-    "id": "SCN_002",
-    "persona_id": "finance_controller",
-    "product_id": "sample_nl2sql",
-    "mode": "grounded",
-    "reference_index_id": "IDX_20261013_120000_0001",
-    "business_goal": "Track how monthly card spend per merchant category evolves to spot budget drift",
-    "title": "Monthly spend trend by merchant category",
-    "task_type": "trend",
-    "capability": "supported",
-    "capability_rationale": "Product supports 'single-table aggregation' and 'filtering by date range'",
-    "success_criteria": [
-      "shows card spend per merchant category for each month",
-      "covers the requested period"
-    ],
-    "reference_cheat_sheet": {
-      "tables": [
-        "card_transactions"
-      ],
-      "columns": [
-        "card_transactions.amount",
-        "card_transactions.transaction_date",
-        "card_transactions.merchant_category"
-      ],
-      "relationships": [],
-      "metrics": [
+    {
+      "pack_id": "RP_SCN_002",
+      "scenario_id": "SCN_002",
+      "reference_id": "sample_card_spend_index-a40ecd4f",
+      "core_refs": [
         {
-          "name": "total_spend",
-          "definition": "sum of amount per month",
-          "columns": [
-            "card_transactions.amount"
-          ]
+          "name": "card_transactions.amount",
+          "quote": "Transaction amount in the transaction currency (see currency_code).",
+          "why": "spend is the sum of amount"
+        },
+        {
+          "name": "card_transactions.transaction_date",
+          "quote": "Date the transaction posted.",
+          "why": "months come from the posting date"
+        },
+        {
+          "name": "card_transactions.merchant_category",
+          "quote": "Merchant category as reported on the transaction.",
+          "why": "the trend is per category"
         }
       ],
-      "dimensions": [
-        "card_transactions.merchant_category"
-      ],
-      "operations": [
-        "group by month",
-        "sum"
-      ],
-      "optional_filters": [],
-      "semantic_considerations": []
-    },
-    "question_guidance": {
-      "intent": "monthly spend trend by category",
-      "expected_ambiguity": "low",
-      "phrasing_hints": [],
-      "terms_to_avoid": []
-    },
-    "signature": "benchmark-2"
-  },
-  {
-    "id": "SCN_003",
-    "persona_id": "finance_controller",
-    "product_id": "sample_policy_chatbot",
-    "mode": "ungrounded",
-    "reference_index_id": null,
-    "reference_cheat_sheet": null,
-    "business_goal": "Find out how much may be spent per night on a hotel in Paris before booking",
-    "title": "Hotel limit for a Paris trip",
-    "task_type": "explanation",
-    "capability": "supported",
-    "capability_rationale": "Product supports 'explain per-diem and hotel limits'",
-    "success_criteria": [
-      "states a nightly hotel limit for Paris",
-      "says whether taxes are included"
-    ],
-    "question_guidance": {
-      "intent": "learn the hotel cap for Paris"
-    },
-    "signature": "explanation|book hotel limit night paris spent|supported"
-  },
-  {
-    "id": "SCN_004",
-    "persona_id": "finance_controller",
-    "product_id": "sample_policy_chatbot",
-    "mode": "ungrounded",
-    "reference_index_id": null,
-    "reference_cheat_sheet": null,
-    "business_goal": "Get an expense report approved without leaving the chat",
-    "title": "Approve my expense report",
-    "task_type": "how_to",
-    "capability": "unsupported",
-    "capability_rationale": "Product lists 'submitting or approving expense reports' under not_supported_yet",
-    "success_criteria": [
-      "says clearly that it cannot approve reports",
-      "explains where approval is done"
-    ],
-    "question_guidance": {
-      "intent": "approve a report via chat"
-    },
-    "signature": "how_to|approved chat expense leaving report without|unsupported"
-  }
-]
+      "rules": [],
+      "rejected_items": [],
+      "edited": false
+    }
+  ]
+}

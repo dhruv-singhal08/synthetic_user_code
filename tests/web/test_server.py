@@ -20,7 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PERSONA_YAML = (REPO_ROOT / "data" / "personas" / "finance_controller.yaml").read_bytes()
 PRODUCT_YAML = (REPO_ROOT / "data" / "products" / "sample_product.yaml").read_bytes()
 CHATBOT_YAML = (REPO_ROOT / "data" / "products" / "sample_chatbot.yaml").read_bytes()
-INDEX_JSON = (REPO_ROOT / "data" / "references" / "sample_card_spend_index.json").read_bytes()
+REFERENCES = REPO_ROOT / "data" / "references"
+REFERENCE_JSON = (REFERENCES / "sample_card_spend_index.json").read_bytes()
+GUIDE_MD = (REFERENCES / "sample_card_spend_guide.md").read_bytes()
+POLICY_MD = (REFERENCES / "sample_travel_policy.md").read_bytes()
 CONTRACT_YAML = b"""
 method: POST
 headers: {Authorization: "Bearer ${PRODUCT_API_TOKEN}"}
@@ -46,6 +49,7 @@ def config_path(tmp_path: Path) -> Path:
     data["inputs"] = {
         k: ([str(REPO_ROOT / x) for x in v] if isinstance(v, list) else str(REPO_ROOT / v))
         for k, v in data["inputs"].items()
+        if v is not None
     }
     data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
     path = tmp_path / "app.yaml"
@@ -59,14 +63,16 @@ def client(config_path: Path) -> TestClient:
 
 
 def _run(client: TestClient, *, grounded: bool = True, product: bytes = PRODUCT_YAML) -> str:
-    """New run: sample persona, uploaded product, index uploaded and switched on (grounded)."""
+    """New run: sample persona, uploaded product, reference + guide uploaded and switched on
+    (grounded)."""
     files: dict[str, Any] = {"product": ("product.yaml", product)}
     if grounded:
-        files["reference_index"] = ("index.json", INDEX_JSON)
+        files["reference"] = ("catalog.json", REFERENCE_JSON)
+        files["reference_guide"] = ("guide.md", GUIDE_MD)
     response = client.post(
         "/api/runs",
         files=files,
-        data={"persona_queries": "", "use_reference_index": "true" if grounded else "false"},
+        data={"persona_queries": "", "use_reference": "true" if grounded else "false"},
     )
     assert response.status_code == 200, response.text
     return str(response.json()["state"]["run_id"])
@@ -93,10 +99,11 @@ def test_index_page_and_static(client: TestClient) -> None:
 def test_config_and_samples(client: TestClient) -> None:
     config = client.get("/api/config").json()
     assert config["llm_provider"] == "fake"
-    assert config["steps"] == ["index", "scenarios", "questions", "execute", "evaluate"]
+    assert config["steps"] == ["reference", "scenarios", "questions", "execute", "evaluate"]
+    assert config["reference_max_chars"] == 200_000 and "sql_dialect" not in config
     samples = client.get("/api/samples").json()
-    # Only the persona has a sample; product description and index are upload-only.
-    assert samples["product"] is None and samples["reference_index"] is None
+    # Only the persona has a sample; product description and reference are upload-only.
+    assert samples["product"] is None and samples["reference"] is None
     assert samples["persona"]["parsed"]["id"] == "finance_controller"
     assert "finance_controller" in samples["persona"]["raw"]
 
@@ -111,6 +118,22 @@ def test_preview_valid_and_invalid_upload(client: TestClient) -> None:
     assert wrong_kind.status_code == 400
 
 
+def test_preview_any_reference_format_and_guide(client: TestClient) -> None:
+    for name, content, fmt in (
+        ("catalog.json", REFERENCE_JSON, "json"),
+        ("policy.md", POLICY_MD, "markdown"),
+        ("voc_tables.txt", b"complaints: one row per complaint", "text"),
+    ):
+        ok = client.post("/api/preview/reference", files={"file": (name, content)})
+        assert ok.status_code == 200, ok.text
+        parsed = ok.json()["parsed"]
+        assert parsed["format"] == fmt and "text" not in parsed  # summary only
+    pdf = client.post("/api/preview/reference", files={"file": ("r.pdf", b"%PDF")})
+    assert pdf.status_code == 400 and "unsupported file type" in pdf.json()["detail"]
+    guide = client.post("/api/preview/reference_guide", files={"file": ("g.md", GUIDE_MD)})
+    assert guide.status_code == 200 and guide.json()["parsed"]["name"] == "g.md"
+
+
 # --- runs and inputs -------------------------------------------------------------------------
 
 
@@ -121,16 +144,17 @@ def test_create_run_with_upload_and_queries(client: TestClient, config_path: Pat
         files={
             "persona": ("my_persona.yaml", PERSONA_YAML),
             "product": ("my_product.yaml", PRODUCT_YAML),
-            "reference_index": ("ignored.json", INDEX_JSON),
+            "reference": ("ignored.json", REFERENCE_JSON),
         },
-        data={"persona_queries": queries},  # use_reference_index defaults to off
+        data={"persona_queries": queries},  # use_reference defaults to off
     )
     assert response.status_code == 200, response.text
     state = response.json()["state"]
     assert state["sources"] == {
         "persona": "uploaded: my_persona.yaml",
         "product": "uploaded: my_product.yaml",
-        "reference_index": "off",
+        "reference": "off",
+        "reference_guide": "off",
     }
     assert state["persona_queries"] == ["How much did we spend on travel?", "Top vendors?"]
 
@@ -144,15 +168,15 @@ def test_create_run_with_upload_and_queries(client: TestClient, config_path: Pat
         "How much did we spend on travel?",
         "Top vendors?",
     ]
-    assert inputs.reference_index is None  # switched off -> ungrounded
+    assert inputs.reference is None  # switched off -> ungrounded
 
 
 def test_create_run_rejects_bad_upload_and_too_many_queries(client: TestClient) -> None:
     product = {"product": ("p.yaml", PRODUCT_YAML)}
     bad = client.post(
         "/api/runs",
-        files={**product, "reference_index": ("i.json", b"{oops")},
-        data={"use_reference_index": "true"},
+        files={**product, "reference": ("i.json", b"{oops")},
+        data={"use_reference": "true"},
     )
     assert bad.status_code == 400 and "not valid JSON" in bad.json()["detail"]
     many = client.post(
@@ -163,7 +187,7 @@ def test_create_run_rejects_bad_upload_and_too_many_queries(client: TestClient) 
     assert many.status_code == 400 and "At most 50" in many.json()["detail"]
 
 
-def test_create_run_needs_uploaded_product_and_index_when_switched_on(
+def test_create_run_needs_uploaded_product_and_reference_when_switched_on(
     client: TestClient,
 ) -> None:
     no_product = client.post("/api/runs", data={})
@@ -172,9 +196,31 @@ def test_create_run_needs_uploaded_product_and_index_when_switched_on(
     no_index = client.post(
         "/api/runs",
         files={"product": ("p.yaml", PRODUCT_YAML)},
-        data={"use_reference_index": "true"},
+        data={"use_reference": "true"},
     )
     assert no_index.status_code == 400 and "switch it off" in no_index.json()["detail"]
+
+
+def test_text_reference_with_default_guide_is_grounded(
+    client: TestClient, config_path: Path
+) -> None:
+    response = client.post(
+        "/api/runs",
+        files={"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.md", POLICY_MD)},
+        data={"use_reference": "true"},
+    )
+    assert response.status_code == 200, response.text
+    state = response.json()["state"]
+    assert state["sources"]["reference"] == "uploaded: policy.md"
+    assert state["sources"]["reference_guide"] == "default"
+    settings = load_config(config_path, env={})
+    from synthetic_user.storage.json_store import JsonArtifactStore
+
+    inputs = Workspace(settings, JsonArtifactStore(settings.paths.artifacts_dir)).load_inputs(
+        state["run_id"]
+    )
+    assert inputs.reference is not None and inputs.reference.format == "markdown"
+    assert inputs.reference.guide is None
 
 
 # --- contract ---------------------------------------------------------------------------------
@@ -251,7 +297,7 @@ def test_execute_through_connected_product(config_path: Path) -> None:
     client = TestClient(app)
     run_id = _run(client)
     assert _connect(client, run_id, CONTRACT_YAML, "https://p.example.com/ask").status_code == 200
-    body = _steps(client, run_id, "index", "scenarios", "questions", "execute")
+    body = _steps(client, run_id, "reference", "scenarios", "questions", "execute")
 
     assert body["detail"]["product"] == "http_json (https://p.example.com/ask)"
     assert sent and all(r.url == "https://p.example.com/ask" for r in sent)
@@ -259,8 +305,8 @@ def test_execute_through_connected_product(config_path: Path) -> None:
     asked = {json.loads(r.body or b"{}")["question"] for r in sent}
     rows = [r for r in body["rows"] if r["question_id"]]
     assert asked == {r["question"] for r in rows}
-    assert all(r["product_outcome"] == "answered" and r["adapter"] == "http_json" for r in rows)
-    assert all(r["generated_sql"] == "SELECT 1" for r in rows)
+    assert all(r["product_outcome"] == "answered" for r in rows)
+    assert all(r["artifacts"] == "sql: SELECT 1" for r in rows)
     assert TOKEN not in json.dumps(body)
 
 
@@ -271,10 +317,16 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     run_id = _run(client)
     client.post(f"/api/runs/{run_id}/contract", json={"url": "https://nl2sql.example.com"})
 
-    after_scenarios = _steps(client, run_id, "index", "scenarios")
+    after_scenarios = _steps(client, run_id, "reference", "scenarios")
     assert len(after_scenarios["rows"]) == 3
     assert all(r["scenario_id"] and not r["question_id"] for r in after_scenarios["rows"])
-    assert after_scenarios["rows"][0]["cheat_joins"].endswith("(verified)")
+    assert "employees.full_name" in after_scenarios["rows"][0]["core_refs"]
+    assert after_scenarios["detail"]["reference_packs"] == 3
+    assert [p["pack_id"] for p in after_scenarios["reference_packs"]] == [
+        "RP_SCN_001",
+        "RP_SCN_002",
+        "RP_SCN_003",
+    ]
 
     after_questions = _steps(client, run_id, "questions")
     assert all(r["question"] for r in after_questions["rows"])
@@ -282,7 +334,7 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     after_execute = _steps(client, run_id, "execute")
     by_outcome = {r["product_outcome"]: r for r in after_execute["rows"]}
     assert set(by_outcome) == {"answered", "clarification", "denied"}
-    assert "JOIN employees" in by_outcome["answered"]["generated_sql"]
+    assert "JOIN employees" in by_outcome["answered"]["artifacts"]
     assert by_outcome["denied"]["product_message"] == "Forecasting is not supported yet."
     assert after_execute["detail"]["product"] == "mock (contract)"
 
@@ -290,9 +342,9 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     verdicts = sorted(r["final_verdict"] or "-" for r in final["rows"])
     assert verdicts == ["fail", "pass", "pass"]  # the justified denial passes (C10)
     failed = next(r for r in final["rows"] if r["final_verdict"] == "fail")
-    assert failed["bug_ids"] == "BUG_001" and "join_correctness" in failed["failed_checks"]
+    assert failed["bug_ids"] == "BUG_001" and failed["failed_checks"] == "reference_alignment"
     assert final["state"]["steps_done"] == [
-        "index",
+        "reference",
         "scenarios",
         "questions",
         "execute",
@@ -310,15 +362,15 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
 
 def test_rerunning_a_step_resets_later_steps(client: TestClient) -> None:
     run_id = _run(client)
-    _steps(client, run_id, "index", "scenarios", "questions", "execute", "evaluate")
+    _steps(client, run_id, "reference", "scenarios", "questions", "execute", "evaluate")
     body = _steps(client, run_id, "questions")
-    assert body["state"]["steps_done"] == ["index", "scenarios", "questions"]
+    assert body["state"]["steps_done"] == ["reference", "scenarios", "questions"]
     assert all(not r["product_outcome"] for r in body["rows"])
 
 
 def test_execute_without_contract_uses_fixture_product(client: TestClient) -> None:
     run_id = _run(client)
-    body = _steps(client, run_id, "index", "scenarios", "questions", "execute")
+    body = _steps(client, run_id, "reference", "scenarios", "questions", "execute")
     assert body["detail"]["product"] == "fixture"
     assert {r["product_outcome"] for r in body["rows"]} == {
         "answered",
@@ -327,13 +379,13 @@ def test_execute_without_contract_uses_fixture_product(client: TestClient) -> No
     }
 
 
-def test_ungrounded_run_has_no_cheat_sheet(client: TestClient) -> None:
+def test_ungrounded_run_has_no_reference_pack(client: TestClient) -> None:
     run_id = _run(client, grounded=False, product=CHATBOT_YAML)
     state = client.get(f"/api/runs/{run_id}").json()["state"]
-    assert state["sources"]["reference_index"] == "off"
+    assert state["sources"]["reference"] == "off"
     body = _steps(client, run_id, "scenarios", "questions")
     assert body["rows"] and all(r["mode"] == "ungrounded" for r in body["rows"])
-    assert all(not r["cheat_tables"] for r in body["rows"])
+    assert all(not r["core_refs"] for r in body["rows"]) and body["reference_packs"] == []
     assert all(r["question"] for r in body["rows"])
 
 
@@ -347,3 +399,34 @@ def test_step_order_and_bad_ids(client: TestClient) -> None:
     assert client.get("/api/runs/RUN_20200101_000000_abcd").status_code == 404
     assert client.get(f"/api/runs/{run_id}/artifacts/..%2Fsecret").status_code in (400, 404)
     assert client.get(f"/api/runs/{run_id}/artifacts/nope.json").status_code == 400
+
+
+def test_edit_reference_pack(client: TestClient) -> None:
+    run_id = _run(client)
+    url = f"/api/runs/{run_id}/reference_packs/RP_SCN_001"
+    draft = {
+        "core_refs": [
+            {"name": "employees.full_name", "quote": "Employee full name.", "why": "ranking"}
+        ],
+        "rules": [],
+    }
+    early = client.put(url, json=draft)
+    assert early.status_code == 400 and "before editing" in early.json()["detail"]
+
+    _steps(client, run_id, "reference", "scenarios", "questions")
+    bad = client.put(
+        url, json={"core_refs": [{"name": "x", "quote": "Not in the reference.", "why": "y"}]}
+    )
+    assert bad.status_code == 400 and "quote not found" in bad.json()["detail"]
+    empty = client.put(url, json={"core_refs": []})
+    assert empty.status_code == 422
+
+    ok = client.put(url, json=draft)
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["pack"]["edited"] is True
+    assert body["state"]["steps_done"] == ["reference", "scenarios"]  # questions are stale
+    assert all(not r["question_id"] for r in body["rows"])
+    assert body["rows"][0]["core_refs"] == "employees.full_name"
+    missing = client.put(f"/api/runs/{run_id}/reference_packs/RP_SCN_009", json=draft)
+    assert missing.status_code == 404

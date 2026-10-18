@@ -1,8 +1,7 @@
 """Evaluation of one product execution: checks, findings, verdict, bug candidates.
 
-Generic checks apply to every product; grounded_checks are filled by artifact plugins (e.g.
-"sql", nodes/evaluators/plugins/) and only in grounded mode. Plugin-specific models live with
-their plugin.
+One generic judge for every product (design v3). reference_alignment is judged only for
+grounded questions (against the scenario's Reference Pack); it is not_applicable otherwise.
 """
 
 from __future__ import annotations
@@ -10,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Self
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.execution import ProductOutcome
@@ -76,7 +75,7 @@ class EvaluationStatus(StrEnum):
 
 
 class GenericChecks(StrictModel):
-    """Product-agnostic criteria, judged in both modes."""
+    """Product-agnostic criteria. reference_alignment: grounded answers only."""
 
     relevance: CheckStatus
     goal_completeness: CheckStatus
@@ -84,6 +83,7 @@ class GenericChecks(StrictModel):
     capability_consistency: CheckStatus
     clarification_handling: CheckStatus
     safety_and_honesty: CheckStatus
+    reference_alignment: CheckStatus = CheckStatus.NOT_APPLICABLE
 
 
 class Finding(StrictModel):
@@ -148,19 +148,14 @@ class EvaluationResult(StrictModel):
     verdict: Verdict | None
     evaluation_status: EvaluationStatus
     checks: GenericChecks | None = None
-    grounded_checks: dict[NonEmptyStr, CheckStatus] = Field(default_factory=dict)
     check_rationale: dict[NonEmptyStr, NonEmptyStr] = Field(
         default_factory=dict, description="check name -> why it got its status"
     )
-    plugins_applied: list[NonEmptyStr] = Field(default_factory=list)
     criteria_results: list[CriterionResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
     clarification_evaluation: ClarificationEvaluation | None = None
     bug_candidates: list[BugCandidate] = Field(default_factory=list)
-    # Plugin name -> its analysis (e.g. "sql" -> static SQL analysis), grounded mode only.
-    plugin_analysis: dict[NonEmptyStr, dict[str, JsonValue]] = Field(default_factory=dict)
     llm_verdict: Verdict | None = None
-    cheat_sheet_conflicts: list[NonEmptyStr] = Field(default_factory=list)
     notes: list[NonEmptyStr] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -172,16 +167,13 @@ class EvaluationResult(StrictModel):
         recorded_only = self.evaluation_status is EvaluationStatus.RECORDED_ONLY
         if recorded_only != (self.verdict is None):
             raise ValueError("evaluation_status is recorded_only exactly when verdict is None")
-        if self.mode is GenerationMode.UNGROUNDED and (
-            self.grounded_checks
-            or self.cheat_sheet_conflicts
-            or self.plugins_applied
-            or self.plugin_analysis
+        if (
+            self.mode is GenerationMode.UNGROUNDED
+            and self.checks is not None
+            and self.checks.reference_alignment is not CheckStatus.NOT_APPLICABLE
         ):
-            raise ValueError("ungrounded evaluations have no grounded_checks or cheat sheet")
-        if self.grounded_checks and not self.plugins_applied:
-            raise ValueError("grounded_checks are filled by plugins; plugins_applied is empty")
-        known_checks = set(GenericChecks.model_fields) | set(self.grounded_checks)
+            raise ValueError("ungrounded evaluations have no reference_alignment")
+        known_checks = set(GenericChecks.model_fields)
         unknown_rationale = sorted(set(self.check_rationale) - known_checks)
         if unknown_rationale:
             raise ValueError(f"check_rationale for unknown checks {unknown_rationale}")
@@ -231,19 +223,16 @@ class GenericEvaluationDraft(StrictModel):
     clarification_handling: CheckJudgement
     clarification: ClarificationEvaluation | None = None
     safety_and_honesty: CheckJudgement
+    # Grounded questions only (null when there is no Reference Pack).
+    reference_alignment: CheckJudgement | None = None
     findings: list[GenericFindingDraft] = Field(default_factory=list)
     overall_verdict: Verdict = Field(
         description="your own overall opinion; recorded as llm_verdict, not decisive"
     )
 
     def judgements(self) -> dict[str, CheckJudgement]:
-        return {name: getattr(self, name) for name in GenericChecks.model_fields}
-
-
-class ReferenceCoverageDraft(StrictModel):
-    """LLM draft of the grounded reference_coverage check (no artifact plugin applied)."""
-
-    reference_coverage: CheckJudgement
-    covered: list[NonEmptyStr] = Field(default_factory=list)
-    missing: list[NonEmptyStr] = Field(default_factory=list)
-    findings: list[GenericFindingDraft] = Field(default_factory=list)
+        """Every check; an absent reference_alignment counts as not_applicable."""
+        absent = CheckJudgement(
+            status=CheckStatus.NOT_APPLICABLE, rationale="no reference pack (ungrounded)"
+        )
+        return {name: getattr(self, name) or absent for name in GenericChecks.model_fields}

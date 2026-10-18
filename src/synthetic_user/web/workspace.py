@@ -2,7 +2,8 @@
 
 Layout inside ``<artifacts_dir>/runs/<run_id>/``:
     inputs/persona.yaml, inputs/product.yaml      (uploaded or sample copy)
-    inputs/reference_index.json                    (uploaded or sample copy; absent -> ungrounded)
+    inputs/reference/<file>                        (uploaded .json/.txt/.md; absent -> ungrounded)
+    inputs/reference_guide/<file>                  (optional uploaded usage guide .md/.txt)
     inputs/persona_queries.json                    (optional pasted queries)
     inputs/product_contract.yaml                   (uploaded product contract, when connected)
     ui_state.json, results.csv, + the normal pipeline artifacts
@@ -29,21 +30,22 @@ from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.pipeline import RunInputs, Step, steps_from
-from synthetic_user.references.loader import parse_reference_index
+from synthetic_user.references.loader import parse_reference, reference_format
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact
 from synthetic_user.web.results_csv import build_rows, to_csv
 
-REFERENCE_INDEX = "reference_index"  # optional input kind (JSON); absent -> ungrounded
-INPUT_KINDS: dict[str, tuple[type[BaseModel], str]] = {
+REFERENCE = "reference"  # optional input kind (.json/.txt/.md); absent -> ungrounded
+GUIDE = "reference_guide"  # optional usage guide (.md/.txt) for the reference
+YAML_KINDS: dict[str, tuple[type[BaseModel], str]] = {
     "persona": (Persona, "Persona file"),
     "product": (ProductDescription, "Product file"),
-    REFERENCE_INDEX: (ReferenceIndex, "Reference index"),
 }
-MAX_UPLOAD_BYTES = 10_000_000  # full pre-built reference index JSONs are large
+INPUT_KINDS = (*YAML_KINDS, REFERENCE, GUIDE)
+MAX_UPLOAD_BYTES = 10_000_000
 MAX_PERSONA_QUERIES = 50
 RESULTS_CSV = "results.csv"
 UI_STATE = "ui_state.json"
@@ -70,7 +72,7 @@ class UiRunState(StrictModel):
     created_at: datetime
     sources: dict[str, str]  # kind -> "sample" | "uploaded: <filename>" | "none"
     persona_queries: list[str] = Field(default_factory=list)
-    reference_index_id: str | None = None
+    reference_id: str | None = None
     contract: ProductContract | None = None  # mock contract (D113)
     connection: ProductConnection | None = None  # real product: URL + uploaded contract
     steps_done: list[Step] = Field(default_factory=list)
@@ -82,28 +84,34 @@ class Upload:
     content: bytes
 
 
-def parse_upload(kind: str, upload: Upload) -> BaseModel:
-    """Validate an uploaded file as persona / product (YAML) or reference index (JSON)."""
+class GuidePreview(StrictModel):
+    name: NonEmptyStr
+    chars: int
+
+
+def parse_upload(kind: str, upload: Upload, *, max_chars: int) -> BaseModel:
+    """Validate an uploaded file: persona / product (YAML), reference (.json/.txt/.md) or
+    usage guide (.md/.txt)."""
     if kind not in INPUT_KINDS:
         raise InputAssetError(f"Unknown input kind {kind!r}")
     if len(upload.content) > MAX_UPLOAD_BYTES:
         raise InputAssetError(f"{upload.filename}: larger than {MAX_UPLOAD_BYTES:,} bytes")
+    if kind == REFERENCE:
+        return parse_reference(upload.content, source_name=upload.filename, max_chars=max_chars)
+    text = _decode(upload)
+    if kind == GUIDE:
+        if Path(upload.filename).suffix.lower() not in {".md", ".markdown", ".txt"}:
+            raise InputAssetError(f"Usage guide {upload.filename}: use a .md or .txt file")
+        return GuidePreview(name=upload.filename, chars=len(text))
+    model, label = YAML_KINDS[kind]
+    return parse_asset(text, model, kind=label, source=upload.filename)
+
+
+def _decode(upload: Upload) -> str:
     try:
-        text = upload.content.decode("utf-8")
+        return upload.content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise InputAssetError(f"{upload.filename}: not UTF-8 text") from exc
-    return _parse(kind, text, upload.filename)
-
-
-def _parse(kind: str, text: str, source: str) -> BaseModel:
-    if kind == REFERENCE_INDEX:
-        return parse_reference_index(text, source=source)
-    model, label = INPUT_KINDS[kind]
-    return parse_asset(text, model, kind=label, source=source)
-
-
-def _file_name(kind: str) -> str:
-    return f"{kind}.json" if kind == REFERENCE_INDEX else f"{kind}.yaml"
 
 
 def parse_contract(text: str, url: str, *, source: str) -> HttpJsonOptions:
@@ -146,63 +154,74 @@ class Workspace:
 
     # --- samples / inputs ----------------------------------------------------------------
 
-    def sample_path(self, kind: str) -> Path | None:
+    def sample(self, kind: str) -> tuple[str, BaseModel] | None:
+        """(text, parsed) of the configured persona / product sample, if any."""
         paths = {
             "persona": self._settings.inputs.persona_path,
             "product": self._settings.inputs.product_path,
-            REFERENCE_INDEX: self._settings.inputs.reference_index_file,
         }
-        return paths[kind]
-
-    def sample(self, kind: str) -> tuple[str, BaseModel] | None:
-        """(text, parsed) of the configured sample; None for an unconfigured reference index."""
-        path = self.sample_path(kind)
+        path = paths.get(kind)
         if path is None:
             return None
         if not path.is_file():
             raise InputAssetError(f"Sample {kind} not found: {path}")
         text = path.read_text(encoding="utf-8")
-        return text, _parse(kind, text, str(path))
+        model, label = YAML_KINDS[kind]
+        return text, parse_asset(text, model, kind=label, source=str(path))
 
     def create_run(
         self,
         uploads: dict[str, Upload | None],
         persona_queries: str,
         *,
-        use_reference_index: bool = False,
+        use_reference: bool = False,
     ) -> UiRunState:
         """Validate every input, then save them into a new run.
 
         Persona: upload or the configured sample. Product description: upload only (no
-        sample). Reference index: only when switched on, and then an upload is required;
-        switched off -> ungrounded run.
+        sample). Reference: only when switched on, and then an upload is required (the usage
+        guide is optional); switched off -> ungrounded run.
         """
+        max_chars = self._settings.reference.max_chars
         texts: dict[str, str] = {}
         sources: dict[str, str] = {}
-        for kind in INPUT_KINDS:
+        for kind in YAML_KINDS:
             upload = uploads.get(kind)
-            if kind == REFERENCE_INDEX and not use_reference_index:
-                sources[kind] = "off"
-                continue
             if upload is not None:
-                parse_upload(kind, upload)
-                texts[kind] = upload.content.decode("utf-8")
+                parse_upload(kind, upload, max_chars=max_chars)
+                texts[kind] = _decode(upload)
                 sources[kind] = f"uploaded: {upload.filename}"
             elif kind == "persona" and (sample := self.sample(kind)) is not None:
                 texts[kind] = sample[0]
                 sources[kind] = "sample"
-            elif kind == "product":
-                raise InputAssetError("Upload a product description (YAML); no sample is used")
             else:
-                raise InputAssetError(
-                    "Reference index is switched on: upload the pre-built index JSON, or switch "
-                    "it off for an ungrounded run"
-                )
+                raise InputAssetError("Upload a product description (YAML); no sample is used")
+        reference_upload, guide_upload = uploads.get(REFERENCE), uploads.get(GUIDE)
+        files: dict[str, Upload] = {}
+        if not use_reference:
+            sources[REFERENCE] = sources[GUIDE] = "off"
+        elif reference_upload is None:
+            raise InputAssetError(
+                "Reference is switched on: upload the reference file (.json / .txt / .md), or "
+                "switch it off for an ungrounded run"
+            )
+        else:
+            _reference_of(reference_upload, guide_upload, max_chars)  # validates both
+            files[REFERENCE] = reference_upload
+            sources[REFERENCE] = f"uploaded: {reference_upload.filename}"
+            if guide_upload is not None:
+                files[GUIDE] = guide_upload
+                sources[GUIDE] = f"uploaded: {guide_upload.filename}"
+            else:
+                sources[GUIDE] = "default"
         queries = clean_queries(persona_queries)
 
         run_id = new_run_id()
         for kind, text in texts.items():
-            self._store.write_text(self._input(run_id, _file_name(kind)), text)
+            self._store.write_text(self._input(run_id, f"{kind}.yaml"), text)
+        for kind, upload in files.items():
+            name = Path(upload.filename).name
+            self._store.write_text(self._input(run_id, f"{kind}/{name}"), _decode(upload))
         self._store.write_with(
             self._input(run_id, "persona_queries.json"), queries, TypeAdapter(list[str])
         )
@@ -213,23 +232,36 @@ class Workspace:
         return state
 
     def load_inputs(self, run_id: str) -> RunInputs:
-        def parse(kind: str) -> BaseModel | None:
-            path = self._store.path_for(self._input(run_id, _file_name(kind)))
-            if kind == REFERENCE_INDEX and not path.is_file():
-                return None
-            return _parse(kind, path.read_text(encoding="utf-8"), kind)
+        def parse(kind: str) -> BaseModel:
+            path = self._store.path_for(self._input(run_id, f"{kind}.yaml"))
+            model, label = YAML_KINDS[kind]
+            return parse_asset(path.read_text(encoding="utf-8"), model, kind=label, source=kind)
 
         persona = parse("persona")
         product = parse("product")
-        index = parse(REFERENCE_INDEX)
         assert isinstance(persona, Persona)
-        assert index is None or isinstance(index, ReferenceIndex)
         assert isinstance(product, ProductDescription)
+        reference_file = self._single_file(run_id, REFERENCE)
+        reference = None
+        if reference_file is not None:
+            guide_file = self._single_file(run_id, GUIDE)
+            reference = _reference_of(
+                Upload(reference_file.name, reference_file.read_bytes()),
+                Upload(guide_file.name, guide_file.read_bytes()) if guide_file else None,
+                self._settings.reference.max_chars,
+            )
         queries = self.state(run_id).persona_queries
         if queries:
             examples = list(dict.fromkeys([*persona.example_utterances, *queries]))
             persona = persona.model_copy(update={"example_utterances": examples})
-        return RunInputs(persona=persona, product=product, reference_index=index)
+        return RunInputs(persona=persona, product=product, reference=reference)
+
+    def _single_file(self, run_id: str, kind: str) -> Path | None:
+        folder = self._store.path_for(self._input(run_id, kind))
+        files = sorted(p for p in folder.iterdir() if p.is_file()) if folder.is_dir() else []
+        if len(files) > 1:
+            raise InputAssetError(f"Run {run_id}: expected one file in inputs/{kind}/")
+        return files[0] if files else None
 
     # --- product connection ----------------------------------------------------------------
 
@@ -289,10 +321,12 @@ class Workspace:
         questions = self._read(run_id, "questions.json", list[QuestionCase]) or []
         executions = self._read(run_id, "executions.json", list[ExecutionRecord]) or []
         evaluations = self._read(run_id, "evaluations.json", list[EvaluationResult]) or []
-        rows = build_rows(run_id, scenarios, questions, executions, evaluations)
+        packs = self._read(run_id, "reference_packs.json", list[ReferencePack]) or []
+        rows = build_rows(run_id, scenarios, questions, executions, evaluations, packs)
         self._store.write_text(run_artifact(run_id, RESULTS_CSV), to_csv(rows))
         details = {
             "scenarios": [s.model_dump(mode="json") for s in scenarios],
+            "reference_packs": [p.model_dump(mode="json") for p in packs],
             "evaluations": [e.model_dump(mode="json") for e in evaluations],
         }
         rejected_scenarios = self._read(run_id, "scenarios_rejected.json", list[RejectedScenario])
@@ -324,3 +358,14 @@ class Workspace:
     @staticmethod
     def _input(run_id: str, name: str) -> Path:
         return run_artifact(run_id, f"inputs/{name}")
+
+
+def _reference_of(upload: Upload, guide: Upload | None, max_chars: int) -> Reference:
+    reference_format(upload.filename)  # clear error for an unsupported type first
+    return parse_reference(
+        upload.content,
+        source_name=upload.filename,
+        max_chars=max_chars,
+        guide=guide.content if guide else None,
+        guide_name=guide.filename if guide else None,
+    )

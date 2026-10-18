@@ -11,13 +11,13 @@ from synthetic_user.core.identifiers import SequentialIdGenerator
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceIndex, VerificationStatus
+from synthetic_user.models.reference import Reference
 from synthetic_user.models.scenario import ScenarioDraft, ScenarioGenerationResult, TaskType
 from synthetic_user.nodes.scenario_generator import (
     FILTERED_BY_CONFIG,
-    MISSING_CHEAT_SHEET,
+    MISSING_PACK,
     SURPLUS,
-    UNEXPECTED_CHEAT_SHEET,
+    UNEXPECTED_PACK,
     ScenarioGenerator,
     scenario_signature,
     ungrounded_signature,
@@ -42,10 +42,11 @@ class Env:
         self,
         persona: Persona,
         product: ProductDescription,
-        index: ReferenceIndex,
+        reference: Reference,
         settings: AppConfig,
     ) -> None:
-        self.persona, self.product, self.index, self.settings = persona, product, index, settings
+        self.persona, self.product, self.reference = persona, product, reference
+        self.settings = settings
 
     async def run(
         self, llm: FakeLLMClient, count: int, existing: tuple[str, ...] = (), **scenario: Any
@@ -57,7 +58,7 @@ class Env:
             id_generator=SequentialIdGenerator(),
         )
         return await generator.generate(
-            self.persona, self.product, self.index, count=count, existing_signatures=existing
+            self.persona, self.product, self.reference, count=count, existing_signatures=existing
         )
 
 
@@ -65,10 +66,10 @@ class Env:
 def env(
     sample_persona: Persona,
     sample_product: ProductDescription,
-    sample_index: ReferenceIndex,
+    sample_reference: Reference,
     app_config: AppConfig,
 ) -> Env:
-    return Env(sample_persona, sample_product, sample_index, app_config)
+    return Env(sample_persona, sample_product, sample_reference, app_config)
 
 
 # --- happy path, goal present, ids by code ----------------------------------------------
@@ -85,12 +86,18 @@ async def test_accepts_valid_scenarios_with_code_assigned_ids(
         assert scenario.business_goal
         assert scenario.persona_id == "finance_controller"
         assert scenario.product_id == "sample_nl2sql"
-        assert scenario.reference_index_id == env.index.versioned_id
+        assert scenario.reference_id == env.reference.reference_id
+        assert scenario.reference_pack_id == f"RP_{scenario.id}"
         assert scenario.mode == "grounded"
         assert scenario.success_criteria
+    assert [p.pack_id for p in result.packs] == ["RP_SCN_001", "RP_SCN_002", "RP_SCN_003"]
+    for scenario, pack in zip(result.accepted, result.packs, strict=True):
+        assert pack.scenario_id == scenario.id
+        assert pack.reference_id == env.reference.reference_id
         assert scenario.signature == scenario_signature(
-            scenario.task_type, scenario.business_goal, scenario.reference_cheat_sheet
+            scenario.task_type, scenario.business_goal, scenario.capability, pack
         )
+    assert result.packs[0].rules[0].rule == "never sum amounts across currencies"
     assert len(llm.calls) == 1
 
 
@@ -111,106 +118,89 @@ async def test_llm_supplied_ids_rejected(env: Env, scenario_drafts: list[dict[st
     assert "Extra inputs are not permitted" in result.rejected[0].reasons[0]
 
 
-# --- (a) tables / columns ------------------------------------------------------------------
+# --- (a) quotes are checked against the reference -----------------------------------------
 
 
-async def test_unknown_table_rejected(env: Env, scenario_drafts: list[dict[str, Any]]) -> None:
-    cheat = scenario_drafts[1]["reference_cheat_sheet"]
-    cheat["tables"].append("budgets")
-    cheat["columns"].append("budgets.limit_amount")
-    result = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1, max_topup_rounds=0)
-    assert result.rejected[0].reasons == ["table 'budgets' is not in the reference index"]
+INVENTED = {"name": "employees.salary", "quote": "Annual salary in USD.", "why": "invented"}
 
 
-@pytest.mark.parametrize(
-    "bad_column",
-    ["card_transactions.department_name", "card_transactions.amount_usd"],
-)
-async def test_column_not_on_table_rejected(
-    env: Env, scenario_drafts: list[dict[str, Any]], bad_column: str
+async def test_core_ref_with_unknown_quote_is_dropped_and_recorded(
+    env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
-    scenario_drafts[1]["reference_cheat_sheet"]["columns"].append(bad_column)
-    result = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1, max_topup_rounds=0)
-    assert not result.accepted
-    assert bad_column in result.rejected[0].reasons[0]
+    scenario_drafts[0]["reference_pack"]["core_refs"].append(INVENTED)
+    scenario_drafts[0]["reference_pack"]["rules"].append(
+        {"rule": "convert to USD", "quote": "Amounts are converted to USD first."}
+    )
+    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1)
+    pack = result.packs[0]
+    assert [r.name for r in pack.core_refs] == [
+        "card_transactions.amount",
+        "card_transactions.currency_code",
+        "employees.full_name",
+    ]
+    assert [r.rule for r in pack.rules] == ["never sum amounts across currencies"]
+    assert [
+        d.item["name"] if "name" in d.item else d.item["rule"] for d in pack.rejected_items
+    ] == [
+        "employees.salary",
+        "convert to USD",
+    ]
 
 
-async def test_unqualified_column_rejected(env: Env, scenario_drafts: list[dict[str, Any]]) -> None:
-    scenario_drafts[1]["reference_cheat_sheet"]["columns"].append("amount")
+async def test_pack_without_valid_core_ref_rejects_the_scenario(
+    env: Env, scenario_drafts: list[dict[str, Any]]
+) -> None:
+    scenario_drafts[1]["reference_pack"] = {"core_refs": [INVENTED]}
     result = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1, max_topup_rounds=0)
-    assert not result.accepted
-    assert "columns" in result.rejected[0].reasons[0]
+    assert not result.accepted and not result.packs
+    reasons = result.rejected[0].reasons
+    assert reasons[0] == "reference pack has no core_ref whose quote is in the reference"
+    assert "quote not found" in reasons[1] and "employees.salary" in reasons[1]
 
 
 async def test_one_bad_scenario_does_not_sink_the_batch(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
-    scenario_drafts[0]["reference_cheat_sheet"]["columns"].append("employees.salary")
+    scenario_drafts[0]["reference_pack"] = {"core_refs": [INVENTED]}
     result = await env.run(FakeLLMClient([_batch(*scenario_drafts)]), count=2, max_topup_rounds=0)
     assert [s.title for s in result.accepted] == [
         "Monthly spend trend by merchant category",
         "Card spend forecast",
     ]
+    # ids stay dense and the packs follow their scenarios
+    assert [s.id for s in result.accepted] == ["SCN_001", "SCN_002"]
+    assert [p.scenario_id for p in result.packs] == ["SCN_001", "SCN_002"]
     assert len(result.rejected) == 1
 
 
-# --- (b) no promotion ---------------------------------------------------------------------
-
-
-async def test_verification_upgrade_downgraded_with_note(
-    env: Env, scenario_drafts: list[dict[str, Any]]
+async def test_text_reference_grounds_a_chatbot(
+    env: Env, sample_chatbot: ProductDescription, policy_reference: Reference
 ) -> None:
-    draft = scenario_drafts[0]
-    cheat = draft["reference_cheat_sheet"]
-    cheat["tables"].append("departments")
-    cheat["columns"].append("departments.department_name")
-    cheat["relationships"].append(
-        {
-            "source": "employees.department_id",
-            "target": "departments.department_id",
-            "verification": "verified",
-        }
+    draft = {
+        **copy.deepcopy(CHATBOT_DRAFTS[0]),
+        "reference_pack": {
+            "core_refs": [
+                {
+                    "name": "1. Hotels",
+                    "quote": "The nightly hotel limit is USD 250 in Tier 1 cities",
+                    "why": "Paris is a Tier 1 city",
+                }
+            ],
+            "rules": [{"rule": "taxes included", "quote": "taxes included"}],
+        },
+    }
+    generator = ScenarioGenerator(
+        FakeLLMClient([_batch(draft)]),
+        env.settings,
+        logging.getLogger("t"),
+        id_generator=SequentialIdGenerator(),
     )
-    result = await env.run(FakeLLMClient([_batch(draft)]), count=1)
-    rels = result.accepted[0].reference_cheat_sheet.relationships
-    assert rels[0].verification is VerificationStatus.VERIFIED
-    assert rels[1].verification is VerificationStatus.UNKNOWN
-    assert any(
-        "was marked verified but the reference index says unknown" in c
-        for c in result.accepted[0].reference_cheat_sheet.semantic_considerations
-    )
+    result = await generator.generate(env.persona, sample_chatbot, policy_reference, count=1)
+    assert result.accepted[0].mode == "grounded"
+    assert result.packs[0].core_refs[0].name == "1. Hotels"
 
 
-async def test_join_without_relationship_becomes_unknown(
-    env: Env, scenario_drafts: list[dict[str, Any]]
-) -> None:
-    draft = scenario_drafts[0]
-    draft["reference_cheat_sheet"]["relationships"] = [
-        {
-            "source": "card_transactions.employee_id",
-            "target": "employees.department_id",
-            "verification": "inferred",
-        }
-    ]
-    result = await env.run(FakeLLMClient([_batch(draft)]), count=1)
-    cheat = result.accepted[0].reference_cheat_sheet
-    assert cheat.relationships[0].verification is VerificationStatus.UNKNOWN
-    assert any(
-        "has no relationship in the reference index" in c for c in cheat.semantic_considerations
-    )
-
-
-# --- (c) multi-table, (d) unsupported -----------------------------------------------------
-
-
-async def test_multi_table_rejected_when_not_allowed(
-    env: Env, scenario_drafts: list[dict[str, Any]]
-) -> None:
-    llm = FakeLLMClient([_batch(*scenario_drafts)])
-    result = await env.run(llm, count=3, allow_multi_table=False, max_topup_rounds=0)
-    assert len(result.accepted) == 2
-    assert result.rejected[0].reasons[0].startswith("multi_table_not_allowed")
-    assert "MUST use exactly ONE table" in llm.calls[0].user
+# --- (b) unsupported ------------------------------------------------------------------------
 
 
 async def test_unsupported_filtered_by_config(
@@ -255,7 +245,7 @@ async def test_same_shape_different_goal_is_duplicate(
 ) -> None:
     reworded = copy.deepcopy(scenario_drafts[0])
     reworded["business_goal"] = "Find the biggest card spenders among staff for audit"
-    reworded["reference_cheat_sheet"]["operations"] = ["join", "sum", "rank"]
+    reworded["reference_pack"]["core_refs"].reverse()
     result = await env.run(
         FakeLLMClient([_batch(scenario_drafts[0], reworded)]), count=2, max_topup_rounds=0
     )
@@ -266,12 +256,9 @@ async def test_same_shape_different_goal_is_duplicate(
 async def test_existing_signatures_are_avoided(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
+    first = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1)
     existing = scenario_signature(
-        TaskType.TREND,
-        "anything else",
-        (await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1))
-        .accepted[0]
-        .reference_cheat_sheet,
+        TaskType.TREND, "anything else", first.accepted[0].capability, first.packs[0]
     )
     llm = FakeLLMClient([_batch(scenario_drafts[1])])
     result = await env.run(llm, count=1, existing=(existing,), max_topup_rounds=0)
@@ -321,16 +308,13 @@ async def test_surplus_recorded_not_accepted(
 
 
 def test_prompt_contents(
-    sample_persona: Persona, sample_product: ProductDescription, sample_index: ReferenceIndex
+    sample_persona: Persona, sample_product: ProductDescription, sample_reference: Reference
 ) -> None:
     options = ScenarioPromptOptions(
-        count=4,
-        allow_multi_table=True,
-        include_unsupported_scenarios=True,
-        diversity_preference="broad",
+        count=4, include_unsupported_scenarios=True, diversity_preference="broad"
     )
     _system, user = build_scenario_prompt(
-        sample_persona, sample_product, sample_index, options, avoid_signatures=["sig-1"]
+        sample_persona, sample_product, sample_reference, options, avoid_signatures=["sig-1"]
     )
     for section in (
         "## TASK",
@@ -342,20 +326,20 @@ def test_prompt_contents(
     ):
         assert section in user
     assert "business goal FIRST" in user
-    assert "NOT SQL" in user
-    assert "copy the relationship's verification EXACTLY" in user
+    assert "copied EXACTLY from the" in user and "checked by code" in user
     assert "Writing the user's question" in user
     assert "- sig-1" in user
     for item in sample_product.not_supported_yet + sample_product.known_gaps:
         assert item in user
-    assert '"card_transactions.currency_code"' in user
+    assert sample_reference.text in user  # the whole reference
+    assert "Usage guide" in user and "What counts as core" in user  # the user's guide
     contract = user.split("## OUTPUT CONTRACT", 1)[1].split("## PROHIBITED", 1)[0]
-    for forbidden in ('"id":', '"persona_id":', '"signature":', '"reference_index_id":'):
+    for forbidden in ('"id":', '"persona_id":', '"signature":', '"reference_id":'):
         assert forbidden not in contract
     assert next(iter(ScenarioDraft.model_json_schema()["properties"])) == "business_goal"
 
 
-# --- v2.1: success criteria and cheat sheet presence ---------------------------------------
+# --- success criteria and reference pack presence ------------------------------------------
 
 
 async def test_missing_success_criteria_rejected(
@@ -367,20 +351,20 @@ async def test_missing_success_criteria_rejected(
     assert "success_criteria" in result.rejected[0].reasons[0]
 
 
-async def test_grounded_draft_without_cheat_sheet_rejected(
+async def test_grounded_draft_without_pack_rejected(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
-    del scenario_drafts[0]["reference_cheat_sheet"]
+    del scenario_drafts[0]["reference_pack"]
     result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1, max_topup_rounds=0)
     assert not result.accepted
-    assert result.rejected[0].reasons == [MISSING_CHEAT_SHEET]
+    assert result.rejected[0].reasons == [MISSING_PACK]
 
 
 # --- C05: ungrounded mode -------------------------------------------------------------------
 
 
 def _ungrounded(draft: dict[str, Any]) -> dict[str, Any]:
-    return {k: copy.deepcopy(v) for k, v in draft.items() if k != "reference_cheat_sheet"}
+    return {k: copy.deepcopy(v) for k, v in draft.items() if k != "reference_pack"}
 
 
 CHATBOT_DRAFTS: list[dict[str, Any]] = [
@@ -425,7 +409,7 @@ async def _run_ungrounded(
     return await generator.generate(env.persona, product or env.product, None, count=count)
 
 
-async def test_ungrounded_accepts_goal_and_criteria_without_cheat_sheet(
+async def test_ungrounded_accepts_goal_and_criteria_without_pack(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     drafts = [_ungrounded(d) for d in scenario_drafts]
@@ -435,23 +419,24 @@ async def test_ungrounded_accepts_goal_and_criteria_without_cheat_sheet(
     for scenario in result.accepted:
         assert scenario.mode == "ungrounded"
         assert scenario.business_goal and scenario.success_criteria
-        assert scenario.reference_cheat_sheet is None and scenario.reference_index_id is None
+        assert scenario.reference_pack_id is None and scenario.reference_id is None
         assert scenario.signature == ungrounded_signature(
             scenario.task_type, scenario.business_goal, scenario.capability
         )
+    assert not result.packs
     system, user = llm.calls[0].system, llm.calls[0].user
     assert "never invent tables" in system
-    assert "reference_cheat_sheet (leave it out)" in user
-    assert "card_transactions" not in user and "Reference index" not in user
+    assert "reference_pack (leave it out)" in user
+    assert "card_transactions" not in user and "<<<REFERENCE" not in user
 
 
-async def test_ungrounded_cheat_sheet_from_llm_is_rejected(
+async def test_ungrounded_pack_from_llm_is_rejected(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     llm = FakeLLMClient([_batch(scenario_drafts[0], _ungrounded(scenario_drafts[1]))])
     result = await _run_ungrounded(env, llm, count=2, max_topup_rounds=0)
     assert [s.title for s in result.accepted] == [scenario_drafts[1]["title"]]
-    assert result.rejected[0].reasons == [UNEXPECTED_CHEAT_SHEET]
+    assert result.rejected[0].reasons == [UNEXPECTED_PACK]
     assert result.rejected[0].payload["title"] == scenario_drafts[0]["title"]
 
 
@@ -502,15 +487,12 @@ async def test_ungrounded_top_up_bounded_never_padded(env: Env) -> None:
 
 
 def test_both_prompts_share_the_common_core(
-    sample_persona: Persona, sample_product: ProductDescription, sample_index: ReferenceIndex
+    sample_persona: Persona, sample_product: ProductDescription, sample_reference: Reference
 ) -> None:
     options = ScenarioPromptOptions(
-        count=2,
-        allow_multi_table=True,
-        include_unsupported_scenarios=True,
-        diversity_preference="x",
+        count=2, include_unsupported_scenarios=True, diversity_preference="x"
     )
-    _gs, grounded = build_scenario_prompt(sample_persona, sample_product, sample_index, options)
+    _gs, grounded = build_scenario_prompt(sample_persona, sample_product, sample_reference, options)
     _us, ungrounded = build_scenario_prompt(sample_persona, sample_product, None, options)
     for text in (grounded, ungrounded):
         assert "business goal FIRST" in text
@@ -518,5 +500,5 @@ def test_both_prompts_share_the_common_core(
         assert "success_criteria: 2-5 short, checkable statements" in text
         assert "capability_rationale must cite" in text
         assert "Writing the user's question" in text
-    assert "Reference index (AUTHORITATIVE" in grounded and "reference_cheat_sheet:" in grounded
+    assert "AUTHORITATIVE" in grounded and "reference_pack:" in grounded
     assert "REFIDX" not in ungrounded and "Do not invent data structures" in ungrounded

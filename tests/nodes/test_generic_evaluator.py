@@ -1,4 +1,4 @@
-"""C08: generic evaluation (all products, both modes) through the evaluator router."""
+"""Generic evaluation (all products, both modes) through the evaluator router (design v3)."""
 
 from __future__ import annotations
 
@@ -10,12 +10,14 @@ from typing import Any
 import pytest
 
 from synthetic_user.core.config import AppConfig
+from synthetic_user.core.exceptions import ArtifactIntegrityError
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.evaluation import CriterionStatus, EvaluationResult, Verdict
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.reference import CoreRef, Reference, ReferencePack, ReferenceRule
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
@@ -75,8 +77,8 @@ def ungrounded(sample_scenarios: list[Scenario]) -> tuple[Scenario, QuestionCase
     scenario = sample_scenarios[0].model_copy(
         update={
             "mode": GenerationMode.UNGROUNDED,
-            "reference_index_id": None,
-            "reference_cheat_sheet": None,
+            "reference_id": None,
+            "reference_pack_id": None,
             "success_criteria": CRITERIA,
         }
     )
@@ -91,13 +93,46 @@ def ungrounded(sample_scenarios: list[Scenario]) -> tuple[Scenario, QuestionCase
             "intent": {"task_type": "explanation"},
             "question_characteristics": {"ambiguity_level": "low"},
             "expectations": {
-                "clarification": "not_expected",
-                "acceptable_behaviors": ["states the limit"],
+                "expected_behavior": "State the nightly hotel limit for Paris and whether "
+                "taxes are included.",
                 "success_criteria": CRITERIA,
+                "acceptable_variations": ["mentions the approval rule for higher rates"],
             },
         }
     )
     return scenario, question
+
+
+@pytest.fixture
+def grounded(
+    ungrounded: tuple[Scenario, QuestionCase], policy_reference: Reference
+) -> tuple[Scenario, QuestionCase, ReferencePack]:
+    """The same hotel question, grounded in the sample travel policy (a Markdown file)."""
+    scenario, question = ungrounded
+    pack = ReferencePack(
+        pack_id="RP_SCN_001",
+        scenario_id=scenario.id,
+        reference_id=policy_reference.reference_id,
+        core_refs=[
+            CoreRef(
+                name="1. Hotels",
+                quote="The nightly hotel limit is USD 250 in Tier 1 cities",
+                why="Paris is a Tier 1 city",
+            )
+        ],
+        rules=[ReferenceRule(rule="limits include taxes", quote="taxes included")],
+    )
+    scenario = scenario.model_copy(
+        update={
+            "mode": GenerationMode.GROUNDED,
+            "reference_id": policy_reference.reference_id,
+            "reference_pack_id": pack.pack_id,
+        }
+    )
+    question = question.model_copy(
+        update={"mode": GenerationMode.GROUNDED, "reference_pack_id": pack.pack_id}
+    )
+    return scenario, question, pack
 
 
 def _execution(response: dict[str, Any]) -> ExecutionRecord:
@@ -118,15 +153,17 @@ async def _evaluate(
     app_config: AppConfig,
     persona: Persona,
     product: ProductDescription,
-    case: tuple[Scenario, QuestionCase],
+    case: tuple[Scenario, QuestionCase] | tuple[Scenario, QuestionCase, ReferencePack],
     response: dict[str, Any],
     *drafts: dict[str, Any],
+    reference: Reference | None = None,
 ) -> tuple[EvaluationResult, FakeLLMClient]:
-    scenario, question = case
+    scenario, question = case[0], case[1]
+    pack = case[2] if len(case) == 3 else None
     llm = FakeLLMClient(list(drafts))
-    evaluator = Evaluator(llm, app_config, logging.getLogger("t"), index=None)
+    evaluator = Evaluator(llm, app_config, logging.getLogger("t"), reference=reference)
     result = await evaluator.evaluate(
-        EvaluationCase(question, scenario, None, _execution(response)), product, persona
+        EvaluationCase(question, scenario, pack, _execution(response)), product, persona
     )
     return result, llm
 
@@ -147,7 +184,8 @@ async def test_relevant_answer_passes(
     assert result.checks is not None and result.checks.relevance == "pass"
     assert result.check_rationale["relevance"] == "Answers the hotel question."
     assert [c.status for c in result.criteria_results] == ["met", "met"]
-    assert result.mode == "ungrounded" and not result.plugins_applied
+    assert result.mode == "ungrounded"
+    assert result.checks.reference_alignment == "not_applicable"
     assert len(llm.calls) == 1
 
 
@@ -311,19 +349,168 @@ def test_prompt_never_claims_ground_truth_when_ungrounded(
     for criterion in CRITERIA:
         assert criterion in user
     assert ANSWER in user and "SQL" not in system
+    assert "reference_alignment must be null" in user and "Reference pack" not in user
 
 
-# --- C10: combination and bug creation rules -----------------------------------------------------
+def test_prompt_shows_only_the_evaluation_contract(
+    sample_persona: Persona,
+    sample_chatbot: ProductDescription,
+    grounded: tuple[Scenario, QuestionCase, ReferencePack],
+    policy_reference: Reference,
+) -> None:
+    scenario, question, pack = grounded
+    _system, user = build_response_evaluation_prompt(
+        sample_persona,
+        sample_chatbot,
+        scenario,
+        question,
+        _execution(TEXT).response,
+        EvaluationFocus.ANSWER,
+        (pack, policy_reference),
+    )
+    for shown in (
+        question.utterance,
+        scenario.business_goal,
+        question.expectations.expected_behavior,
+        "mentions the approval rule for higher rates",  # acceptable variation
+        "The nightly hotel limit is USD 250 in Tier 1 cities",  # pack quote
+        "Answers must state the limit or rule from the policy",  # usage guide
+        "Using MORE than the pack",
+    ):
+        assert shown in user
+    for hidden in (
+        scenario.title,
+        scenario.capability_rationale,
+        '"task_type"',
+        "intended_goal",
+        "Alcohol is never reimbursable",  # the full reference text is not sent
+        sample_persona.identity.name,
+    ):
+        assert hidden not in user
 
 
-def test_combination_rules() -> None:
-    from synthetic_user.nodes.evaluator import combine, combine_opinions
+# --- grounded: reference_alignment ---------------------------------------------------------
 
-    assert combine([Verdict.PASS, Verdict.PASS]) is Verdict.PASS
-    assert combine([Verdict.PASS, Verdict.INCONCLUSIVE]) is Verdict.INCONCLUSIVE
-    assert combine([Verdict.INCONCLUSIVE, Verdict.FAIL, Verdict.PASS]) is Verdict.FAIL
-    assert combine_opinions([None, Verdict.PASS, None]) is Verdict.PASS
-    assert combine_opinions([None]) is None
+
+def _grounded_draft(alignment: dict[str, Any] | None, **overrides: Any) -> dict[str, Any]:
+    return answer_draft(reference_alignment=alignment, **overrides)
+
+
+async def test_grounded_answer_aligned_with_pack_passes(
+    app_config: AppConfig,
+    sample_persona: Persona,
+    sample_chatbot: ProductDescription,
+    grounded: tuple[Scenario, QuestionCase, ReferencePack],
+    policy_reference: Reference,
+) -> None:
+    result, llm = await _evaluate(
+        app_config,
+        sample_persona,
+        sample_chatbot,
+        grounded,
+        TEXT,
+        _grounded_draft(ok("Relies on the hotels section.")),
+        reference=policy_reference,
+    )
+    assert result.verdict is Verdict.PASS and result.mode == "grounded"
+    assert result.checks is not None and result.checks.reference_alignment == "pass"
+    assert result.check_rationale["reference_alignment"] == "Relies on the hotels section."
+    assert "Reference pack (AUTHORITATIVE" in llm.calls[0].user
+
+
+async def test_grounded_answer_contradicting_pack_fails_with_bug(
+    app_config: AppConfig,
+    sample_persona: Persona,
+    sample_chatbot: ProductDescription,
+    grounded: tuple[Scenario, QuestionCase, ReferencePack],
+    policy_reference: Reference,
+) -> None:
+    draft = _grounded_draft(
+        bad("States 220 EUR; the policy says USD 250.", "220 EUR"),
+        findings=[finding("reference_alignment", "220 EUR", "high")],
+        overall_verdict="fail",
+    )
+    result, _ = await _evaluate(
+        app_config,
+        sample_persona,
+        sample_chatbot,
+        grounded,
+        TEXT,
+        draft,
+        reference=policy_reference,
+    )
+    assert result.verdict is Verdict.FAIL
+    assert [f.category for f in result.findings] == ["reference_alignment"]
+    assert result.bug_candidates[0].title.startswith("reference_alignment:")
+
+
+async def test_grounded_answer_without_alignment_is_retried(
+    app_config: AppConfig,
+    sample_persona: Persona,
+    sample_chatbot: ProductDescription,
+    grounded: tuple[Scenario, QuestionCase, ReferencePack],
+    policy_reference: Reference,
+) -> None:
+    result, llm = await _evaluate(
+        app_config,
+        sample_persona,
+        sample_chatbot,
+        grounded,
+        TEXT,
+        answer_draft(),
+        _grounded_draft(NA),
+        _grounded_draft(ok()),
+        reference=policy_reference,
+    )
+    assert len(llm.calls) == 3 and result.verdict is Verdict.PASS
+    assert "reference_alignment is required for a grounded question" in llm.calls[1].user
+    assert "reference_alignment must be judged for a grounded answer" in llm.calls[2].user
+
+
+async def test_ungrounded_draft_with_alignment_is_retried(
+    app_config: AppConfig,
+    sample_persona: Persona,
+    sample_chatbot: ProductDescription,
+    ungrounded: tuple[Scenario, QuestionCase],
+) -> None:
+    result, llm = await _evaluate(
+        app_config,
+        sample_persona,
+        sample_chatbot,
+        ungrounded,
+        TEXT,
+        _grounded_draft(ok()),
+        answer_draft(),
+    )
+    assert len(llm.calls) == 2 and result.verdict is Verdict.PASS
+    assert "reference_alignment must be null" in llm.calls[1].user
+
+
+async def test_grounded_case_needs_its_reference(
+    app_config: AppConfig,
+    sample_persona: Persona,
+    sample_chatbot: ProductDescription,
+    grounded: tuple[Scenario, QuestionCase, ReferencePack],
+    policy_reference: Reference,
+) -> None:
+    with pytest.raises(ArtifactIntegrityError, match="grounded but no reference was given"):
+        await _evaluate(app_config, sample_persona, sample_chatbot, grounded, TEXT)
+    other = policy_reference.model_copy(update={"reference_id": "other-00000000"})
+    with pytest.raises(ArtifactIntegrityError, match="was built from reference"):
+        await _evaluate(app_config, sample_persona, sample_chatbot, grounded, TEXT, reference=other)
+    scenario, question, _pack = grounded
+    with pytest.raises(ArtifactIntegrityError, match="uses reference pack RP_SCN_001, not None"):
+        await _evaluate(
+            app_config,
+            sample_persona,
+            sample_chatbot,
+            (scenario, question),
+            TEXT,
+            reference=policy_reference,
+        )
+
+
+# --- bug creation rules ----------------------------------------------------------------------
 
 
 async def test_failed_check_without_supported_evidence_is_inconclusive(

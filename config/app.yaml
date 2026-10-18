@@ -26,16 +26,12 @@ product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.
   options:
     path: ./data/fixtures/product_responses/sample_responses.json
 
-evaluation:
-  plugins: [sql]            # artifact plugins for grounded evaluation (sql = SQL plugin)
-
-sql:
-  dialect: bigquery           # sqlglot dialect; Spanner has no sqlglot dialect
+reference:
+  max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 
 generation:
   scenario:
     scenario_count: 10                  # scenarios per run
-    allow_multi_table: true             # allow scenarios that need joins
     include_unsupported_scenarios: true # include scenarios the product should refuse
     diversity_preference: balanced      # free text hint to the scenario generator
     max_topup_rounds: 1                 # extra calls if fewer scenarios accepted than requested
@@ -44,7 +40,7 @@ generation:
     ambiguity_level: low                # low | medium | high
     language: en
     allow_vague_questions: false
-    reject_schema_leaks: true           # reject questions that name tables/columns
+    reject_reference_leaks: true        # reject questions that repeat internal reference names
 
 
 paths:
@@ -53,7 +49,8 @@ paths:
 inputs:
   persona_path: ./data/personas/finance_controller.yaml
   product_path: ./data/products/sample_product.yaml
-  reference_index_file: ./data/references/sample_card_spend_index.json   # pre-built index; omit -> ungrounded
+  reference_file: ./data/references/sample_card_spend_index.json   # .json / .txt / .md; omit -> ungrounded
+  reference_guide_file: ./data/references/sample_card_spend_guide.md   # optional usage guide (.md / .txt)
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl   # benchmark-evaluator
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json
   benchmark_product_paths: [./data/products/sample_product.yaml, ./data/products/sample_chatbot.yaml]

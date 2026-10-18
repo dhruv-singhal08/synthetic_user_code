@@ -11,11 +11,12 @@ from typer.testing import CliRunner
 from synthetic_user import cli
 from synthetic_user.cli import app
 from synthetic_user.llm.fake import FakeLLMClient
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
-SAMPLE_INDEX = REPO_ROOT / "data" / "references" / "sample_card_spend_index.json"
+SAMPLE_REFERENCE = REPO_ROOT / "data" / "references" / "sample_card_spend_index.json"
+POLICY = REPO_ROOT / "data" / "references" / "sample_travel_policy.md"
 CHATBOT = REPO_ROOT / "data" / "products" / "sample_chatbot.yaml"
 
 
@@ -31,7 +32,7 @@ def _config(tmp_path: Path, *, with_index: bool) -> Path:
         for key, value in data["inputs"].items()
     }
     if not with_index:
-        del data["inputs"]["reference_index_file"]
+        del data["inputs"]["reference_file"], data["inputs"]["reference_guide_file"]
     path = tmp_path / ("app.yaml" if with_index else "app.ungrounded.yaml")
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
@@ -72,18 +73,20 @@ def _fields(output: str) -> dict[str, str]:
 
 
 def _ungrounded(draft: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in draft.items() if k != "reference_cheat_sheet"}
+    return {k: v for k, v in draft.items() if k != "reference_pack"}
 
 
 def test_writes_scenarios_rejected_and_manifest(
     config_path: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    sample_index: ReferenceIndex,
+    sample_reference: Reference,
     scenario_drafts: list[dict[str, Any]],
 ) -> None:
     bad = json.loads(json.dumps(scenario_drafts[1]))
-    bad["reference_cheat_sheet"]["tables"].append("budgets")
+    bad["reference_pack"] = {
+        "core_refs": [{"name": "budgets", "quote": "Monthly budget per team.", "why": "x"}]
+    }
     _script(
         monkeypatch, {"scenarios": [scenario_drafts[0], bad, scenario_drafts[2]]}, {"scenarios": []}
     )
@@ -105,21 +108,26 @@ def test_writes_scenarios_rejected_and_manifest(
     scenarios = json.loads((run_dir / "scenarios.json").read_text(encoding="utf-8"))
     assert [s["id"] for s in scenarios] == ["SCN_001", "SCN_002"]
     rejected = json.loads((run_dir / "scenarios_rejected.json").read_text(encoding="utf-8"))
-    assert rejected[0]["reasons"] == ["table 'budgets' is not in the reference index"]
+    assert rejected[0]["reasons"][0] == (
+        "reference pack has no core_ref whose quote is in the reference"
+    )
+    packs = json.loads((run_dir / "reference_packs.json").read_text(encoding="utf-8"))
+    assert [p["pack_id"] for p in packs] == ["RP_SCN_001", "RP_SCN_002"]
+    assert fields["reference_packs"] == "2"
 
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["run_id"] == RUN_ID
     assert manifest["mode"] == "grounded"
-    assert manifest["reference_index_id"] == sample_index.versioned_id
-    assert manifest["catalog_id"] == "sample_card_spend"
+    assert manifest["reference_id"] == sample_reference.reference_id
     assert manifest["artifacts"] == {
         "scenarios": "scenarios.json",
         "scenarios_rejected": "scenarios_rejected.json",
+        "reference_packs": "reference_packs.json",
     }
     assert "secrets" not in manifest["effective_config"]
 
 
-def test_explicit_inputs_reference_index_and_new_run_id(
+def test_explicit_inputs_reference_and_new_run_id(
     ungrounded_config: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -136,8 +144,8 @@ def test_explicit_inputs_reference_index_and_new_run_id(
             str(REPO_ROOT / "data" / "personas" / "finance_controller.yaml"),
             "--product",
             str(REPO_ROOT / "data" / "products" / "sample_product.yaml"),
-            "--reference-index",
-            str(SAMPLE_INDEX),
+            "--reference",
+            str(SAMPLE_REFERENCE),
             "--count",
             "1",
         ],
@@ -146,6 +154,7 @@ def test_explicit_inputs_reference_index_and_new_run_id(
     fields = _fields(result.output)
     assert fields["run_id"].startswith("RUN_") and fields["mode"] == "grounded"
     assert (tmp_path / "artifacts" / "runs" / fields["run_id"] / "scenarios.json").is_file()
+    assert "guide: default" in result.output  # no --reference-guide, none in the config
 
 
 def test_no_index_is_ungrounded_with_chatbot_product(
@@ -175,25 +184,46 @@ def test_no_index_is_ungrounded_with_chatbot_product(
     assert (fields["mode"], fields["accepted"]) == ("ungrounded", "1")
     run_dir = tmp_path / "artifacts" / "runs" / RUN_ID
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert (manifest["mode"], manifest["reference_index_id"]) == ("ungrounded", None)
+    assert (manifest["mode"], manifest["reference_id"]) == ("ungrounded", None)
     assert manifest["product_id"] == "sample_policy_chatbot"
+    assert not (run_dir / "reference_packs.json").exists()
     scenario = json.loads((run_dir / "scenarios.json").read_text(encoding="utf-8"))[0]
-    assert scenario["mode"] == "ungrounded" and scenario["reference_cheat_sheet"] is None
+    assert scenario["mode"] == "ungrounded" and scenario["reference_pack_id"] is None
 
 
-def test_missing_reference_index_file_is_an_error(config_path: Path, tmp_path: Path) -> None:
+def test_missing_reference_file_is_an_error(config_path: Path, tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
         [
             "--config",
             str(config_path),
             "generate-scenarios",
-            "--reference-index",
+            "--reference",
             str(tmp_path / "missing.json"),
         ],
     )
     assert result.exit_code == 1
-    assert "Reference index not found" in result.output
+    assert "Reference not found" in result.output
+
+
+def test_check_reference_prints_id_and_size(config_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(config_path),
+            "check-reference",
+            "--reference",
+            str(POLICY),
+            "--reference-guide",
+            str(POLICY.with_name("sample_travel_policy_guide.md")),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    fields = _fields(result.output)
+    assert fields["format"] == "markdown" and fields["max_chars"] == "200000"
+    assert fields["reference_id"].startswith("sample_travel_policy-")
+    assert fields["guide"] == "sample_travel_policy_guide.md"
 
 
 def test_bad_run_id(config_path: Path) -> None:

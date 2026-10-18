@@ -13,25 +13,18 @@ from synthetic_user.models.execution import (
     ExecutionRecord,
     TimeoutResponse,
 )
-from synthetic_user.models.reference import IndexColumn, IndexTable, ReferenceIndex
+from synthetic_user.models.reference import CoreRef, ReferencePack
 from synthetic_user.storage import json_store
 from synthetic_user.storage.json_store import JsonArtifactStore
 
 
-def _index(index_id: str = "IDX_001") -> ReferenceIndex:
-    return ReferenceIndex(
-        index_id=index_id,
-        index_version="1",
-        source_catalog_id="sample_card_spend",
-        source_catalog_version="1.0",
-        tables=[
-            IndexTable(
-                name="card_transactions",
-                business_purpose="card spend",
-                columns=[IndexColumn(name="amount")],
-            )
-        ],
-        generated_at=datetime(2026, 10, 13, tzinfo=UTC),
+def _index(index_id: str = "IDX_001") -> ReferencePack:
+    """A sample model (a Reference Pack); ``index_id`` goes into reference_id."""
+    return ReferencePack(
+        pack_id="RP_SCN_001",
+        scenario_id="SCN_001",
+        reference_id=index_id,
+        core_refs=[CoreRef(name="amount", quote="Transaction amount", why="spend")],
     )
 
 
@@ -43,14 +36,14 @@ def test_model_round_trip(tmp_path: Path) -> None:
     store = JsonArtifactStore(tmp_path)
     path = store.write_model("runs/r1/index.json", _index())
     assert path == tmp_path / "runs" / "r1" / "index.json"
-    assert store.read_model("runs/r1/index.json", ReferenceIndex) == _index()
+    assert store.read_model("runs/r1/index.json", ReferencePack) == _index()
 
 
 def test_models_round_trip(tmp_path: Path) -> None:
     store = JsonArtifactStore(tmp_path)
     items = [_index("IDX_001"), _index("IDX_002")]
-    store.write_models("many.json", items, ReferenceIndex)
-    assert store.read_models("many.json", ReferenceIndex) == items
+    store.write_models("many.json", items, ReferencePack)
+    assert store.read_models("many.json", ReferencePack) == items
 
 
 def test_union_round_trip_via_adapter(tmp_path: Path) -> None:
@@ -88,13 +81,13 @@ def test_overwrite_replaces_content(tmp_path: Path) -> None:
     store = JsonArtifactStore(tmp_path)
     store.write_model("a.json", _index("IDX_001"))
     store.write_model("a.json", _index("IDX_002"))
-    assert store.read_model("a.json", ReferenceIndex).index_id == "IDX_002"
+    assert store.read_model("a.json", ReferencePack).reference_id == "IDX_002"
 
 
 def test_no_temp_files_left(tmp_path: Path) -> None:
     store = JsonArtifactStore(tmp_path)
     store.write_model("d/a.json", _index())
-    store.write_models("d/b.json", [_index()], ReferenceIndex)
+    store.write_models("d/b.json", [_index()], ReferencePack)
     assert _files(tmp_path) == [os.path.join("d", "a.json"), os.path.join("d", "b.json")]
 
 
@@ -112,12 +105,12 @@ def test_failed_write_leaves_no_temp_and_keeps_old_file(
         store.write_model("a.json", _index("IDX_002"))
     monkeypatch.undo()
     assert _files(tmp_path) == ["a.json"]
-    assert store.read_model("a.json", ReferenceIndex).index_id == "IDX_001"
+    assert store.read_model("a.json", ReferencePack).reference_id == "IDX_001"
 
 
 def test_missing_artifact(tmp_path: Path) -> None:
     with pytest.raises(ArtifactNotFoundError):
-        JsonArtifactStore(tmp_path).read_model("nope.json", ReferenceIndex)
+        JsonArtifactStore(tmp_path).read_model("nope.json", ReferencePack)
 
 
 @pytest.mark.parametrize(
@@ -127,7 +120,7 @@ def test_missing_artifact(tmp_path: Path) -> None:
 def test_corrupt_file_is_integrity_error(tmp_path: Path, content: bytes) -> None:
     (tmp_path / "bad.json").write_bytes(content)
     with pytest.raises(ArtifactIntegrityError, match="invalid"):
-        JsonArtifactStore(tmp_path).read_model("bad.json", ReferenceIndex)
+        JsonArtifactStore(tmp_path).read_model("bad.json", ReferencePack)
 
 
 @pytest.mark.parametrize("bad", ["../escape.json", "a/../../escape.json"])

@@ -15,16 +15,14 @@ from synthetic_user.cli import app
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.nodes.evaluators.plugins.sql.models import SqlChecks
-from synthetic_user.references.snapshot import snapshot_id_for
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact, save_run_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
-ALL_PASS = dict.fromkeys(SqlChecks.model_fields, "pass")
 
 
 @pytest.fixture
@@ -64,14 +62,13 @@ def _questions(scenarios: list[Scenario]) -> list[QuestionCase]:
                 "scenario_id": scenarios[0].id,
                 "persona_id": "finance_controller",
                 "mode": "grounded",
-                "reference_snapshot_id": snapshot_id_for(scenarios[0].id),
+                "reference_pack_id": scenarios[0].reference_pack_id,
                 "utterance": text,
                 "intended_goal": scenarios[0].business_goal,
                 "intent": {"task_type": "ranking"},
                 "question_characteristics": {"ambiguity_level": "low"},
                 "expectations": {
-                    "clarification": "conditional",
-                    "acceptable_behaviors": ["x"],
+                    "expected_behavior": "Return a query ranking the top spenders.",
                     "success_criteria": ["names the top spenders"],
                 },
             }
@@ -118,12 +115,31 @@ def _executions() -> list[ExecutionRecord]:
 
 
 def _judge(system: str, user: str) -> dict[str, Any]:
-    """Generic judge approves (criteria copied from the prompt); SQL review approves."""
-    if "Success criteria (for goal_completeness)" not in user:
-        return {"checks": ALL_PASS, "findings": [], "verdict": "pass"}
+    """Approves, except that the broken query fails reference_alignment with evidence."""
     ok = {"status": "pass", "rationale": "fine"}
-    block = user.split("Success criteria (for goal_completeness):", 1)[1]
-    criteria = json.loads(block.split("Product response", 1)[0])
+    block = user.split("What was asked and what is expected:\n", 1)[1]
+    criteria = json.loads(block.split("\n\nProduct description", 1)[0])["success_criteria"]
+    broken = "SELEC broken" in user
+    alignment = (
+        {"status": "fail", "rationale": "uses none of the core refs", "evidence": "SELEC broken"}
+        if broken
+        else ok
+    )
+    findings = (
+        [
+            {
+                "category": "reference_alignment",
+                "description": "query does not use the core columns",
+                "expected_behavior": "uses card_transactions.amount and employees.full_name",
+                "observed_behavior": "unusable query",
+                "evidence": "SELEC broken",
+                "severity": "high",
+                "evidence_status": "supported",
+            }
+        ]
+        if broken
+        else []
+    )
     return {
         "relevance": ok,
         "goal_completeness": ok,
@@ -132,7 +148,9 @@ def _judge(system: str, user: str) -> dict[str, Any]:
         "capability_consistency": ok,
         "clarification_handling": {"status": "not_applicable", "rationale": "n/a"},
         "safety_and_honesty": ok,
-        "overall_verdict": "pass",
+        "reference_alignment": alignment,
+        "findings": findings,
+        "overall_verdict": "fail" if broken else "pass",
     }
 
 
@@ -152,6 +170,7 @@ def test_evaluate_file_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
 ) -> None:
     llm = _llm(monkeypatch)
     q = _write(
@@ -163,6 +182,7 @@ def test_evaluate_file_mode(
         TypeAdapter(list[ExecutionRecord]).dump_python(_executions(), mode="json"),
     )
     s = _write(tmp_path / "scenarios.json", [x.model_dump(mode="json") for x in sample_scenarios])
+    p = _write(tmp_path / "packs.json", [x.model_dump(mode="json") for x in sample_packs])
     out = tmp_path / "out"
 
     result = CliRunner().invoke(
@@ -177,6 +197,8 @@ def test_evaluate_file_mode(
             str(e),
             "--scenarios",
             str(s),
+            "--reference-packs",
+            str(p),
             "--out-dir",
             str(out),
         ],
@@ -192,9 +214,39 @@ def test_evaluate_file_mode(
     assert [(b["bug_id"], b["question_id"], b["execution_id"]) for b in bugs] == [
         ("BUG_001", "Q_002", "EXE_002")
     ]
-    # 2 generic judgements + 1 SQL review; the syntax-error SQL never reaches the SQL LLM
-    sql_reviews = [c for c in llm.calls if "Success criteria (for goal_completeness)" not in c.user]
-    assert len(llm.calls) == 3 and len(sql_reviews) == 1
+    assert [x["checks"]["reference_alignment"] for x in evaluations] == ["pass", "fail"]
+    # one generic judgement per response; no SQL plugin call (design v3)
+    assert len(llm.calls) == 2
+    assert all("Reference pack (AUTHORITATIVE" in c.user for c in llm.calls)
+
+
+def test_grounded_file_mode_needs_the_packs(
+    config_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sample_scenarios: list[Scenario],
+) -> None:
+    _llm(monkeypatch)
+    q = _write(
+        tmp_path / "questions.json",
+        [x.model_dump(mode="json") for x in _questions(sample_scenarios)],
+    )
+    e = _write(
+        tmp_path / "executions.json",
+        TypeAdapter(list[ExecutionRecord]).dump_python(_executions(), mode="json"),
+    )
+    s = _write(tmp_path / "scenarios.json", [x.model_dump(mode="json") for x in sample_scenarios])
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(config_path),
+            "evaluate",
+            *("--questions", str(q), "--executions", str(e), "--scenarios", str(s)),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "--reference-packs" in result.output
 
 
 def test_evaluate_run_mode_updates_manifest(
@@ -202,10 +254,13 @@ def test_evaluate_run_mode_updates_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+    sample_reference: Reference,
 ) -> None:
     _llm(monkeypatch)
     store = JsonArtifactStore(tmp_path / "artifacts")
     store.write_models(run_artifact(RUN_ID, "scenarios.json"), sample_scenarios, Scenario)
+    store.write_models(run_artifact(RUN_ID, "reference_packs.json"), sample_packs, ReferencePack)
     store.write_models(
         run_artifact(RUN_ID, "questions.json"), _questions(sample_scenarios), QuestionCase
     )
@@ -220,9 +275,7 @@ def test_evaluate_run_mode_updates_manifest(
             persona_id="finance_controller",
             product_id="sample_nl2sql",
             mode=GenerationMode.GROUNDED,
-            catalog_id="sample_card_spend",
-            catalog_version="1.0",
-            reference_index_id="IDX_1",
+            reference_id=sample_reference.reference_id,
             llm_provider="fake",
             llm_model="fake",
             pipeline_version="0.1.0",

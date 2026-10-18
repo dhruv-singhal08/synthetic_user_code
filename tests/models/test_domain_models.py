@@ -18,9 +18,14 @@ from synthetic_user.models.evaluation import (
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import IndexRelationship, IndexTable, ReferenceIndex
+from synthetic_user.models.reference import (
+    Reference,
+    ReferencePack,
+    ReferencePackDraft,
+    normalise_quote,
+)
 from synthetic_user.models.run import GenerationMode, RunManifest
-from synthetic_user.models.scenario import ReferenceCheatSheet, Scenario
+from synthetic_user.models.scenario import Scenario
 
 REPO_CONFIG = Path(__file__).resolve().parents[2] / "config" / "app.yaml"
 
@@ -53,17 +58,15 @@ def _evaluation(**overrides: Any) -> dict[str, Any]:
     }
 
 
-def _cheat_sheet(**overrides: Any) -> dict[str, Any]:
+def _pack(**overrides: Any) -> dict[str, Any]:
     return {
-        "tables": ["card_transactions", "employees"],
-        "columns": ["card_transactions.amount", "card_transactions.currency_code"],
-        "relationships": [
-            {
-                "source": "card_transactions.employee_id",
-                "target": "employees.employee_id",
-                "verification": "verified",
-            }
+        "pack_id": "RP_SCN_001",
+        "scenario_id": "SCN_001",
+        "reference_id": "catalog-1234abcd",
+        "core_refs": [
+            {"name": "card_transactions.amount", "quote": "Transaction amount", "why": "spend"}
         ],
+        "rules": [{"rule": "no cross-currency sums", "quote": "must not be summed"}],
         **overrides,
     }
 
@@ -74,14 +77,14 @@ def _scenario(**overrides: Any) -> dict[str, Any]:
         "persona_id": "finance_controller",
         "product_id": "sample_nl2sql",
         "mode": "grounded",
-        "reference_index_id": "IDX_20261013_120000_0001",
+        "reference_id": "catalog-1234abcd",
+        "reference_pack_id": "RP_SCN_001",
         "title": "Top spenders",
         "business_goal": "Find employees with the highest card spend.",
         "task_type": "ranking",
         "capability": "supported",
         "capability_rationale": "Ranking over one join is supported.",
         "success_criteria": ["lists employees ranked by card spend"],
-        "reference_cheat_sheet": _cheat_sheet(),
         "question_guidance": {"intent": "rank employees by spend"},
         "signature": "ranking|card_transactions,employees",
         **overrides,
@@ -94,15 +97,15 @@ def _question(**overrides: Any) -> dict[str, Any]:
         "scenario_id": "SCN_001",
         "persona_id": "finance_controller",
         "mode": "grounded",
-        "reference_snapshot_id": "SNAP_001",
+        "reference_pack_id": "RP_SCN_001",
         "utterance": "Who spent the most on cards last month?",
         "intended_goal": "Rank employees by card spend",
         "intent": {"task_type": "ranking", "metrics": ["spend"]},
         "question_characteristics": {"ambiguity_level": "medium"},
         "expectations": {
-            "clarification": "conditional",
-            "acceptable_behaviors": ["asks which currency", "groups by currency"],
+            "expected_behavior": "Rank employees by card spend, per currency.",
             "success_criteria": ["ranks employees by spend"],
+            "acceptable_variations": ["asks which currency"],
         },
         **overrides,
     }
@@ -118,7 +121,7 @@ def _question(**overrides: Any) -> dict[str, Any]:
         (EvaluationResult, _evaluation(comment="x")),
         (Scenario, _scenario(priority=1)),
         (QuestionCase, _question(tone="casual")),
-        (ReferenceCheatSheet, _cheat_sheet(joins=[])),
+        (ReferencePack, _pack(tables=[])),
     ],
 )
 def test_extra_fields_rejected(model: type[BaseModel], payload: dict[str, Any]) -> None:
@@ -139,27 +142,10 @@ def test_extra_fields_rejected(model: type[BaseModel], payload: dict[str, Any]) 
         (EvaluationResult, _evaluation(product_outcome="partial")),
         (Scenario, _scenario(task_type="forecast")),
         (Scenario, _scenario(capability="maybe")),
-        (QuestionCase, _question(expectations={"clarification": "optional"})),
         (Scenario, _scenario(mode="semi_grounded")),
         (
-            IndexRelationship,
-            {
-                "source_table": "a",
-                "source_column": "x",
-                "target_table": "b",
-                "target_column": "y",
-                "cardinality": "one_to_few",
-            },
-        ),
-        (
-            IndexRelationship,
-            {
-                "source_table": "a",
-                "source_column": "x",
-                "target_table": "b",
-                "target_column": "y",
-                "verification": "confirmed",
-            },
+            Reference,
+            {"reference_id": "r", "source_name": "r.pdf", "format": "pdf", "text": "x"},
         ),
     ],
 )
@@ -172,8 +158,8 @@ def test_bad_enums_rejected(model: type[BaseModel], payload: dict[str, Any]) -> 
 
 
 def test_valid_payloads_parse() -> None:
-    sheet = Scenario.model_validate(_scenario()).reference_cheat_sheet
-    assert sheet is not None and sheet.relationships[0].target
+    assert Scenario.model_validate(_scenario()).reference_pack_id == "RP_SCN_001"
+    assert ReferencePack.model_validate(_pack()).rules[0].quote == "must not be summed"
     assert QuestionCase.model_validate(_question()).intent.metrics == ["spend"]
     result = EvaluationResult.model_validate(
         _evaluation(
@@ -247,21 +233,38 @@ def test_confidence_bounded() -> None:
     assert Finding.model_validate(_finding()).confidence is None
 
 
-def test_cheat_sheet_cannot_reference_unlisted_table() -> None:
-    with pytest.raises(ValidationError, match="not in its table list"):
-        ReferenceCheatSheet.model_validate(_cheat_sheet(columns=["merchants.merchant_name"]))
+def test_pack_needs_a_core_ref_and_a_well_formed_id() -> None:
+    with pytest.raises(ValidationError, match="core_refs"):
+        ReferencePack.model_validate(_pack(core_refs=[]))
+    with pytest.raises(ValidationError, match="core_refs"):
+        ReferencePackDraft.model_validate({"core_refs": []})
+    with pytest.raises(ValidationError, match="pack_id"):
+        ReferencePack.model_validate(_pack(pack_id="PACK_1"))
 
 
-def test_cheat_sheet_column_must_be_qualified() -> None:
-    with pytest.raises(ValidationError):
-        ReferenceCheatSheet.model_validate(_cheat_sheet(columns=["amount"]))
+def test_reference_contains_is_whitespace_case_and_quote_mark_insensitive() -> None:
+    reference = Reference(
+        reference_id="r-1",
+        source_name="policy.md",
+        format="markdown",
+        text="## Hotels\nThe nightly hotel limit is USD 250 in Tier 1 cities\n(New York).",
+    )
+    assert reference.contains("the NIGHTLY hotel limit is usd 250 in tier 1 cities (new york)")
+    assert reference.contains('"The nightly hotel limit is USD 250."')
+    assert not reference.contains("The nightly hotel limit is USD 300")
+    assert not reference.contains("   ")
+    assert normalise_quote(" \u201cA  b.\u201d ") == "a b"
 
 
-def test_index_table_requires_columns_and_purpose() -> None:
-    with pytest.raises(ValidationError, match="columns"):
-        IndexTable.model_validate({"name": "t", "business_purpose": "p", "columns": []})
-    with pytest.raises(ValidationError, match="business_purpose"):
-        IndexTable.model_validate({"name": "t", "columns": [{"name": "a"}]})
+def test_reference_guide_falls_back_to_default() -> None:
+    reference = Reference(reference_id="r", source_name="r.txt", format="text", text="x")
+    assert "not exhaustive" in reference.guide_text()
+    assert (
+        Reference.model_validate(
+            {**reference.model_dump(), "guide": "Read it as a policy."}
+        ).guide_text()
+        == "Read it as a policy."
+    )
 
 
 def test_product_supported_overlap_rejected() -> None:
@@ -304,9 +307,7 @@ def _manifest(effective_config: dict[str, Any]) -> dict[str, Any]:
         "persona_id": "finance_controller",
         "product_id": "sample_nl2sql",
         "mode": "grounded",
-        "catalog_id": "sample_card_spend",
-        "catalog_version": "1.0",
-        "reference_index_id": "IDX_001",
+        "reference_id": "sample_card_spend_index-1234abcd",
         "llm_provider": "fake",
         "llm_model": "fake",
         "pipeline_version": "0.1.0",
@@ -336,20 +337,12 @@ def test_manifest_run_id_format() -> None:
 
 
 def test_manifest_mode_matches_reference() -> None:
-    ungrounded = {
-        **_manifest({}),
-        "mode": "ungrounded",
-        "catalog_id": None,
-        "catalog_version": None,
-        "reference_index_id": None,
-    }
+    ungrounded = {**_manifest({}), "mode": "ungrounded", "reference_id": None}
     assert RunManifest.model_validate(ungrounded).mode is GenerationMode.UNGROUNDED
     with pytest.raises(ValidationError, match="mode ungrounded must not have"):
         RunManifest.model_validate({**_manifest({}), "mode": "ungrounded"})
     with pytest.raises(ValidationError, match="mode grounded requires"):
         RunManifest.model_validate({**ungrounded, "mode": "grounded"})
-    with pytest.raises(ValidationError, match="go together"):
-        RunManifest.model_validate({**_manifest({}), "catalog_id": None})
 
 
 # --- grounded / ungrounded (v2.1) --------------------------------------------------------
@@ -358,31 +351,28 @@ def test_manifest_mode_matches_reference() -> None:
 def _ungrounded_scenario(**overrides: Any) -> dict[str, Any]:
     fields: dict[str, Any] = {
         "mode": "ungrounded",
-        "reference_index_id": None,
-        "reference_cheat_sheet": None,
+        "reference_id": None,
+        "reference_pack_id": None,
     }
     return _scenario(**{**fields, **overrides})
 
 
-def test_ungrounded_scenario_has_no_cheat_sheet() -> None:
+def test_ungrounded_scenario_has_no_reference() -> None:
     scenario = Scenario.model_validate(_ungrounded_scenario())
     assert scenario.mode is GenerationMode.UNGROUNDED
-    assert scenario.reference_cheat_sheet is None
+    assert scenario.reference_pack_id is None
 
 
 @pytest.mark.parametrize(
     ("payload", "match"),
     [
-        (_scenario(reference_cheat_sheet=None), "mode grounded requires a cheat sheet"),
-        (_scenario(reference_index_id=None), "mode grounded requires a reference_index_id"),
-        (_scenario(mode="ungrounded", reference_index_id=None), "must not have a cheat sheet"),
-        (
-            _ungrounded_scenario(reference_index_id="IDX_1"),
-            "must not have a reference_index_id",
-        ),
+        (_scenario(reference_pack_id=None), "mode grounded requires a reference_pack_id"),
+        (_scenario(reference_id=None), "mode grounded requires a reference_id"),
+        (_scenario(mode="ungrounded", reference_id=None), "must not have a reference_pack_id"),
+        (_ungrounded_scenario(reference_id="r-1"), "must not have a reference_id"),
     ],
 )
-def test_scenario_cheat_sheet_iff_grounded(payload: dict[str, Any], match: str) -> None:
+def test_scenario_reference_iff_grounded(payload: dict[str, Any], match: str) -> None:
     with pytest.raises(ValidationError, match=match):
         Scenario.model_validate(payload)
 
@@ -399,20 +389,28 @@ def test_success_criteria_required_in_both_modes(mode: str) -> None:
         Scenario.model_validate(missing)
 
 
-def test_question_snapshot_iff_grounded() -> None:
-    ungrounded = QuestionCase.model_validate(
-        _question(mode="ungrounded", reference_snapshot_id=None)
-    )
-    assert ungrounded.reference_snapshot_id is None
-    with pytest.raises(ValidationError, match="mode grounded requires a reference_snapshot_id"):
-        QuestionCase.model_validate(_question(reference_snapshot_id=None))
-    with pytest.raises(ValidationError, match="must not have a reference_snapshot_id"):
+def test_question_pack_iff_grounded() -> None:
+    ungrounded = QuestionCase.model_validate(_question(mode="ungrounded", reference_pack_id=None))
+    assert ungrounded.reference_pack_id is None
+    with pytest.raises(ValidationError, match="mode grounded requires a reference_pack_id"):
+        QuestionCase.model_validate(_question(reference_pack_id=None))
+    with pytest.raises(ValidationError, match="must not have a reference_pack_id"):
         QuestionCase.model_validate(_question(mode="ungrounded"))
 
 
-def test_question_requires_success_criteria() -> None:
-    expectations = {"clarification": "conditional", "acceptable_behaviors": ["answers"]}
-    with pytest.raises(ValidationError, match="success_criteria empty"):
+@pytest.mark.parametrize(
+    "expectations",
+    [
+        {"expected_behavior": "answers"},  # criteria required
+        {"expected_behavior": "answers", "success_criteria": []},
+        {"expected_behavior": "answers", "success_criteria": ["a", "b", "c", "d", "e"]},  # max 4
+        {"success_criteria": ["a"]},  # expected_behavior required
+        {"expected_behavior": "answers", "success_criteria": ["a"], "clarification": "x"},
+        {"expected_behavior": "a", "success_criteria": ["a"], "unacceptable_behaviors": ["b"]},
+    ],
+)
+def test_question_expectations_shape(expectations: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
         QuestionCase.model_validate(_question(expectations=expectations))
 
 
@@ -426,35 +424,35 @@ _GENERIC = {
 }
 
 
-def test_evaluation_generic_and_grounded_checks() -> None:
+def test_evaluation_checks_include_reference_alignment() -> None:
     result = EvaluationResult.model_validate(
         _evaluation(
             verdict="pass",
-            checks=_GENERIC,
-            grounded_checks={"join_correctness": "pass"},
-            plugins_applied=["sql"],
-            check_rationale={"relevance": "answers the question", "join_correctness": "ok"},
+            checks={**_GENERIC, "reference_alignment": "pass"},
+            check_rationale={"relevance": "answers the question", "reference_alignment": "ok"},
         )
     )
-    assert result.checks is not None and result.checks.relevance == "pass"
+    assert result.checks is not None and result.checks.reference_alignment == "pass"
+    # absent -> not_applicable (e.g. evaluations stored without it)
+    default = EvaluationResult.model_validate(_evaluation(verdict="pass", checks=_GENERIC))
+    assert default.checks is not None and default.checks.reference_alignment == "not_applicable"
 
 
-def test_ungrounded_evaluation_has_generic_checks_only() -> None:
+def test_ungrounded_evaluation_has_no_reference_alignment() -> None:
     ungrounded = _evaluation(mode="ungrounded", verdict="pass", checks=_GENERIC)
-    assert EvaluationResult.model_validate(ungrounded).grounded_checks == {}
-    with pytest.raises(ValidationError, match="ungrounded evaluations have no grounded_checks"):
+    assert EvaluationResult.model_validate(ungrounded).mode is GenerationMode.UNGROUNDED
+    with pytest.raises(ValidationError, match="ungrounded evaluations have no reference_alignment"):
         EvaluationResult.model_validate(
-            {**ungrounded, "grounded_checks": {"sql_syntax": "pass"}, "plugins_applied": ["sql"]}
+            {**ungrounded, "checks": {**_GENERIC, "reference_alignment": "pass"}}
         )
-    with pytest.raises(ValidationError, match="ungrounded evaluations"):
-        EvaluationResult.model_validate({**ungrounded, "cheat_sheet_conflicts": ["x"]})
 
 
-def test_grounded_checks_need_a_plugin_and_rationale_a_known_check() -> None:
-    with pytest.raises(ValidationError, match="plugins_applied is empty"):
-        EvaluationResult.model_validate(_evaluation(grounded_checks={"sql_syntax": "fail"}))
+def test_rationale_must_name_a_known_check_and_v2_fields_are_gone() -> None:
     with pytest.raises(ValidationError, match="check_rationale for unknown checks"):
         EvaluationResult.model_validate(_evaluation(check_rationale={"vibes": "good"}))
+    for field in ("grounded_checks", "plugins_applied", "plugin_analysis"):
+        with pytest.raises(ValidationError, match="Extra inputs"):
+            EvaluationResult.model_validate(_evaluation(**{field: {}}))
 
 
 def test_generic_checks_reject_missing_or_extra_criteria() -> None:
@@ -480,9 +478,3 @@ def test_product_requires_product_type() -> None:
         ProductDescription.model_validate(
             {"product_id": "p", "product_version": "1", "name": "n", "description": "d"}
         )
-
-
-def test_data_catalog_reference_kind_defaults(sample_index: ReferenceIndex) -> None:
-    assert sample_index.reference_kind == "data_catalog"
-    with pytest.raises(ValidationError):
-        ReferenceIndex.model_validate({**sample_index.model_dump(), "reference_kind": "web_pages"})

@@ -46,7 +46,7 @@ def test_repo_config_loads_with_documented_defaults() -> None:
     assert cfg.product_adapter.type is ProductAdapterType.FIXTURE
     assert cfg.product.timeout_seconds == 300
     assert cfg.product.max_concurrency == 1
-    assert cfg.sql.dialect == "bigquery"
+    assert cfg.reference.max_chars == 200_000
     assert cfg.generation.question.ambiguity_level is AmbiguityLevel.LOW
     assert cfg.secrets.google_api_key is None
 
@@ -56,7 +56,8 @@ def test_minimal_config_fills_section_defaults(tmp_path: Path) -> None:
     assert cfg.llm.provider is LLMProvider.FAKE
     assert cfg.llm.temperature is None
     assert cfg.generation.scenario.scenario_count == 10
-    assert cfg.inputs.reference_index_file is None  # optional: absent -> ungrounded
+    assert cfg.inputs.reference_file is None  # optional: absent -> ungrounded
+    assert cfg.inputs.reference_guide_file is None
 
 
 # --- env override / path order ---------------------------------------------------------
@@ -78,10 +79,10 @@ def test_default_path_when_nothing_set() -> None:
 
 def test_config_path_env_is_used_by_load_config(tmp_path: Path) -> None:
     data = _minimal()
-    data["sql"] = {"dialect": "postgres"}
+    data["reference"] = {"max_chars": 5000}
     path = _write(tmp_path, data, "from_env.yaml")
     cfg = load_config(env={"CONFIG_PATH": str(path)})
-    assert cfg.sql.dialect == "postgres"
+    assert cfg.reference.max_chars == 5000
 
 
 def test_api_key_comes_from_env_as_secret(tmp_path: Path) -> None:
@@ -218,11 +219,11 @@ def test_unknown_provider_is_rejected(tmp_path: Path) -> None:
         load_config(_write(tmp_path, data), env={})
 
 
-def test_unknown_sql_dialect_is_rejected(tmp_path: Path) -> None:
-    data = _minimal()
-    data["sql"] = {"dialect": "not_a_dialect"}
-    with pytest.raises(ConfigError, match="dialect"):
-        load_config(_write(tmp_path, data), env={})
+def test_removed_v2_sections_are_rejected(tmp_path: Path) -> None:
+    for section in ({"sql": {"dialect": "bigquery"}}, {"evaluation": {"plugins": ["sql"]}}):
+        data = {**_minimal(), **section}
+        with pytest.raises(ConfigError, match="Extra inputs are not permitted"):
+            load_config(_write(tmp_path, data), env={})
 
 
 def test_product_adapter_is_required(tmp_path: Path) -> None:

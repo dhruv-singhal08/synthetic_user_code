@@ -52,3 +52,7 @@ class SequentialIdGenerator:
     def next(self, kind: IdKind) -> str:
         self._counters[kind] += 1
         return f"{kind.value}_{self._counters[kind]:03d}"
+
+    def peek(self, kind: IdKind) -> str:
+        """The id ``next`` would return, without using it."""
+        return f"{kind.value}_{self._counters[kind] + 1:03d}"

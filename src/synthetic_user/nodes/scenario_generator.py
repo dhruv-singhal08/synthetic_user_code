@@ -1,10 +1,9 @@
 """Node 2: generate scenarios (one LLM call per round), in two modes.
 
-grounded (reference index given): each scenario carries a reference cheat sheet built in the
-same call; deterministic checks: tables/columns exist in the index, no verification promotion,
-allow_multi_table, unsupported filter.
-ungrounded (no index): a cheat sheet must be absent (rejected otherwise), success_criteria
-non-empty, unsupported filter.
+grounded (reference given): each scenario comes with a reference_pack built in the same call;
+code keeps only core_refs / rules whose quote is in the reference (the others are recorded in
+the pack's rejected_items) and rejects the scenario when no core_ref survives.
+ungrounded (no reference): a pack must be absent (rejected otherwise), unsupported filter.
 Per-scenario checks decide accept / reject / duplicate. Short results are topped up at most
 ``max_topup_rounds`` times and never padded.
 """
@@ -26,11 +25,10 @@ from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import StrictModel
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference, ReferencePack, pack_id_for
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import (
     CapabilityClassification,
-    ReferenceCheatSheet,
     RejectedScenario,
     Scenario,
     ScenarioDraft,
@@ -38,17 +36,14 @@ from synthetic_user.models.scenario import (
     TaskType,
 )
 from synthetic_user.prompts.scenario import ScenarioPromptOptions, build_scenario_prompt
-from synthetic_user.references.cheat_sheet import (
-    align_relationship_verification,
-    check_cheat_sheet_against_index,
-)
+from synthetic_user.references.pack import NO_VALID_CORE_REF, build_pack
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
 FILTERED_BY_CONFIG = "filtered_by_config"
 SURPLUS = "surplus: more scenarios returned than requested"
-MISSING_CHEAT_SHEET = "mode grounded requires a reference_cheat_sheet"
-UNEXPECTED_CHEAT_SHEET = "mode ungrounded must not have a reference_cheat_sheet"
+MISSING_PACK = "mode grounded requires a reference_pack"
+UNEXPECTED_PACK = "mode ungrounded must not have a reference_pack"
 
 _STOPWORDS = frozenset(
     {
@@ -118,15 +113,18 @@ def _goal_keywords(business_goal: str) -> str:
     return " ".join(sorted({w for w in words if len(w) > 2 and w not in _STOPWORDS}))
 
 
-def scenario_signature(task_type: TaskType, business_goal: str, cheat: ReferenceCheatSheet) -> str:
-    """Grounded: task_type | goal keywords | tables | metrics | dimensions | operations."""
+def scenario_signature(
+    task_type: TaskType,
+    business_goal: str,
+    capability: CapabilityClassification,
+    pack: ReferencePack,
+) -> str:
+    """Grounded: task_type | goal keywords | capability | core_ref names."""
     parts = [
         task_type.value,
         _goal_keywords(business_goal),
-        ",".join(sorted(set(cheat.tables))),
-        ",".join(sorted({m.name.strip().lower() for m in cheat.metrics})),
-        ",".join(sorted(set(cheat.dimensions))),
-        ",".join(sorted({o.strip().lower() for o in cheat.operations})),
+        capability.value,
+        ",".join(sorted({r.name.strip().lower() for r in pack.core_refs})),
     ]
     return "|".join(p.replace("|", "/") for p in parts)
 
@@ -140,9 +138,9 @@ def ungrounded_signature(
 
 
 def _shape(signature: str) -> tuple[str, ...] | None:
-    """(task_type, tables, metrics, dimensions) from a signature, or None if malformed."""
+    """(task_type, core_ref names) of a grounded signature; None for ungrounded ones."""
     parts = signature.split("|")
-    return (parts[0], parts[2], parts[3], parts[4]) if len(parts) == 6 else None
+    return (parts[0], parts[3]) if len(parts) == 4 else None
 
 
 class ScenarioGenerator:
@@ -163,18 +161,18 @@ class ScenarioGenerator:
         self,
         persona: Persona,
         product: ProductDescription,
-        index: ReferenceIndex | None,
+        reference: Reference | None,
         *,
         count: int | None = None,
         existing_signatures: Sequence[str] = (),
     ) -> ScenarioGenerationResult:
-        """mode = grounded if ``index`` else ungrounded."""
+        """mode = grounded if ``reference`` else ungrounded."""
         cfg = self._settings.generation.scenario
         requested = count if count is not None else cfg.scenario_count
         if requested < 1:
             raise ValueError("scenario count must be >= 1")
 
-        mode = GenerationMode.GROUNDED if index is not None else GenerationMode.UNGROUNDED
+        mode = GenerationMode.GROUNDED if reference is not None else GenerationMode.UNGROUNDED
         self._log.info("Generating %d scenario(s), mode %s", requested, mode)
         state = _DedupState(existing_signatures)
         result = ScenarioGenerationResult()
@@ -184,12 +182,11 @@ class ScenarioGenerator:
                 break
             options = ScenarioPromptOptions(
                 count=needed,
-                allow_multi_table=cfg.allow_multi_table,
                 include_unsupported_scenarios=cfg.include_unsupported_scenarios,
                 diversity_preference=cfg.diversity_preference,
             )
             system, user = build_scenario_prompt(
-                persona, product, index, options, avoid_signatures=state.signatures()
+                persona, product, reference, options, avoid_signatures=state.signatures()
             )
             batch = await generate_structured(
                 self._llm,
@@ -202,7 +199,7 @@ class ScenarioGenerator:
                 if len(result.accepted) >= requested:
                     result.rejected.append(RejectedScenario(payload=raw, reasons=[SURPLUS]))
                     continue
-                self._process(raw, persona, product, index, state, result)
+                self._process(raw, persona, product, reference, state, result)
             self._log.info(
                 "Scenario round %d: %d returned; totals accepted=%d rejected=%d duplicates=%d",
                 round_no + 1,
@@ -224,7 +221,7 @@ class ScenarioGenerator:
         raw: dict[str, Any],
         persona: Persona,
         product: ProductDescription,
-        index: ReferenceIndex | None,
+        reference: Reference | None,
         state: _DedupState,
         result: ScenarioGenerationResult,
     ) -> None:
@@ -237,19 +234,21 @@ class ScenarioGenerator:
             )
             return
 
-        sheet = draft.reference_cheat_sheet
         reasons: list[str] = []
-        if index is None:
-            if sheet is not None:
-                reasons.append(UNEXPECTED_CHEAT_SHEET)
-        elif sheet is None:
-            reasons.append(MISSING_CHEAT_SHEET)
+        pack: ReferencePack | None = None
+        scenario_id = self._ids.peek(IdKind.SCENARIO)
+        if reference is None:
+            if draft.reference_pack is not None:
+                reasons.append(UNEXPECTED_PACK)
+        elif draft.reference_pack is None:
+            reasons.append(MISSING_PACK)
         else:
-            reasons.extend(check_cheat_sheet_against_index(sheet, index))
-            if not cfg.allow_multi_table and len(set(sheet.tables)) > 1:
-                reasons.append(f"multi_table_not_allowed: uses {sorted(set(sheet.tables))}")
-        if not draft.success_criteria:
-            reasons.append("success_criteria must not be empty")
+            pack, dropped = build_pack(draft.reference_pack, reference, scenario_id)
+            if pack is None:
+                reasons.append(NO_VALID_CORE_REF)
+                reasons.extend(
+                    f"{d.reason} ({d.item.get('name') or d.item.get('rule')})" for d in dropped
+                )
         if (
             not cfg.include_unsupported_scenarios
             and draft.capability is CapabilityClassification.UNSUPPORTED
@@ -259,10 +258,10 @@ class ScenarioGenerator:
             result.rejected.append(RejectedScenario(payload=raw, reasons=reasons))
             return
 
-        cheat: ReferenceCheatSheet | None = None
-        if index is not None and sheet is not None:
-            cheat, _notes = align_relationship_verification(sheet, index)
-            signature = scenario_signature(draft.task_type, draft.business_goal, cheat)
+        if pack is not None:
+            signature = scenario_signature(
+                draft.task_type, draft.business_goal, draft.capability, pack
+            )
         else:
             signature = ungrounded_signature(draft.task_type, draft.business_goal, draft.capability)
         duplicate_of = state.find(signature)
@@ -276,20 +275,23 @@ class ScenarioGenerator:
             id=self._ids.next(IdKind.SCENARIO),
             persona_id=persona.id,
             product_id=product.product_id,
-            mode=GenerationMode.GROUNDED if index is not None else GenerationMode.UNGROUNDED,
-            reference_index_id=index.versioned_id if index is not None else None,
+            mode=GenerationMode.GROUNDED if reference is not None else GenerationMode.UNGROUNDED,
+            reference_id=reference.reference_id if reference is not None else None,
+            reference_pack_id=pack_id_for(scenario_id) if pack is not None else None,
             business_goal=draft.business_goal,
             title=draft.title,
             task_type=draft.task_type,
             capability=draft.capability,
             capability_rationale=draft.capability_rationale,
             success_criteria=draft.success_criteria,
-            reference_cheat_sheet=cheat,
             question_guidance=draft.question_guidance,
             signature=signature,
         )
+        assert scenario.id == scenario_id
         state.add(signature, scenario.id)
         result.accepted.append(scenario)
+        if pack is not None:
+            result.packs.append(pack)
 
 
 class _DedupState:

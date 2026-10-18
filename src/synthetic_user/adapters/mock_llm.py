@@ -1,7 +1,8 @@
-"""MockLLMAdapter: an LLM plays an NL2SQL product behind a (mock) product contract.
+"""MockLLMAdapter: an LLM plays the product under test behind a (mock) product contract.
 
 Used by the web UI when a contract was requested from a product URL (D113). Real products use
-the http_json or a python adapter. The SQL it returns is recorded, never executed.
+the http_json or a python adapter. Fenced blocks in its reply become artifacts of that kind
+(e.g. ```sql -> kind "sql"); they are recorded, never executed.
 """
 
 from __future__ import annotations
@@ -21,10 +22,10 @@ from synthetic_user.models.execution import (
     ResponseArtifact,
 )
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference
 from synthetic_user.prompts.mock_product import build_mock_product_prompt
 
-_SQL_BLOCK = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_FENCED = re.compile(r"```([A-Za-z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 
 
 def parse_mock_reply(text: str) -> ProductResponse:
@@ -35,11 +36,15 @@ def parse_mock_reply(text: str) -> ProductResponse:
         return ClarificationResponse(message=body.split(":", 1)[1].strip())
     if upper.startswith("DENIED:"):
         return DeniedResponse(message=body.split(":", 1)[1].strip())
-    match = _SQL_BLOCK.search(body)
-    sql = (match.group(1) if match else body).strip()
-    if not sql:
+    artifacts = [
+        ResponseArtifact(kind=(kind or "text").lower(), content=content.strip())
+        for kind, content in _FENCED.findall(body)
+        if content.strip()
+    ]
+    remaining = _FENCED.sub("", body).strip()
+    if not remaining and not artifacts:
         return ErrorResponse(error_type="EmptyReply", message="mock product replied with nothing")
-    return AnsweredResponse(artifacts=[ResponseArtifact(kind="sql", content=sql)])
+    return AnsweredResponse(text=remaining or None, artifacts=artifacts)
 
 
 class MockLLMAdapter:
@@ -49,18 +54,16 @@ class MockLLMAdapter:
         self,
         llm: LLMClient,
         contract: ProductContract,
-        index: ReferenceIndex,
         product: ProductDescription,
+        reference: Reference | None,
     ) -> None:
         self._llm = llm
         self._contract = contract
-        self._index = index
         self._product = product
+        self._reference = reference
 
     async def send(self, req: ProductRequest) -> ProductResponse:
-        system, user = build_mock_product_prompt(
-            req.utterance, self._index, self._product, self._contract.sql_dialect
-        )
+        system, user = build_mock_product_prompt(req.utterance, self._product, self._reference)
         try:
             text = await self._llm.generate_text(system, user)
         except LLMProviderError as exc:

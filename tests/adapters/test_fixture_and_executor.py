@@ -26,7 +26,6 @@ from synthetic_user.models.execution import (
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.product_executor import ProductExecutor
-from synthetic_user.references.snapshot import snapshot_id_for
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,14 +40,13 @@ def _questions(scenario: Scenario, *texts: str) -> list[QuestionCase]:
                 "scenario_id": scenario.id,
                 "persona_id": scenario.persona_id,
                 "mode": "grounded",
-                "reference_snapshot_id": snapshot_id_for(scenario.id),
+                "reference_pack_id": scenario.reference_pack_id,
                 "utterance": text,
                 "intended_goal": scenario.business_goal,
                 "intent": {"task_type": "ranking"},
                 "question_characteristics": {"ambiguity_level": "low"},
                 "expectations": {
-                    "clarification": "conditional",
-                    "acceptable_behaviors": ["x"],
+                    "expected_behavior": "answers the question",
                     "success_criteria": ["answers the question"],
                 },
             }

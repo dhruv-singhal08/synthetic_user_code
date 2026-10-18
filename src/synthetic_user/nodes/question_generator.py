@@ -1,11 +1,10 @@
 """Node 3: questions per scenario (one LLM call each), for any product type.
 
-The mode is copied from each scenario. Grounded scenarios get a deterministic reference
-snapshot and the schema-leak check (index identifiers; rule from
-generation.question.reject_schema_leaks); ungrounded ones get neither
-(reference_snapshot_id None). Calls run concurrently under ``llm.max_concurrency``; results
-are assembled in scenario order so ids are stable. Question text is never edited: problems
-lead to retry or rejection.
+The mode is copied from each scenario. Grounded scenarios are linked to their Reference Pack
+(reference_pack_id) and get the leak check (identifier-like core_ref names; rule from
+generation.question.reject_reference_leaks); ungrounded ones get neither. Calls run
+concurrently under ``llm.max_concurrency``; results are assembled in scenario order so ids
+are stable. Question text is never edited: problems lead to retry or rejection.
 """
 
 from __future__ import annotations
@@ -32,19 +31,17 @@ from synthetic_user.models.base import AmbiguityLevel, StrictModel
 from synthetic_user.models.persona import ExpertiseLevel, Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
-    Expectations,
     QuestionCase,
     QuestionDraft,
     QuestionGenerationResult,
     QuestionStyle,
     RejectedQuestion,
 )
-from synthetic_user.models.reference import ReferenceIndex, ReferenceSnapshot
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
-from synthetic_user.references.schema_leak import find_schema_leaks, index_identifiers
-from synthetic_user.references.snapshot import build_snapshot, snapshot_id_for
+from synthetic_user.references.leaks import find_leaks, pack_identifiers
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
@@ -84,18 +81,18 @@ class QuestionGenerator:
         persona: Persona,
         product: ProductDescription,
         scenarios: Sequence[Scenario],
-        index: ReferenceIndex | None,
+        reference: Reference | None,
+        packs: Sequence[ReferencePack] = (),
         *,
         count: int | None = None,
     ) -> QuestionGenerationResult:
-        """``index`` is needed only for grounded scenarios (snapshot + leak check)."""
+        """``reference`` and ``packs`` are needed only for grounded scenarios."""
         per_scenario = (
             count if count is not None else self._settings.generation.question.question_count
         )
         if per_scenario < 1:
             raise ValueError("question count must be >= 1")
-        snapshots = [_snapshot(s, index) for s in scenarios]
-        identifiers = index_identifiers(index) if index is not None else []
+        groundings = [_grounding(s, reference, packs) for s in scenarios]
         semaphore = asyncio.Semaphore(self._settings.llm.max_concurrency)
         outcomes = await asyncio.gather(
             *(
@@ -103,20 +100,21 @@ class QuestionGenerator:
                     persona,
                     product,
                     s,
-                    snap,
+                    grounding,
                     per_scenario,
-                    identifiers if snap is not None else [],
+                    pack_identifiers(grounding[0]) if grounding is not None else [],
                     semaphore,
                 )
-                for s, snap in zip(scenarios, snapshots, strict=True)
+                for s, grounding in zip(scenarios, groundings, strict=True)
             )
         )
 
-        result = QuestionGenerationResult(snapshots=[s for s in snapshots if s is not None])
+        result = QuestionGenerationResult()
         seen = _NearDuplicates()
         for utterance in persona.example_utterances:
             seen.add(utterance, "persona example utterance")
-        for scenario, snapshot, outcome in zip(scenarios, snapshots, outcomes, strict=True):
+        for scenario, grounding, outcome in zip(scenarios, groundings, outcomes, strict=True):
+            identifiers = pack_identifiers(grounding[0]) if grounding is not None else []
             result.rejected.extend(outcome.rejected)
             for draft, raw in outcome.drafts:
                 duplicate_of = seen.find(draft.utterance)
@@ -134,19 +132,16 @@ class QuestionGenerator:
                     scenario_id=scenario.id,
                     persona_id=persona.id,
                     mode=scenario.mode,
-                    reference_snapshot_id=snapshot.snapshot_id if snapshot else None,
+                    reference_pack_id=scenario.reference_pack_id,
                     utterance=draft.utterance,
                     intended_goal=scenario.business_goal,
                     intent=draft.intent,
                     question_characteristics=draft.question_characteristics,
-                    expectations=_with_success_criteria(draft.expectations, scenario),
-                    interpretation_notes=draft.interpretation_notes,
-                    schema_leak_warnings=[
-                        f"mentions reference index identifier {ident!r}"
-                        for ident in find_schema_leaks(draft.utterance, identifiers)
-                    ]
-                    if snapshot is not None
-                    else [],
+                    expectations=draft.expectations,
+                    leak_warnings=[
+                        f"mentions reference name {ident!r}"
+                        for ident in find_leaks(draft.utterance, identifiers)
+                    ],
                 )
                 seen.add(draft.utterance, question.question_id)
                 result.questions.append(question)
@@ -155,7 +150,7 @@ class QuestionGenerator:
             len(result.questions),
             len(result.rejected),
             len(scenarios),
-            len(result.snapshots),
+            sum(1 for g in groundings if g is not None),
         )
         return result
 
@@ -164,15 +159,15 @@ class QuestionGenerator:
         persona: Persona,
         product: ProductDescription,
         scenario: Scenario,
-        snapshot: ReferenceSnapshot | None,
+        grounding: tuple[ReferencePack, Reference] | None,
         count: int,
         identifiers: Sequence[str],
         semaphore: asyncio.Semaphore,
     ) -> _ScenarioOutcome:
         cfg = self._settings.generation.question
         technical = persona.expertise.sql is ExpertiseLevel.HIGH
-        # Schema-leak check only in grounded mode (there are no identifiers otherwise).
-        enforce_leaks = snapshot is not None and cfg.reject_schema_leaks and not technical
+        # Leak check only in grounded mode (there are no identifiers otherwise).
+        enforce_leaks = bool(identifiers) and cfg.reject_reference_leaks and not technical
         options = QuestionPromptOptions(
             count=count,
             ambiguity_level=cfg.ambiguity_level,
@@ -180,7 +175,7 @@ class QuestionGenerator:
             allow_vague_questions=cfg.allow_vague_questions,
             technical_persona=technical,
         )
-        system, user = build_question_prompt(persona, product, scenario, snapshot, options)
+        system, user = build_question_prompt(persona, product, scenario, grounding, options)
         last: list[_RawQuestionBatch] = []
 
         def post_validate(batch: _RawQuestionBatch) -> list[str]:
@@ -188,9 +183,10 @@ class QuestionGenerator:
             if not enforce_leaks:
                 return []
             return [
-                f"question {i}: uses table/column names {leaks}; rephrase in business language"
+                f"question {i}: uses internal reference names {leaks}; rephrase in the "
+                "persona's own words"
                 for i, raw in enumerate(batch.questions, start=1)
-                if (leaks := find_schema_leaks(str(raw.get("utterance", "")), identifiers))
+                if (leaks := find_leaks(str(raw.get("utterance", "")), identifiers))
             ]
 
         async with semaphore:
@@ -240,8 +236,8 @@ class QuestionGenerator:
         except ValidationError as exc:
             return [format_validation_error(exc)]
         reasons: list[str] = []
-        if enforce_leaks and (leaks := find_schema_leaks(draft.utterance, identifiers)):
-            reasons.append(f"schema leak: {leaks}")
+        if enforce_leaks and (leaks := find_leaks(draft.utterance, identifiers)):
+            reasons.append(f"reference leak: {leaks}")
         traits = draft.question_characteristics
         if traits.style is QuestionStyle.VAGUE:
             if not self._settings.generation.question.allow_vague_questions:
@@ -281,19 +277,21 @@ def _normalise(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
 
 
-def _snapshot(scenario: Scenario, index: ReferenceIndex | None) -> ReferenceSnapshot | None:
-    """Grounded scenario -> snapshot of the index for its cheat sheet; ungrounded -> None."""
+def _grounding(
+    scenario: Scenario, reference: Reference | None, packs: Sequence[ReferencePack]
+) -> tuple[ReferencePack, Reference] | None:
+    """Grounded scenario -> (its pack, the reference); ungrounded -> None."""
     if scenario.mode == GenerationMode.UNGROUNDED:
         return None
-    if index is None or scenario.reference_cheat_sheet is None:
+    pack = next((p for p in packs if p.pack_id == scenario.reference_pack_id), None)
+    if reference is None or pack is None:
         raise ArtifactIntegrityError(
-            f"{scenario.id} is grounded but no reference index / cheat sheet is available"
+            f"{scenario.id} is grounded but its reference / reference pack "
+            f"{scenario.reference_pack_id} is not available"
         )
-    return build_snapshot(index, scenario.reference_cheat_sheet, snapshot_id_for(scenario.id))
-
-
-def _with_success_criteria(expectations: Expectations, scenario: Scenario) -> Expectations:
-    """Keep the LLM's refined success criteria; copy the scenario's when it gave none."""
-    if expectations.success_criteria:
-        return expectations
-    return expectations.model_copy(update={"success_criteria": list(scenario.success_criteria)})
+    if reference.reference_id != scenario.reference_id:
+        raise ArtifactIntegrityError(
+            f"{scenario.id} was built from reference {scenario.reference_id}, "
+            f"not {reference.reference_id}"
+        )
+    return pack, reference

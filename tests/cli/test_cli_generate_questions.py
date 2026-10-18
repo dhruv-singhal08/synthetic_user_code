@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 from synthetic_user import cli
 from synthetic_user.cli import app
 from synthetic_user.llm.fake import FakeLLMClient
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.storage.json_store import JsonArtifactStore
@@ -52,10 +52,15 @@ def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _seed_run(
-    tmp_path: Path, scenarios: list[Scenario], index: ReferenceIndex, persona_id: str
+    tmp_path: Path,
+    scenarios: list[Scenario],
+    packs: list[ReferencePack],
+    reference: Reference,
+    persona_id: str,
 ) -> None:
     store = JsonArtifactStore(tmp_path / "artifacts")
     store.write_models(run_artifact(RUN_ID, "scenarios.json"), scenarios[:2], Scenario)
+    store.write_models(run_artifact(RUN_ID, "reference_packs.json"), packs[:2], ReferencePack)
     save_run_manifest(
         store,
         RunManifest(
@@ -64,14 +69,15 @@ def _seed_run(
             persona_id=persona_id,
             product_id="sample_nl2sql",
             mode=GenerationMode.GROUNDED,
-            catalog_id="sample_card_spend",
-            catalog_version="1.0",
-            reference_index_id=index.index_id,
+            reference_id=reference.reference_id,
             llm_provider="fake",
             llm_model="fake",
             pipeline_version="0.1.0",
             effective_config={},
-            artifacts={"scenarios": "scenarios.json"},
+            artifacts={
+                "scenarios": "scenarios.json",
+                "reference_packs": "reference_packs.json",
+            },
         ),
     )
 
@@ -81,18 +87,19 @@ def _q(utterance: str) -> dict[str, Any]:
         "utterance": utterance,
         "intent": {"task_type": "ranking"},
         "question_characteristics": {"style": "precise", "ambiguity_level": "low"},
-        "expectations": {"clarification": "not_expected", "acceptable_behaviors": ["answers"]},
+        "expectations": {"expected_behavior": "answers", "success_criteria": ["answers"]},
     }
 
 
-def test_writes_snapshots_questions_and_rejections(
+def test_writes_questions_and_rejections(
     config_path: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sample_scenarios: list[Scenario],
-    sample_index: ReferenceIndex,
+    sample_packs: list[ReferencePack],
+    sample_reference: Reference,
 ) -> None:
-    _seed_run(tmp_path, sample_scenarios, sample_index, "finance_controller")
+    _seed_run(tmp_path, sample_scenarios, sample_packs, sample_reference, "finance_controller")
     responses = [
         {"questions": [_q("Who are our biggest card spenders?")]},
         {"questions": [_q("How is spend per category trending?"), _q("Extra one?")]},
@@ -107,19 +114,17 @@ def test_writes_snapshots_questions_and_rejections(
     assert "questions=2 rejected=1" in result.output
 
     run_dir = tmp_path / "artifacts" / "runs" / RUN_ID
-    snapshots = json.loads((run_dir / "snapshots.json").read_text(encoding="utf-8"))
-    assert [s["snapshot_id"] for s in snapshots] == ["SNAP_SCN_001", "SNAP_SCN_002"]
     questions = json.loads((run_dir / "questions.json").read_text(encoding="utf-8"))
-    assert [(x["question_id"], x["scenario_id"]) for x in questions] == [
-        ("Q_001", "SCN_001"),
-        ("Q_002", "SCN_002"),
+    assert [(x["question_id"], x["scenario_id"], x["reference_pack_id"]) for x in questions] == [
+        ("Q_001", "SCN_001", "RP_SCN_001"),
+        ("Q_002", "SCN_002", "RP_SCN_002"),
     ]
     rejected = json.loads((run_dir / "questions_rejected.json").read_text(encoding="utf-8"))
     assert rejected[0]["reasons"][0].startswith("surplus")
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert set(manifest["artifacts"]) == {
         "scenarios",
-        "snapshots",
+        "reference_packs",
         "questions",
         "questions_rejected",
     }
@@ -129,9 +134,10 @@ def test_inputs_must_match_run(
     config_path: Path,
     tmp_path: Path,
     sample_scenarios: list[Scenario],
-    sample_index: ReferenceIndex,
+    sample_packs: list[ReferencePack],
+    sample_reference: Reference,
 ) -> None:
-    _seed_run(tmp_path, sample_scenarios, sample_index, "someone_else")
+    _seed_run(tmp_path, sample_scenarios, sample_packs, sample_reference, "someone_else")
     result = CliRunner().invoke(
         app, ["--config", str(config_path), "generate-questions", "--run-id", RUN_ID]
     )
@@ -145,3 +151,27 @@ def test_unknown_run(config_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "Artifact not found" in result.output
+
+
+def test_changed_reference_is_refused(
+    config_path: Path,
+    tmp_path: Path,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+    sample_reference: Reference,
+) -> None:
+    _seed_run(tmp_path, sample_scenarios, sample_packs, sample_reference, "finance_controller")
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(config_path),
+            "generate-questions",
+            "--run-id",
+            RUN_ID,
+            "--reference-guide",
+            str(REPO_ROOT / "data" / "references" / "sample_travel_policy_guide.md"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "file or usage guide changed" in result.output

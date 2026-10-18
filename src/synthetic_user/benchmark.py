@@ -2,8 +2,9 @@
 
 Cases (tests/fixtures/benchmark/labeled_cases.jsonl) cover both modes (taken from each case's
 scenario) and several product types (each case names its product_id). A case states what the
-product answered (answered text and/or SQL, clarification or denial message) and the expected
-verdict.
+product answered (answered text and/or artifacts such as a query, clarification or denial
+message), what the product was expected to do, and the expected verdict. The scenarios file
+holds {"scenarios": [...], "reference_packs": [...]} (packs for the grounded scenarios).
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import TypeAdapter, ValidationError, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from synthetic_user.core.exceptions import InputAssetError, format_validation_error
 from synthetic_user.models.base import AmbiguityLevel, NonEmptyStr, StrictModel
@@ -23,20 +24,29 @@ from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
-    ClarificationExpectation,
     Expectations,
     QuestionCase,
     QuestionCharacteristics,
     QuestionIntent,
 )
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
-from synthetic_user.references.snapshot import build_snapshot, snapshot_id_for
 
 # Benchmark executions come from labeled cases, not from a product adapter.
 BENCHMARK_ADAPTER = "benchmark"
+
+
+DEFAULT_EXPECTED_BEHAVIOR = (
+    "Answer the business question correctly, or ask a relevant clarification when the question "
+    "is genuinely ambiguous; decline only what the product does not support."
+)
+
+
+class BenchmarkArtifact(StrictModel):
+    kind: NonEmptyStr
+    content: NonEmptyStr
 
 
 class BenchmarkCase(StrictModel):
@@ -44,18 +54,18 @@ class BenchmarkCase(StrictModel):
     scenario_id: NonEmptyStr
     product_id: NonEmptyStr
     question: NonEmptyStr
-    clarification_expectation: ClarificationExpectation = ClarificationExpectation.CONDITIONAL
+    expected_behavior: NonEmptyStr = DEFAULT_EXPECTED_BEHAVIOR
     outcome: Literal["answered", "clarification", "denied"]
     text: str | None = None
-    sql: str | None = None
+    artifacts: list[BenchmarkArtifact] = Field(default_factory=list)
     message: str | None = None
     label: Verdict
     rationale: NonEmptyStr
 
     @model_validator(mode="after")
     def _payload_matches_outcome(self) -> Self:
-        if self.outcome == "answered" and not (self.text or self.sql):
-            raise ValueError("text and/or sql is required for outcome answered")
+        if self.outcome == "answered" and not (self.text or self.artifacts):
+            raise ValueError("text and/or artifacts are required for outcome answered")
         if self.outcome != "answered" and not self.message:
             raise ValueError(f"message is required for outcome {self.outcome}")
         return self
@@ -63,8 +73,13 @@ class BenchmarkCase(StrictModel):
     def response(self) -> dict[str, Any]:
         if self.outcome != "answered":
             return {"outcome": self.outcome, "message": self.message}
-        artifacts = [{"kind": "sql", "content": self.sql}] if self.sql else []
+        artifacts = [a.model_dump() for a in self.artifacts]
         return {"outcome": "answered", "text": self.text, "artifacts": artifacts}
+
+
+class BenchmarkScenarios(StrictModel):
+    scenarios: list[Scenario]
+    reference_packs: list[ReferencePack] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -109,22 +124,24 @@ def load_cases(path: Path) -> list[BenchmarkCase]:
     return cases
 
 
-def load_scenarios(path: Path) -> list[Scenario]:
+def load_scenarios(path: Path) -> tuple[list[Scenario], list[ReferencePack]]:
     if not path.is_file():
         raise InputAssetError(f"Benchmark scenarios not found: {path}")
     try:
-        return TypeAdapter(list[Scenario]).validate_json(path.read_bytes())
+        data = BenchmarkScenarios.model_validate_json(path.read_bytes())
     except ValidationError as exc:
         raise InputAssetError(f"{path}: invalid scenarios: {format_validation_error(exc)}") from exc
+    return data.scenarios, data.reference_packs
 
 
 def build_evaluation_cases(
     cases: Sequence[BenchmarkCase],
     scenarios: Sequence[Scenario],
-    index: ReferenceIndex | None,
+    packs: Sequence[ReferencePack] = (),
 ) -> list[EvaluationCase]:
-    """One EvaluationCase per labeled case; grounded scenarios get a snapshot from ``index``."""
+    """One EvaluationCase per labeled case; grounded scenarios use their reference pack."""
     by_id = {s.id: s for s in scenarios}
+    pack_by_id = {p.pack_id: p for p in packs}
     started = datetime.now(UTC)
     built: list[EvaluationCase] = []
     for i, case in enumerate(cases, start=1):
@@ -136,27 +153,27 @@ def build_evaluation_cases(
                 f"{case.case_id}: product_id {case.product_id!r} differs from its scenario's "
                 f"{scenario.product_id!r}"
             )
-        snapshot = None
-        if scenario.reference_cheat_sheet is not None:
-            if index is None:
-                raise InputAssetError(f"{case.case_id}: grounded case needs a reference index")
-            snapshot = build_snapshot(
-                index, scenario.reference_cheat_sheet, snapshot_id_for(scenario.id)
-            )
+        pack = None
+        if scenario.reference_pack_id is not None:
+            pack = pack_by_id.get(scenario.reference_pack_id)
+            if pack is None:
+                raise InputAssetError(
+                    f"{case.case_id}: grounded scenario {scenario.id} has no reference pack "
+                    f"{scenario.reference_pack_id} in the scenarios file"
+                )
         question = QuestionCase(
             question_id=f"Q_{i:03d}",
             scenario_id=scenario.id,
             persona_id=scenario.persona_id,
             mode=scenario.mode,
-            reference_snapshot_id=snapshot.snapshot_id if snapshot else None,
+            reference_pack_id=scenario.reference_pack_id,
             utterance=case.question,
             intended_goal=scenario.business_goal,
             intent=QuestionIntent(task_type=scenario.task_type),
             question_characteristics=QuestionCharacteristics(ambiguity_level=AmbiguityLevel.MEDIUM),
             expectations=Expectations(
-                clarification=case.clarification_expectation,
-                acceptable_behaviors=["answers the business question correctly"],
-                success_criteria=list(scenario.success_criteria),
+                expected_behavior=case.expected_behavior,
+                success_criteria=list(scenario.success_criteria)[:4],
             ),
         )
         execution = ExecutionRecord.model_validate(
@@ -170,7 +187,7 @@ def build_evaluation_cases(
                 "response": case.response(),
             }
         )
-        built.append(EvaluationCase(question, scenario, snapshot, execution))
+        built.append(EvaluationCase(question, scenario, pack, execution))
     return built
 
 
@@ -178,7 +195,7 @@ async def run_benchmark(
     evaluator: Evaluator,
     cases: Sequence[BenchmarkCase],
     scenarios: Sequence[Scenario],
-    index: ReferenceIndex | None,
+    packs: Sequence[ReferencePack],
     products: Mapping[str, ProductDescription],
     persona: Persona,
 ) -> BenchmarkReport:
@@ -186,7 +203,7 @@ async def run_benchmark(
     missing = sorted({c.product_id for c in cases} - set(products))
     if missing:
         raise InputAssetError(f"No product description loaded for product_id(s) {missing}")
-    evaluation_cases = build_evaluation_cases(cases, scenarios, index)
+    evaluation_cases = build_evaluation_cases(cases, scenarios, packs)
     verdicts: dict[str, Verdict | None] = {}
     for product_id, product in products.items():
         selected = [

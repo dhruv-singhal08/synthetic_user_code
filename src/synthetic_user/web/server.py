@@ -36,10 +36,12 @@ from synthetic_user.core.identifiers import RUN_ID_PATTERN
 from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
+from synthetic_user.models.reference import ReferencePackDraft
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.web.workspace import (
-    INPUT_KINDS,
+    GUIDE,
+    REFERENCE,
     RESULTS_CSV,
     ProductConnection,
     Upload,
@@ -49,7 +51,7 @@ from synthetic_user.web.workspace import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 CONTRACT_TEMPLATE = STATIC_DIR / "product_contract_template.yaml"
-# UI steps run in order (D115); scenarios runs the index check itself.
+# UI steps run in order (D115); scenarios runs the reference check itself.
 _PREREQUISITE = {
     Step.QUESTIONS: Step.SCENARIOS,
     Step.EXECUTE: Step.QUESTIONS,
@@ -101,7 +103,7 @@ def create_app(
             "llm_provider": settings.llm.provider,
             "llm_model": settings.llm.model,
             "product_adapter": settings.product_adapter.type,
-            "sql_dialect": settings.sql.dialect,
+            "reference_max_chars": settings.reference.max_chars,
             "scenario_count": settings.generation.scenario.scenario_count,
             "question_count": settings.generation.question.question_count,
             "steps": [s.value for s in Step],
@@ -109,9 +111,8 @@ def create_app(
 
     @app.get("/api/samples")
     async def samples() -> dict[str, Any]:
-        """Only the persona has a sample; product description and reference index are
-        upload-only."""
-        result: dict[str, Any] = dict.fromkeys(INPUT_KINDS)
+        """Only the persona has a sample; product description and reference are upload-only."""
+        result: dict[str, Any] = dict.fromkeys(("persona", "product", REFERENCE, GUIDE))
         sample = workspace.sample("persona")
         if sample is not None:
             text, model = sample
@@ -121,8 +122,9 @@ def create_app(
     @app.post("/api/preview/{kind}")
     async def preview(kind: str, file: Annotated[UploadFile, File()]) -> dict[str, Any]:
         upload = Upload(file.filename or kind, await file.read())
-        model = parse_upload(kind, upload)
-        return {"raw": upload.content.decode("utf-8"), "parsed": model.model_dump(mode="json")}
+        model = parse_upload(kind, upload, max_chars=settings.reference.max_chars)
+        parsed = model.model_dump(mode="json", exclude={"text"} if kind == REFERENCE else None)
+        return {"raw": upload.content.decode("utf-8-sig"), "parsed": parsed}
 
     @app.get("/api/contract-template", response_class=PlainTextResponse)
     async def contract_template() -> PlainTextResponse:
@@ -138,20 +140,20 @@ def create_app(
     async def create_run(
         persona: Annotated[UploadFile | None, File()] = None,
         product: Annotated[UploadFile | None, File()] = None,
-        reference_index: Annotated[UploadFile | None, File()] = None,
+        reference: Annotated[UploadFile | None, File()] = None,
+        reference_guide: Annotated[UploadFile | None, File()] = None,
         persona_queries: Annotated[str, Form()] = "",
-        use_reference_index: Annotated[bool, Form()] = False,
+        use_reference: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
         uploads: dict[str, Upload | None] = {}
         for kind, file in (
             ("persona", persona),
             ("product", product),
-            ("reference_index", reference_index),
+            (REFERENCE, reference),
+            (GUIDE, reference_guide),
         ):
             uploads[kind] = Upload(file.filename or kind, await file.read()) if file else None
-        state = workspace.create_run(
-            uploads, persona_queries, use_reference_index=use_reference_index
-        )
+        state = workspace.create_run(uploads, persona_queries, use_reference=use_reference)
         return {"state": state.model_dump(mode="json"), **workspace.results(state.run_id)}
 
     @app.get("/api/runs/{run_id}")
@@ -183,7 +185,7 @@ def create_app(
         """MOCK contract from a URL (D113): questions go to the LLM mock product."""
         state = workspace.state(check_run_id(run_id))
         inputs = workspace.load_inputs(run_id)
-        contract = request_contract(body.url, inputs.product.product_id, settings.sql.dialect)
+        contract = request_contract(body.url, inputs.product.product_id)
         state = state.model_copy(update={"contract": contract, "connection": None})
         workspace.save_state(state)
         return {
@@ -218,18 +220,18 @@ def create_app(
         )
         detail: dict[str, Any] = {}
 
-        if step in (Step.INDEX, Step.SCENARIOS):
-            # The index check (no LLM) runs automatically before scenarios.
-            index_step = pipeline.check_reference_index(inputs)
-            index_id = index_step.index.versioned_id if index_step.index else None
+        if step in (Step.REFERENCE, Step.SCENARIOS):
+            # The reference check (no LLM) runs automatically before scenarios.
+            reference_step = pipeline.check_reference(inputs)
+            reference = reference_step.reference
             state = workspace.mark_done(
-                state.model_copy(update={"reference_index_id": index_id}), Step.INDEX
+                state.model_copy(update={"reference_id": inputs.reference_id}), Step.REFERENCE
             )
             detail = {
-                "mode": index_step.mode.value,
-                "reference_index_id": index_id,
-                "tables": len(index_step.index.tables) if index_step.index else 0,
-                "warnings": index_step.warnings,
+                "mode": reference_step.mode.value,
+                "reference_id": inputs.reference_id,
+                "reference_chars": len(reference.text) if reference else 0,
+                "warnings": reference_step.warnings,
             }
         if step is Step.SCENARIOS:
             scenario_step = await pipeline.generate_scenarios(
@@ -239,6 +241,7 @@ def create_app(
                 **detail,
                 "accepted": len(scenario_step.accepted),
                 "rejected": len(scenario_step.rejected),
+                "reference_packs": len(scenario_step.packs),
             }
         elif step is Step.QUESTIONS:
             question_step = await pipeline.generate_questions(
@@ -272,6 +275,31 @@ def create_app(
             **workspace.results(run_id),
         }
 
+    @app.put("/api/runs/{run_id}/reference_packs/{pack_id}")
+    async def edit_reference_pack(
+        run_id: str, pack_id: str, body: ReferencePackDraft
+    ) -> dict[str, Any]:
+        """A person's edit of one Reference Pack (quotes re-checked against the reference).
+        Saving makes questions, execute and evaluate stale: they must be run again."""
+        state = workspace.state(check_run_id(run_id))
+        if Step.SCENARIOS not in state.steps_done:
+            raise ConfigError("Run the 'scenarios' step before editing reference packs")
+        inputs = workspace.load_inputs(run_id)
+        pipeline = SyntheticUserPipeline(
+            settings,
+            create_llm_client(settings),
+            UnavailableAdapter(),
+            store,
+            logger=get_run_logger("synthetic_user.web", run_id),
+        )
+        pack = pipeline.update_reference_pack(run_id, inputs, pack_id, body)
+        state = workspace.mark_done(state, Step.SCENARIOS)
+        return {
+            "state": state.model_dump(mode="json"),
+            "pack": pack.model_dump(mode="json"),
+            **workspace.results(run_id),
+        }
+
     # --- downloads -----------------------------------------------------------------------
 
     @app.get("/api/runs/{run_id}/results.csv")
@@ -302,9 +330,7 @@ def _product_adapter(
     if connection is not None:
         return HttpJsonAdapter(connection, env=env, transport=transport)
     if contract is not None:
-        if inputs.reference_index is None:
-            raise ConfigError("The mock product needs a reference index (its database schema)")
-        return MockLLMAdapter(llm, contract, inputs.reference_index, inputs.product)
+        return MockLLMAdapter(llm, contract, inputs.product, inputs.reference)
     return create_adapter(settings)
 
 

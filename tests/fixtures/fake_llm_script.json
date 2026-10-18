@@ -2,21 +2,21 @@
   "rules": [
     {
       "contains": [
-        "MOCK NL2SQL product",
+        "MOCK of the conversational product",
         "top 10 card spenders"
       ],
       "response": "```sql\nSELECT e.full_name, c.currency_code, SUM(c.amount) AS total_spend\nFROM card_transactions AS c\nJOIN employees AS e ON c.merchant_id = e.employee_id\nGROUP BY e.full_name, c.currency_code\nORDER BY total_spend DESC\nLIMIT 10\n```"
     },
     {
       "contains": [
-        "MOCK NL2SQL product",
+        "MOCK of the conversational product",
         "monthly card spend"
       ],
       "response": "CLARIFY: Should amounts be shown per currency, or converted to one currency?"
     },
     {
       "contains": [
-        "MOCK NL2SQL product",
+        "MOCK of the conversational product",
         "forecast"
       ],
       "response": "DENIED: Forecasting is not supported yet."
@@ -84,53 +84,34 @@
               "keeps amounts separate per currency or states which currency is used",
               "covers the requested time period"
             ],
-            "reference_cheat_sheet": {
-              "tables": [
-                "card_transactions",
-                "employees"
-              ],
-              "columns": [
-                "card_transactions.amount",
-                "card_transactions.currency_code",
-                "employees.full_name"
-              ],
-              "relationships": [
-                {
-                  "source": "card_transactions.employee_id",
-                  "target": "employees.employee_id",
-                  "verification": "verified"
-                }
-              ],
-              "metrics": [
-                {
-                  "name": "total_spend",
-                  "definition": "sum of amount within one currency",
-                  "columns": [
-                    "card_transactions.amount"
-                  ]
-                }
-              ],
-              "dimensions": [
-                "employees.full_name",
-                "card_transactions.currency_code"
-              ],
-              "operations": [
-                "join",
-                "group by",
-                "sum",
-                "order by desc",
-                "limit"
-              ],
-              "optional_filters": [
-                "transaction_date range"
-              ],
-              "semantic_considerations": [
-                "amounts are in mixed currencies"
-              ]
-            },
             "question_guidance": {
               "intent": "rank employees by total card spend",
               "expected_ambiguity": "medium"
+            },
+            "reference_pack": {
+              "core_refs": [
+                {
+                  "name": "card_transactions.amount",
+                  "quote": "Transaction amount in the transaction currency (see currency_code).",
+                  "why": "spend is the sum of amount"
+                },
+                {
+                  "name": "card_transactions.currency_code",
+                  "quote": "ISO 4217 currency of amount.",
+                  "why": "amounts must stay per currency"
+                },
+                {
+                  "name": "employees.full_name",
+                  "quote": "Employee full name.",
+                  "why": "the ranking is by employee"
+                }
+              ],
+              "rules": [
+                {
+                  "rule": "never sum amounts across currencies",
+                  "quote": "Amounts in different currency_code values must not be summed directly."
+                }
+              ]
             }
           },
           {
@@ -143,34 +124,28 @@
               "shows card spend per merchant category for each month",
               "covers the requested period"
             ],
-            "reference_cheat_sheet": {
-              "tables": [
-                "card_transactions"
-              ],
-              "columns": [
-                "card_transactions.amount",
-                "card_transactions.transaction_date",
-                "card_transactions.merchant_category"
-              ],
-              "metrics": [
-                {
-                  "name": "total_spend",
-                  "definition": "sum of amount per month",
-                  "columns": [
-                    "card_transactions.amount"
-                  ]
-                }
-              ],
-              "dimensions": [
-                "card_transactions.merchant_category"
-              ],
-              "operations": [
-                "group by month",
-                "sum"
-              ]
-            },
             "question_guidance": {
               "intent": "monthly spend trend by category"
+            },
+            "reference_pack": {
+              "core_refs": [
+                {
+                  "name": "card_transactions.amount",
+                  "quote": "Transaction amount in the transaction currency (see currency_code).",
+                  "why": "spend is the sum of amount"
+                },
+                {
+                  "name": "card_transactions.transaction_date",
+                  "quote": "Date the transaction posted.",
+                  "why": "months come from the posting date"
+                },
+                {
+                  "name": "card_transactions.merchant_category",
+                  "quote": "Merchant category as reported on the transaction.",
+                  "why": "the trend is per category"
+                }
+              ],
+              "rules": []
             }
           },
           {
@@ -183,32 +158,18 @@
               "states clearly whether a forecast can be produced",
               "does not present invented future figures as facts"
             ],
-            "reference_cheat_sheet": {
-              "tables": [
-                "card_transactions"
-              ],
-              "columns": [
-                "card_transactions.amount",
-                "card_transactions.transaction_date"
-              ],
-              "metrics": [
-                {
-                  "name": "projected_spend",
-                  "definition": "future spend projection",
-                  "columns": [
-                    "card_transactions.amount"
-                  ]
-                }
-              ],
-              "dimensions": [
-                "card_transactions.transaction_date"
-              ],
-              "operations": [
-                "forecast"
-              ]
-            },
             "question_guidance": {
               "intent": "forecast spend"
+            },
+            "reference_pack": {
+              "core_refs": [
+                {
+                  "name": "card_transactions",
+                  "quote": "Corporate card spend, one row per transaction",
+                  "why": "history a forecast would start from"
+                }
+              ],
+              "rules": []
             }
           }
         ]
@@ -234,17 +195,16 @@
               "ambiguity_level": "low"
             },
             "expectations": {
-              "clarification": "conditional",
-              "acceptable_behaviors": [
-                "answers the question, handling currencies explicitly"
+              "expected_behavior": "Return the top 10 employees by total card spend for the last three months, keeping amounts separate per currency. Asking which currency to use is reasonable; refusing is not.",
+              "success_criteria": [
+                "names the employees ranked by total card spend",
+                "keeps amounts separate per currency or states which currency is used",
+                "covers the requested time period"
               ],
-              "unacceptable_behaviors": [
-                "sums amounts across currencies silently"
+              "acceptable_variations": [
+                "returns more than the requested columns"
               ]
-            },
-            "interpretation_notes": [
-              "card spend may need a currency choice"
-            ]
+            }
           }
         ]
       }
@@ -269,17 +229,15 @@
               "ambiguity_level": "low"
             },
             "expectations": {
-              "clarification": "conditional",
-              "acceptable_behaviors": [
-                "answers the question, handling currencies explicitly"
+              "expected_behavior": "Show card spend per merchant category for each month of this year, or ask which currency to report in.",
+              "success_criteria": [
+                "shows card spend per merchant category for each month",
+                "covers the requested period"
               ],
-              "unacceptable_behaviors": [
-                "sums amounts across currencies silently"
+              "acceptable_variations": [
+                "asks which currency to use"
               ]
-            },
-            "interpretation_notes": [
-              "card spend may need a currency choice"
-            ]
+            }
           }
         ]
       }
@@ -304,39 +262,15 @@
               "ambiguity_level": "low"
             },
             "expectations": {
-              "clarification": "not_expected",
-              "acceptable_behaviors": [
-                "answers the question, handling currencies explicitly"
+              "expected_behavior": "Say that forecasting is not supported yet; do not invent future figures.",
+              "success_criteria": [
+                "states clearly whether a forecast can be produced",
+                "does not present invented future figures as facts"
               ],
-              "unacceptable_behaviors": [
-                "sums amounts across currencies silently"
-              ]
-            },
-            "interpretation_notes": [
-              "card spend may need a currency choice"
-            ]
+              "acceptable_variations": []
+            }
           }
         ]
-      }
-    },
-    {
-      "contains": [
-        "You review SQL produced"
-      ],
-      "response": {
-        "checks": {
-          "intent_alignment": "pass",
-          "table_selection": "pass",
-          "column_selection": "pass",
-          "join_correctness": "pass",
-          "filter_correctness": "pass",
-          "aggregation_correctness": "pass",
-          "sql_syntax": "pass",
-          "semantic_considerations": "pass"
-        },
-        "findings": [],
-        "cheat_sheet_conflicts": [],
-        "verdict": "pass"
       }
     },
     {
@@ -356,12 +290,13 @@
               "ambiguity_level": "low"
             },
             "expectations": {
-              "clarification": "not_expected",
-              "acceptable_behaviors": [
-                "states the nightly limit for Paris"
-              ]
-            },
-            "interpretation_notes": []
+              "expected_behavior": "State the nightly hotel limit that applies in Paris and whether taxes are included.",
+              "success_criteria": [
+                "states the nightly hotel limit that applies",
+                "says whether taxes are included"
+              ],
+              "acceptable_variations": []
+            }
           }
         ]
       }
@@ -383,12 +318,13 @@
               "ambiguity_level": "low"
             },
             "expectations": {
-              "clarification": "not_expected",
-              "acceptable_behaviors": [
-                "says it cannot approve reports and where to do it"
-              ]
-            },
-            "interpretation_notes": []
+              "expected_behavior": "Decline: the assistant cannot approve reports; say where approval is done.",
+              "success_criteria": [
+                "says clearly that it cannot approve reports",
+                "explains where approval is done"
+              ],
+              "acceptable_variations": []
+            }
           }
         ]
       }
@@ -441,8 +377,23 @@
           "status": "pass",
           "rationale": "Nothing fabricated is presented as certain."
         },
-        "findings": [],
-        "overall_verdict": "pass"
+        "findings": [
+          {
+            "category": "reference_alignment",
+            "description": "Joins card_transactions to employees on merchant_id, so spend is attributed to the wrong people.",
+            "expected_behavior": "join on card_transactions.employee_id = employees.employee_id",
+            "observed_behavior": "JOIN ... ON c.merchant_id = e.employee_id",
+            "evidence": "c.merchant_id = e.employee_id",
+            "severity": "high",
+            "evidence_status": "supported"
+          }
+        ],
+        "overall_verdict": "fail",
+        "reference_alignment": {
+          "status": "fail",
+          "rationale": "Joins employees on merchant_id instead of the employee_id key the reference defines.",
+          "evidence": "c.merchant_id = e.employee_id"
+        }
       }
     },
     {
@@ -483,7 +434,11 @@
           "rationale": "No claims made."
         },
         "findings": [],
-        "overall_verdict": "pass"
+        "overall_verdict": "pass",
+        "reference_alignment": {
+          "status": "not_applicable",
+          "rationale": "nothing answered yet"
+        }
       }
     },
     {
@@ -519,7 +474,11 @@
           "rationale": "not applicable to this outcome"
         },
         "findings": [],
-        "overall_verdict": "pass"
+        "overall_verdict": "pass",
+        "reference_alignment": {
+          "status": "not_applicable",
+          "rationale": "nothing answered yet"
+        }
       }
     },
     {

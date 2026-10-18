@@ -15,18 +15,18 @@ from synthetic_user.adapters.fixture import FixtureAdapter
 from synthetic_user.adapters.registry import create_adapter
 from synthetic_user.cli import app
 from synthetic_user.core.config import AppConfig, load_config
-from synthetic_user.core.exceptions import ArtifactIntegrityError
+from synthetic_user.core.exceptions import ArtifactIntegrityError, InputAssetError
 from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.scripted import ScriptedLLMClient
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
-from synthetic_user.models.reference import ReferenceSnapshot
+from synthetic_user.models.reference import CoreRef, ReferencePack, ReferencePackDraft
 from synthetic_user.models.run import RunManifest
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline, validate_run
-from synthetic_user.references.loader import load_reference_index
+from synthetic_user.references.loader import load_reference
 from synthetic_user.storage.json_store import JsonArtifactStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +59,7 @@ def fake_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data["inputs"] = {
         k: ([str(REPO_ROOT / x) for x in v] if isinstance(v, list) else str(REPO_ROOT / v))
         for k, v in data["inputs"].items()
+        if v is not None
     }
     data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
     path = tmp_path / "app.fake.yaml"
@@ -76,7 +77,11 @@ def inputs(settings: AppConfig) -> RunInputs:
     return RunInputs(
         persona=load_persona(settings.inputs.persona_path),
         product=load_product(settings.inputs.product_path),
-        reference_index=load_reference_index(settings.inputs.reference_index_file),
+        reference=load_reference(
+            settings.inputs.reference_file,
+            max_chars=settings.reference.max_chars,
+            guide_path=settings.inputs.reference_guide_file,
+        ),
     )
 
 
@@ -111,7 +116,7 @@ async def test_full_run_files_types_refs_and_outcomes(
     # all files exist and load typed
     scenarios = _load(run_dir, "scenarios.json", TypeAdapter(list[Scenario]))
     _load(run_dir, "scenarios_rejected.json", TypeAdapter(list[RejectedScenario]))
-    snapshots = _load(run_dir, "snapshots.json", TypeAdapter(list[ReferenceSnapshot]))
+    packs = _load(run_dir, "reference_packs.json", TypeAdapter(list[ReferencePack]))
     questions = _load(run_dir, "questions.json", TypeAdapter(list[QuestionCase]))
     _load(run_dir, "questions_rejected.json", TypeAdapter(list[RejectedQuestion]))
     executions = _load(run_dir, "executions.json", TypeAdapter(list[ExecutionRecord]))
@@ -121,20 +126,23 @@ async def test_full_run_files_types_refs_and_outcomes(
     assert set(manifest.artifacts.values()) == {p.name for p in run_dir.iterdir()} - {
         "manifest.json"
     }
-    assert manifest.reference_index_id == summary.reference_index_id
+    assert manifest.reference_id == summary.reference_id == inputs.reference_id
+    assert [p.pack_id for p in packs] == [s.reference_pack_id for s in scenarios]
 
     # cross-references valid
     validate_run(
         scenarios=scenarios,
-        snapshots=snapshots,
+        packs=packs,
         questions=questions,
         executions=executions,
         evaluations=evaluations,
     )
 
-    # >=1 fail with bug, 1 clarification evaluation, the justified denial passes (C10)
+    # the wrong join fails reference_alignment with a bug, 1 clarification evaluation, the
+    # justified denial passes
     failed = [e for e in evaluations if e.verdict == "fail"]
     assert failed and all(e.bug_candidates for e in failed)
+    assert [f.category for e in failed for f in e.findings] == ["reference_alignment"]
     assert len([e for e in evaluations if e.clarification_evaluation is not None]) == 1
     denied = [e for e in evaluations if e.product_outcome == "denied"]
     assert [(e.verdict, e.evaluation_status) for e in denied] == [("pass", "evaluated")]
@@ -167,7 +175,7 @@ async def test_from_step_regenerates_downstream_only(
     summary = await pipeline2.run(inputs, run_id=RUN_ID, from_step=Step.EXECUTE)
     assert summary.steps_run == [Step.EXECUTE, Step.EVALUATE]
     assert len(product2.asked) == 3
-    assert all("You review SQL" in c.system or "You judge" in c.system for c in llm2.calls)
+    assert llm2.calls and all("You evaluate how well" in c.system for c in llm2.calls)
 
 
 async def test_force_step_cascades(settings: AppConfig, inputs: RunInputs) -> None:
@@ -221,11 +229,11 @@ def test_cli_run_offline(fake_config: Path) -> None:
 
 
 def test_cli_step_by_step_offline(fake_config: Path, settings: AppConfig) -> None:
-    index_file = settings.inputs.reference_index_file
+    reference_file = settings.inputs.reference_file
     runner = CliRunner()
     base = ["--config", str(fake_config), "--log-level", "WARNING"]
     for args in (
-        ["validate-index", "--reference-index", str(index_file)],
+        ["check-reference", "--reference", str(reference_file)],
         ["generate-scenarios", "--run-id", RUN_ID],
         ["generate-questions", "--run-id", RUN_ID],
         ["execute", "--run-id", RUN_ID],
@@ -248,9 +256,9 @@ def test_config_option_after_command(fake_config: Path) -> None:
     assert "bug_candidates=1" in result.output
 
 
-async def test_ungrounded_questions_and_execute_without_snapshots(settings: AppConfig) -> None:
-    """C06/C08: ungrounded runs get questions (no snapshots.json), executions and evaluations
-    without plugins."""
+async def test_ungrounded_run_has_no_reference_packs(settings: AppConfig) -> None:
+    """Ungrounded runs get scenarios without packs (no reference_packs.json), questions,
+    executions and evaluations without reference_alignment."""
     inputs = RunInputs(
         persona=load_persona(settings.inputs.persona_path),
         product=load_product(REPO_ROOT / "data" / "products" / "sample_chatbot.yaml"),
@@ -259,23 +267,21 @@ async def test_ungrounded_questions_and_execute_without_snapshots(settings: AppC
     scenarios = await pipeline.generate_scenarios(RUN_ID, inputs, count=2, force=True)
     assert [s.mode for s in scenarios.accepted] == ["ungrounded", "ungrounded"]
     questions = await pipeline.generate_questions(RUN_ID, inputs, force=True)
-    assert len(questions.questions) == 2 and questions.snapshots == []
-    assert all(
-        q.mode == "ungrounded" and q.reference_snapshot_id is None for q in questions.questions
-    )
+    assert len(questions.questions) == 2 and not scenarios.packs
+    assert all(q.mode == "ungrounded" and q.reference_pack_id is None for q in questions.questions)
     run_dir = Path(settings.paths.artifacts_dir) / "runs" / RUN_ID
-    assert not (run_dir / "snapshots.json").exists()
+    assert not (run_dir / "reference_packs.json").exists()
     manifest = RunManifest.model_validate_json((run_dir / "manifest.json").read_bytes())
-    assert "snapshots" not in manifest.artifacts and manifest.mode == "ungrounded"
+    assert "reference_packs" not in manifest.artifacts and manifest.mode == "ungrounded"
 
-    again = await pipeline.generate_questions(RUN_ID, inputs)  # reused without snapshots.json
+    again = await pipeline.generate_questions(RUN_ID, inputs)  # reused without packs
     assert again.reused and len(again.questions) == 2
     executed = await pipeline.execute_questions(RUN_ID, inputs, force=True)
     assert len(executed.executions) == 2
     evaluated = await pipeline.evaluate_executions(RUN_ID, inputs, force=True)
     # the offline nl2sql fixture has no answers for chatbot questions -> error, recorded only
     assert [e.evaluation_status for e in evaluated.evaluations] == ["recorded_only"] * 2
-    assert all(e.mode == "ungrounded" and not e.plugins_applied for e in evaluated.evaluations)
+    assert all(e.mode == "ungrounded" for e in evaluated.evaluations)
 
 
 def test_cli_export_fixture_template_then_execute_with_it(
@@ -283,7 +289,7 @@ def test_cli_export_fixture_template_then_execute_with_it(
 ) -> None:
     """C07: testers paste real answers into the exported template for any product."""
     data = yaml.safe_load(fake_config.read_text(encoding="utf-8"))
-    del data["inputs"]["reference_index_file"]
+    del data["inputs"]["reference_file"], data["inputs"]["reference_guide_file"]
     data["inputs"]["product_path"] = str(REPO_ROOT / "data/products/sample_chatbot.yaml")
     config = tmp_path / "chatbot.yaml"
     config.write_text(yaml.safe_dump(data), encoding="utf-8")
@@ -314,3 +320,32 @@ def test_cli_export_fixture_template_then_execute_with_it(
     )
     assert result.exit_code == 0, result.output
     assert "answered=1 clarification=0 denied=1" in result.output
+
+
+async def test_pack_edit_invalidates_later_steps(settings: AppConfig, inputs: RunInputs) -> None:
+    pipeline, _, _ = _pipeline(settings)
+    summary = await pipeline.run(inputs, run_id=RUN_ID)
+    run_dir = Path(summary.run_dir)
+    draft = ReferencePackDraft(
+        core_refs=[CoreRef(name="employees.full_name", quote="Employee full name.", why="ranking")]
+    )
+    edited = pipeline.update_reference_pack(RUN_ID, inputs, "RP_SCN_001", draft)
+    assert edited.edited and [r.name for r in edited.core_refs] == ["employees.full_name"]
+    packs = TypeAdapter(list[ReferencePack]).validate_json(
+        (run_dir / "reference_packs.json").read_bytes()
+    )
+    assert packs[0] == edited and not packs[1].edited
+    for stale in ("questions.json", "executions.json", "evaluations.json"):
+        assert not (run_dir / stale).exists()
+    with pytest.raises(InputAssetError, match="quote not found"):
+        pipeline.update_reference_pack(
+            RUN_ID,
+            inputs,
+            "RP_SCN_002",
+            ReferencePackDraft(core_refs=[CoreRef(name="x", quote="not in the file", why="y")]),
+        )
+    # the next run regenerates questions and later steps from the edited pack
+    pipeline2, llm2, _ = _pipeline(settings)
+    again = await pipeline2.run(inputs, run_id=RUN_ID)
+    assert again.steps_run == [Step.QUESTIONS, Step.EXECUTE, Step.EVALUATE]
+    assert "Employee full name." in llm2.calls[0].user

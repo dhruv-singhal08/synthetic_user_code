@@ -13,12 +13,11 @@ from synthetic_user.models.base import AmbiguityLevel
 from synthetic_user.models.persona import ExpertiseLevel, Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionGenerationResult
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario, TaskType
 from synthetic_user.nodes.question_generator import SURPLUS, VAGUE_NOT_ALLOWED, QuestionGenerator
 from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
-from synthetic_user.references.snapshot import build_snapshot
 
 
 def q(
@@ -29,11 +28,10 @@ def q(
         "intent": {"task_type": "ranking", "metrics": ["spend"]},
         "question_characteristics": {"style": style, "ambiguity_level": ambiguity},
         "expectations": {
-            "clarification": "conditional",
-            "acceptable_behaviors": ["asks which currency to use"],
-            "unacceptable_behaviors": ["sums across currencies silently"],
+            "expected_behavior": "Rank the top spenders, keeping currencies separate.",
+            "success_criteria": ["names the top spenders", "does not mix currencies"],
+            "acceptable_variations": ["asks which currency to use", "gross or net spend"],
         },
-        "interpretation_notes": ["spend could mean gross or net"],
         **extra,
     }
 
@@ -59,11 +57,12 @@ class Env:
         persona: Persona,
         product: ProductDescription,
         scenarios: list[Scenario],
-        index: ReferenceIndex,
+        reference: Reference,
+        packs: list[ReferencePack],
         settings: AppConfig,
     ) -> None:
         self.persona, self.product, self.scenarios = persona, product, scenarios
-        self.index, self.settings = index, settings
+        self.reference, self.packs, self.settings = reference, packs, settings
 
     async def run(
         self,
@@ -84,7 +83,8 @@ class Env:
             persona or self.persona,
             self.product,
             self.scenarios[:scenarios],
-            self.index,
+            self.reference,
+            self.packs,
             count=count,
         )
 
@@ -94,10 +94,18 @@ def env(
     sample_persona: Persona,
     sample_product: ProductDescription,
     sample_scenarios: list[Scenario],
-    sample_index: ReferenceIndex,
+    sample_reference: Reference,
+    sample_packs: list[ReferencePack],
     app_config: AppConfig,
 ) -> Env:
-    return Env(sample_persona, sample_product, sample_scenarios, sample_index, app_config)
+    return Env(
+        sample_persona,
+        sample_product,
+        sample_scenarios,
+        sample_reference,
+        sample_packs,
+        app_config,
+    )
 
 
 # --- ids and goal ---------------------------------------------------------------------------
@@ -120,13 +128,9 @@ async def test_ids_and_goal_set_by_code(env: Env) -> None:
     assert [x.question_id for x in result.questions] == ["Q_001", "Q_002", "Q_003", "Q_004"]
     assert [x.scenario_id for x in result.questions] == ["SCN_001", "SCN_001", "SCN_002", "SCN_002"]
     assert {x.persona_id for x in result.questions} == {"finance_controller"}
-    assert [x.reference_snapshot_id for x in result.questions[::2]] == [
-        "SNAP_SCN_001",
-        "SNAP_SCN_002",
-    ]
+    assert [x.reference_pack_id for x in result.questions[::2]] == ["RP_SCN_001", "RP_SCN_002"]
     assert result.questions[0].intended_goal == env.scenarios[0].business_goal
     assert result.questions[2].intended_goal == env.scenarios[1].business_goal
-    assert [s.snapshot_id for s in result.snapshots] == ["SNAP_SCN_001", "SNAP_SCN_002"]
     assert not result.rejected
     assert {x.mode for x in result.questions} == {"grounded"}
 
@@ -158,7 +162,7 @@ async def test_stable_order_under_concurrency(env: Env) -> None:
     assert [x.question_id for x in result.questions] == ["Q_001", "Q_002", "Q_003"]
 
 
-# --- schema leaks -----------------------------------------------------------------------------
+# --- reference leaks -----------------------------------------------------------------------------
 
 
 async def test_leak_retried_then_clean_passes(env: Env) -> None:
@@ -170,7 +174,7 @@ async def test_leak_retried_then_clean_passes(env: Env) -> None:
     )
     result = await env.run(llm, count=1)
     assert [x.utterance for x in result.questions] == ["Who are our top 5 card spenders?"]
-    assert result.questions[0].schema_leak_warnings == []
+    assert result.questions[0].leak_warnings == []
     assert len(llm.calls) == 2
     assert "card_transactions" in llm.calls[1].user.split("previous output invalid:", 1)[1]
 
@@ -182,25 +186,23 @@ async def test_persistent_leak_rejected_text_unchanged(env: Env) -> None:
     assert len(llm.calls) == 3
     assert [x.utterance for x in result.questions] == ["Who spends the most on cards?"]
     assert result.rejected[0].payload["utterance"] == leaky
-    assert result.rejected[0].reasons == ["schema leak: ['card_transactions']"]
+    assert result.rejected[0].reasons == ["reference leak: ['card_transactions']"]
 
 
 async def test_leak_kept_as_warning_when_not_rejecting(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Spend per currency_code last month?"))])
-    result = await env.run(llm, count=1, reject_schema_leaks=False)
-    assert result.questions[0].schema_leak_warnings == [
-        "mentions reference index identifier 'currency_code'"
-    ]
+    result = await env.run(llm, count=1, reject_reference_leaks=False)
+    assert result.questions[0].leak_warnings == ["mentions reference name 'currency_code'"]
     assert len(llm.calls) == 1
 
 
 async def test_highly_technical_persona_may_use_identifiers(env: Env) -> None:
     expertise = env.persona.expertise.model_copy(update={"sql": ExpertiseLevel.HIGH})
     technical = env.persona.model_copy(update={"expertise": expertise})
-    llm = FakeLLMClient([batch(q("Sum amount from card_transactions by employee_id"))])
+    llm = FakeLLMClient([batch(q("Sum amount from card_transactions by full_name"))])
     result = await env.run(llm, count=1, persona=technical)
     assert len(llm.calls) == 1
-    assert len(result.questions[0].schema_leak_warnings) == 2
+    assert len(result.questions[0].leak_warnings) == 2
 
 
 # --- vague / ambiguity ------------------------------------------------------------------------
@@ -289,22 +291,21 @@ async def test_bad_json_records_scenario_rejection(env: Env) -> None:
     assert not result.questions
     assert result.rejected[0].scenario_id == "SCN_001"
     assert result.rejected[0].payload == {}
-    assert len(result.snapshots) == 1
 
 
 def test_prompt_contents(
     sample_persona: Persona,
     sample_product: ProductDescription,
     sample_scenarios: list[Scenario],
-    sample_index: ReferenceIndex,
+    sample_reference: Reference,
+    sample_packs: list[ReferencePack],
 ) -> None:
     scenario = sample_scenarios[0]
-    snapshot = build_snapshot(sample_index, scenario.reference_cheat_sheet, "SNAP_SCN_001")
     options = QuestionPromptOptions(
         count=3, ambiguity_level=AmbiguityLevel.HIGH, language="en", allow_vague_questions=False
     )
     _system, user = build_question_prompt(
-        sample_persona, sample_product, scenario, snapshot, options
+        sample_persona, sample_product, scenario, (sample_packs[0], sample_reference), options
     )
     for section in (
         "## TASK",
@@ -320,34 +321,52 @@ def test_prompt_contents(
     assert "Mostly vague or investigative" in user
     assert 'style "vague" is not allowed' in user
     assert "Plain language only: no internal identifiers" in user
-    assert "Reference snapshot (for YOUR understanding only" in user
-    assert "several valid" in user
+    assert "Reference pack of this scenario (for YOUR understanding only" in user
+    assert "Transaction amount in the transaction currency" in user  # a pack quote
+    assert sample_reference.text not in user  # the pack, not the whole reference
+    assert "What counts as core" in user  # the usage guide
+    assert "expected_behavior: 1-3 plain sentences" in user
+    assert "success_criteria: 1-4 short" in user
+    assert "acceptable_variations" in user
     for example in sample_persona.example_utterances:
         assert f"- {example}" in user.split("## PROHIBITED", 1)[1]
     contract = user.split("## OUTPUT CONTRACT", 1)[1].split("## PROHIBITED", 1)[0]
-    for forbidden in ('"question_id":', '"intended_goal":', '"schema_leak_warnings":'):
+    for forbidden in ('"question_id":', '"intended_goal":', '"leak_warnings":'):
         assert forbidden not in contract
 
 
 # --- v2.1: success criteria ------------------------------------------------------------------
 
 
-async def test_success_criteria_copied_from_scenario_or_refined(env: Env) -> None:
-    refined = q("Which staff spend most on travel?")
-    refined["expectations"]["success_criteria"] = ["names the top travel spenders"]
-    llm = FakeLLMClient([batch(q("Who are our biggest card spenders this quarter?"), refined)])
-    result = await env.run(llm)
-    copied, kept = result.questions
-    assert copied.expectations.success_criteria == env.scenarios[0].success_criteria
-    assert kept.expectations.success_criteria == ["names the top travel spenders"]
+async def test_question_owns_its_expectations(env: Env) -> None:
+    llm = FakeLLMClient([batch(q("Who are our biggest card spenders this quarter?"))])
+    result = await env.run(llm, count=1)
+    expectations = result.questions[0].expectations
+    assert expectations.success_criteria == ["names the top spenders", "does not mix currencies"]
+    assert expectations.success_criteria != env.scenarios[0].success_criteria
+    assert expectations.expected_behavior.startswith("Rank the top spenders")
+
+
+@pytest.mark.parametrize(
+    "expectations",
+    [
+        {"expected_behavior": "x"},  # no criteria: never copied from the scenario
+        {"expected_behavior": "x", "success_criteria": ["a", "b", "c", "d", "e"]},
+        {"clarification": "conditional", "acceptable_behaviors": ["x"], "success_criteria": ["a"]},
+    ],
+)
+async def test_bad_expectations_rejected(env: Env, expectations: dict[str, Any]) -> None:
+    llm = FakeLLMClient([batch(q("Who spends the most on cards?", expectations=expectations))])
+    result = await env.run(llm, count=1)
+    assert not result.questions and len(result.rejected) == 1
 
 
 def _ungrounded(scenario: Scenario) -> Scenario:
     return scenario.model_copy(
         update={
             "mode": GenerationMode.UNGROUNDED,
-            "reference_index_id": None,
-            "reference_cheat_sheet": None,
+            "reference_id": None,
+            "reference_pack_id": None,
         }
     )
 
@@ -356,7 +375,7 @@ async def _generate(
     env: Env,
     llm: FakeLLMClient,
     scenarios: list[Scenario],
-    index: ReferenceIndex | None,
+    reference: Reference | None,
     **cfg: Any,
 ) -> QuestionGenerationResult:
     generator = QuestionGenerator(
@@ -365,46 +384,49 @@ async def _generate(
         logging.getLogger("t"),
         id_generator=SequentialIdGenerator(),
     )
-    return await generator.generate(env.persona, env.product, scenarios, index, count=2)
+    return await generator.generate(
+        env.persona, env.product, scenarios, reference, env.packs, count=2
+    )
 
 
-async def test_ungrounded_questions_have_mode_and_no_snapshot(env: Env) -> None:
+async def test_ungrounded_questions_have_mode_and_no_pack(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Who spends most on cards?"), q("Which team overspends?"))])
     result = await _generate(env, llm, [_ungrounded(env.scenarios[0])], None)
     assert [x.question_id for x in result.questions] == ["Q_001", "Q_002"]
-    assert all(x.mode == "ungrounded" and x.reference_snapshot_id is None for x in result.questions)
-    assert result.snapshots == []
+    assert all(x.mode == "ungrounded" and x.reference_pack_id is None for x in result.questions)
     user = llm.calls[0].user
-    assert "Reference snapshot" not in user and "cheat sheet" not in user
+    assert "Reference pack" not in user and "Usage guide" not in user
     assert "No reference data is available" in user
 
 
 async def test_leaks_only_checked_in_grounded_mode(env: Env) -> None:
     leaky = "What is the total amount by currency_code in card_transactions?"
     grounded = await _generate(
-        env, FakeLLMClient([batch(q(leaky))] * 3), env.scenarios[:1], env.index
+        env, FakeLLMClient([batch(q(leaky))] * 3), env.scenarios[:1], env.reference
     )
-    assert not grounded.questions and "schema leak" in grounded.rejected[0].reasons[0]
+    assert not grounded.questions and "reference leak" in grounded.rejected[0].reasons[0]
     ungrounded = await _generate(
-        env, FakeLLMClient([batch(q(leaky))]), [_ungrounded(env.scenarios[0])], env.index
+        env, FakeLLMClient([batch(q(leaky))]), [_ungrounded(env.scenarios[0])], env.reference
     )
-    assert [x.schema_leak_warnings for x in ungrounded.questions] == [[]]
+    assert [x.leak_warnings for x in ungrounded.questions] == [[]]
 
 
-async def test_mixed_modes_snapshot_only_for_grounded(env: Env) -> None:
+async def test_mixed_modes_pack_only_for_grounded(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Top spenders this quarter?")), batch(q("Monthly trend please?"))])
     scenarios = [env.scenarios[0], _ungrounded(env.scenarios[1])]
-    result = await _generate(env, llm, scenarios, env.index)
-    assert [(x.mode, x.reference_snapshot_id) for x in result.questions] == [
-        ("grounded", "SNAP_SCN_001"),
+    result = await _generate(env, llm, scenarios, env.reference)
+    assert [(x.mode, x.reference_pack_id) for x in result.questions] == [
+        ("grounded", "RP_SCN_001"),
         ("ungrounded", None),
     ]
-    assert [s.snapshot_id for s in result.snapshots] == ["SNAP_SCN_001"]
 
 
-async def test_grounded_scenario_without_index_is_an_error(env: Env) -> None:
-    with pytest.raises(ArtifactIntegrityError, match="grounded but no reference index"):
+async def test_grounded_scenario_without_reference_or_pack_is_an_error(env: Env) -> None:
+    with pytest.raises(ArtifactIntegrityError, match="RP_SCN_001 is not available"):
         await _generate(env, FakeLLMClient([]), env.scenarios[:1], None)
+    other = env.reference.model_copy(update={"reference_id": "other-00000000"})
+    with pytest.raises(ArtifactIntegrityError, match="was built from reference"):
+        await _generate(env, FakeLLMClient([]), env.scenarios[:1], other)
 
 
 async def test_chatbot_product_questions_generated(
@@ -426,7 +448,6 @@ async def test_chatbot_product_questions_generated(
     result = await generator.generate(env.persona, sample_chatbot, [scenario], None, count=1)
     question = result.questions[0]
     assert question.intended_goal == scenario.business_goal
-    assert question.expectations.success_criteria == scenario.success_criteria
     system, user = llm.calls[0].system, llm.calls[0].user
     assert "product type\n(chatbot) is context only" in user
     assert "SQL" not in system

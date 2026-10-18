@@ -7,7 +7,7 @@ import pytest
 from synthetic_user.core.config import load_config
 from synthetic_user.core.exceptions import InputAssetError
 from synthetic_user.core.loaders import load_persona, load_product
-from synthetic_user.references.loader import load_reference_index
+from synthetic_user.references.loader import load_reference
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA = REPO_ROOT / "data"
@@ -32,8 +32,12 @@ def test_repo_config_input_paths_resolve_to_loadable_assets(
     cfg = load_config(REPO_ROOT / "config" / "app.yaml", env={})
     load_persona(cfg.inputs.persona_path)
     load_product(cfg.inputs.product_path)
-    assert cfg.inputs.reference_index_file is not None
-    load_reference_index(cfg.inputs.reference_index_file)
+    assert cfg.inputs.reference_file is not None
+    load_reference(
+        cfg.inputs.reference_file,
+        max_chars=cfg.reference.max_chars,
+        guide_path=cfg.inputs.reference_guide_file,
+    )
 
 
 def test_missing_asset(tmp_path: Path) -> None:

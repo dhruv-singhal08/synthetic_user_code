@@ -5,7 +5,7 @@ const STEPS = ["scenarios", "questions", "execute", "evaluate"];
 const CHECK_LABELS = {
   relevance: "Relevance", goal_completeness: "Goal completeness", persona_fit: "Persona fit",
   capability_consistency: "Capability consistency", clarification_handling: "Clarification handling",
-  safety_and_honesty: "Safety & honesty",
+  safety_and_honesty: "Safety & honesty", reference_alignment: "Reference alignment",
 };
 const MAIN_COLUMNS = [
   ["question_id", "Question"], ["scenario_title", "Scenario"], ["question", "Asked"],
@@ -15,7 +15,7 @@ const MAIN_COLUMNS = [
 
 const state = {
   config: null, samplePersona: null, personaSource: "sample", useIndex: false, uploads: {},
-  runId: null, run: null, rows: [], scenarios: [], evaluations: [], filter: "all", search: "",
+  runId: null, run: null, rows: [], scenarios: [], packs: [], evaluations: [], filter: "all", search: "",
   allColumns: false, busy: false, contractSource: "upload", contractFile: null,
 };
 
@@ -44,11 +44,12 @@ async function api(path, options = {}) {
   return body;
 }
 const postJson = (path, data) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+const putJson = (path, data) => api(path, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
 const list = (items) => (items && items.length ? el("ul", {}, items.map((i) => el("li", { text: i }))) : el("span", { class: "muted", text: "—" }));
 const split = (value) => (value || "").split(" | ").filter(Boolean);
 
 // --- inputs -----------------------------------------------------------------------------------
-function previewOf(kind, d) {
+function previewOf(kind, d, raw) {
   const dl = el("dl");
   const add = (k, v) => dl.append(el("dt", { text: k }), el("dd", {}, v));
   if (kind === "persona") {
@@ -62,11 +63,13 @@ function previewOf(kind, d) {
     add("Supported", list(d.supported));
     add("Not supported", list(d.not_supported_yet));
     add("Known gaps", list(d.known_gaps));
+  } else if (kind === "reference") {
+    add("Reference", `${d.source_name} (${d.format})`);
+    add("Id", d.reference_id);
+    add("Size", `${raw.length.toLocaleString()} characters`);
   } else {
-    add("Index", `${d.index_id} v${d.index_version}`);
-    add("Source", d.source_catalog_id);
-    add("Tables", list(d.tables.map((t) => `${t.name} (${t.columns.length} columns)`)));
-    add("Relationships", String(d.relationships.length));
+    add("Usage guide", d.name);
+    add("Size", `${d.chars.toLocaleString()} characters`);
   }
   return dl;
 }
@@ -74,7 +77,7 @@ function previewOf(kind, d) {
 function panel(kind) { return $(`.input-panel[data-kind="${kind}"]`); }
 function currentInput(kind) {
   if (kind === "persona" && state.personaSource === "sample") return state.samplePersona ? { preview: state.samplePersona, label: "Using the sample persona" } : null;
-  if (kind === "reference_index" && !state.useIndex) return null;
+  if ((kind === "reference" || kind === "reference_guide") && !state.useIndex) return null;
   const upload = state.uploads[kind];
   return upload ? { preview: upload.preview, label: `Uploaded: ${upload.file.name}` } : null;
 }
@@ -86,10 +89,12 @@ function renderInput(kind) {
   box.replaceChildren();
   $(".source", root).textContent = input ? input.label : "";
   if (input) {
-    box.append(previewOf(kind, input.preview.parsed), el("details", {}, el("summary", { text: kind === "reference_index" ? "View raw JSON" : "View raw YAML" }), el("pre", { text: input.preview.raw })));
+    const rawLabel = kind === "persona" || kind === "product" ? "View raw YAML" : "View raw file";
+    box.append(previewOf(kind, input.preview.parsed, input.preview.raw), el("details", {}, el("summary", { text: rawLabel }), el("pre", { text: input.preview.raw })));
   }
   const status = $("[data-status]", root);
   if (status) { status.className = `badge ${input ? "ok" : "req"}`; status.textContent = input ? "Ready" : "Required"; }
+  if (kind === "reference_guide") $(".source", root).textContent = input ? input.label : "Not uploaded: the default guide is used.";
   updateReadiness();
 }
 
@@ -132,13 +137,15 @@ function setUseIndex(on) {
   $("#index-mode-label").textContent = on ? "On — grounded" : "Off — ungrounded";
   $("#index-on").classList.toggle("hidden", !on);
   $("#index-off").classList.toggle("hidden", on);
-  renderInput("reference_index");
+  $("#guide-panel").classList.toggle("hidden", !on);
+  renderInput("reference");
+  renderInput("reference_guide");
 }
 
 function readiness() {
   const persona = Boolean(currentInput("persona"));
   const product = Boolean(currentInput("product"));
-  const index = !state.useIndex || Boolean(currentInput("reference_index"));
+  const index = !state.useIndex || Boolean(currentInput("reference"));
   return { persona, product, index, ok: persona && product && index };
 }
 
@@ -147,7 +154,7 @@ function updateReadiness() {
   $("#chk-persona").className = r.persona ? "ok" : "";
   $("#chk-product").className = r.product ? "ok" : "";
   $("#chk-index").className = r.index ? "ok" : "";
-  $("#chk-index").textContent = state.useIndex ? "Reference index" : "Reference index (off)";
+  $("#chk-index").textContent = state.useIndex ? "Reference" : "Reference (off)";
   $("#start-hint").textContent = r.ok
     ? (state.runId ? "Starting again creates a new run." : "")
     : state.runId ? "The current run's inputs are listed on the left. Fill these to start a new run." : "Complete the required inputs to start.";
@@ -158,8 +165,11 @@ async function createRun() {
   const form = new FormData();
   if (state.personaSource === "upload" && state.uploads.persona) form.append("persona", state.uploads.persona.file);
   form.append("product", state.uploads.product.file);
-  if (state.useIndex) form.append("reference_index", state.uploads.reference_index.file);
-  form.append("use_reference_index", state.useIndex ? "true" : "false");
+  if (state.useIndex) {
+    form.append("reference", state.uploads.reference.file);
+    if (state.uploads.reference_guide) form.append("reference_guide", state.uploads.reference_guide.file);
+  }
+  form.append("use_reference", state.useIndex ? "true" : "false");
   form.append("persona_queries", $("#persona-queries").value);
   await withBusy("Starting run", async () => {
     const body = await api("/api/runs", { method: "POST", body: form });
@@ -262,7 +272,7 @@ function renderConnection() {
         kv("Product", contract.product_id), kv("Endpoint", `${contract.ask.method} ${contract.ask.path}`),
         kv("Outcomes", contract.outcomes.join(", ")), kv("Contract", `${contract.contract_version} (mock)`)),
       el("details", {}, el("summary", { text: "View contract JSON" }), el("pre", { text: JSON.stringify(contract, null, 2) })),
-      el("div", { class: "note", style: "margin-top:10px", text: "No real call is made: questions are answered by a mock product (an LLM stand-in that answers from the reference index)." }),
+      el("div", { class: "note", style: "margin-top:10px", text: "No real call is made: questions are answered by a mock product (an LLM stand-in for the described product, using the reference when one is given)." }),
     );
     return;
   }
@@ -304,10 +314,10 @@ function updateUi() {
   $("#adapter-note").textContent = contract ? "" : state.runId
     ? `Not connected: questions go to the configured "${adapter}" adapter.`
     : "Start a run first.";
-  const grounded = state.run ? state.run.sources.reference_index !== "off" : state.useIndex;
+  const grounded = state.run ? state.run.sources.reference !== "off" : state.useIndex;
   $("#scenarios-desc").textContent = grounded
-    ? "Business goals, success criteria and a reference cheat sheet from the index."
-    : "Business goals and success criteria (ungrounded: no cheat sheet).";
+    ? "Business goals plus a reference pack per scenario (quoted from your reference). Review or edit packs in the results table before generating questions."
+    : "Business goals and success criteria (ungrounded: no reference pack).";
 
   const csv = $("#download-csv");
   csv.classList.toggle("disabled", !state.runId);
@@ -316,17 +326,17 @@ function updateUi() {
   $("#rail-mode").replaceChildren(...(state.run ? [el("span", { class: `badge ${grounded ? "blue" : "info"}`, text: grounded ? "Grounded" : "Ungrounded" })] : []));
   const sources = el("dl");
   if (state.run) {
-    const labels = { persona: "Persona", product: "Product description", reference_index: "Reference index" };
+    const labels = { persona: "Persona", product: "Product description", reference: "Reference", reference_guide: "Usage guide" };
     for (const [kind, label] of Object.entries(labels)) sources.append(el("dt", { text: label }), el("dd", { text: state.run.sources[kind] || "—" }));
     sources.append(el("dt", { text: "Product" }), el("dd", { text: connection ? connection.product_url : state.run.contract ? "mock product" : `configured adapter (${adapter})` }));
   }
   $("#rail-sources").replaceChildren(...(state.run ? [sources] : []));
-  const nav = { inputs: Boolean(state.runId), connection: Boolean(contract), pipeline: completed === STEPS.length, results: state.rows.some((r) => r.evaluation_status) };
+  const nav = { inputs: Boolean(state.runId), connection: Boolean(contract), pipeline: completed === STEPS.length, results: state.rows.some((r) => r.final_verdict) };
   for (const [k, v] of Object.entries(nav)) $(`#nav-${k}`).classList.toggle("done", v);
 }
 
 function describe(step, detail) {
-  if (step === "scenarios") return `${detail.accepted} accepted, ${detail.rejected} rejected${detail.warnings && detail.warnings.length ? `, ${detail.warnings.length} index warning(s)` : ""}`;
+  if (step === "scenarios") return `${detail.accepted} accepted, ${detail.rejected} rejected${detail.reference_packs ? `, ${detail.reference_packs} reference pack(s)` : ""}`;
   if (step === "questions") return `${detail.accepted} questions, ${detail.rejected} rejected`;
   if (step === "execute") return `${detail.executions} answers via ${detail.product}`;
   return `${detail.evaluations} evaluated, ${detail.bug_candidates} bug candidate(s)`;
@@ -350,7 +360,7 @@ async function runStep(step) {
     }
     applyRun(body);
     log(`${step}: ${describe(step, body.detail)} (${secs}s)`);
-    for (const w of body.detail.warnings || []) log(`index warning: ${w}`, true);
+    for (const w of body.detail.warnings || []) log(`reference: ${w}`, true);
     return true;
   } catch (err) {
     node.classList.remove("running"); node.classList.add("error");
@@ -386,6 +396,7 @@ function applyRun(body) {
   state.run = body.state;
   state.rows = body.rows || [];
   state.scenarios = body.scenarios || [];
+  state.packs = body.reference_packs || [];
   state.evaluations = body.evaluations || [];
   renderConnection();
   renderResults(body);
@@ -404,7 +415,7 @@ function filteredRows() {
 function renderKpis() {
   const rows = state.rows.filter((r) => r.question_id);
   const by = (k, v) => rows.filter((r) => r[k] === v).length;
-  const recorded = rows.filter((r) => r.evaluation_status === "recorded_only").length;
+  const recorded = by("final_verdict", "recorded_only");
   const tiles = [
     ["", new Set(state.rows.map((r) => r.scenario_id)).size, "Scenarios"],
     ["", rows.length, "Questions"],
@@ -432,7 +443,7 @@ function renderTable() {
   body.replaceChildren(...rows.map((row) => {
     const tr = el("tr", {}, columns.map(([key]) => {
       const value = row[key] || "";
-      if (key === "final_verdict" || key === "llm_verdict") return el("td", {}, value ? verdictBadge(value) : row.evaluation_status === "recorded_only" ? verdictBadge("recorded_only") : "");
+      if (key === "final_verdict") return el("td", {}, value ? verdictBadge(value) : "");
       if (key === "product_outcome") return el("td", {}, el("span", { class: "outcome", text: value }));
       if (key === "question_id" || key === "bug_ids") return el("td", { class: "id", text: value });
       if (key === "question") return el("td", { class: "q", text: value });
@@ -465,35 +476,56 @@ function pairs(entries) {
 
 function openDrawer(row) {
   const scenario = state.scenarios.find((s) => s.id === row.scenario_id);
+  const pack = scenario && state.packs.find((p) => p.pack_id === scenario.reference_pack_id);
   const evaluation = state.evaluations.find((e) => e.question_id === row.question_id);
   $("#drawer-title").textContent = row.question_id ? `${row.question_id} · ${row.scenario_title}` : row.scenario_title;
   const parts = [];
   parts.push(section(["Scenario", el("span", { class: `badge ${row.mode === "grounded" ? "blue" : "info"}`, text: row.mode })], pairs([
-    ["Goal", row.business_goal], ["Task / capability", `${row.task_type} · ${row.capability}`],
-    ["Rationale", row.capability_rationale], ["Success criteria", scenario ? scenario.success_criteria : split(row.success_criteria)],
+    ["Goal", row.business_goal], ["Task / capability", scenario ? `${scenario.task_type} · ${scenario.capability}` : ""],
+    ["Rationale", scenario ? scenario.capability_rationale : ""], ["Criteria guidance", scenario ? scenario.success_criteria : []],
   ])));
-  if (scenario && scenario.reference_cheat_sheet) {
-    const cs = scenario.reference_cheat_sheet;
-    parts.push(section("Reference cheat sheet", pairs([
-      ["Tables", cs.tables], ["Columns", cs.columns], ["Joins", cs.relationships.map((r) => `${r.source} = ${r.target} (${r.verification})`)],
-      ["Metrics", cs.metrics.map((m) => `${m.name}: ${m.definition}`)], ["Dimensions", cs.dimensions], ["Considerations", cs.semantic_considerations],
-    ])));
-  }
+  if (pack) parts.push(packSection(pack));
   if (row.question_id) {
-    parts.push(section("Question", pairs([
-      ["Asked", row.question], ["Style", `${row.question_style} · ambiguity ${row.ambiguity_level}`],
-      ["Clarification", row.clarification_expected], ["Acceptable", split(row.acceptable_behaviors)],
-      ["Unacceptable", split(row.unacceptable_behaviors)], ["Interpretations", split(row.interpretation_notes)],
+    parts.push(section("Question and expectations", pairs([
+      ["Asked", row.question], ["Expected behaviour", row.expected_behavior],
+      ["Success criteria", split(row.success_criteria)], ["Acceptable variations", split(row.acceptable_variations)],
     ])));
   }
   if (row.product_outcome) {
-    const content = [pairs([["Outcome", row.product_outcome], ["Adapter", row.adapter], ["Answer", row.answer_text], ["Message", row.product_message], ["Latency", row.latency_ms ? `${row.latency_ms} ms` : ""]])];
-    if (row.generated_sql) content.push(el("pre", { class: "sql", text: row.generated_sql }));
+    const content = [pairs([["Outcome", row.product_outcome], ["Answer", row.answer_text], ["Message", row.product_message], ["Latency", row.latency_ms ? `${row.latency_ms} ms` : ""]])];
+    for (const artifact of split(row.artifacts)) content.push(el("pre", { class: "sql", text: artifact }));
     parts.push(section("Product response", ...content));
   }
   if (evaluation) parts.push(...evaluationSections(evaluation));
   $("#drawer-body").replaceChildren(...parts);
   $("#drawer").classList.remove("hidden"); $("#scrim").classList.remove("hidden");
+}
+
+function packSection(pack) {
+  const refs = el("div", {}, ...pack.core_refs.map((r) => el("div", { class: "finding" },
+    el("div", { class: "meta", text: r.name }), el("div", { text: r.why }), el("q", { text: r.quote }))));
+  const rules = el("div", {}, ...pack.rules.map((r) => el("div", { class: "finding" },
+    el("div", { text: r.rule }), el("q", { text: r.quote }))));
+  const content = [el("div", { class: "muted small", text: "Authoritative answer key. Every quote is checked against your reference." }), refs];
+  if (pack.rules.length) content.push(el("h4", { text: "Rules" }), rules);
+  if (pack.rejected_items.length) content.push(pairs([["Dropped (quote not found)", pack.rejected_items.map((d) => `${d.item.name || d.item.rule}: ${d.reason}`)]]));
+  const editor = el("textarea", { rows: "14", class: "hidden", spellcheck: "false" });
+  editor.value = JSON.stringify({ core_refs: pack.core_refs, rules: pack.rules }, null, 2);
+  const save = el("button", { class: "btn small primary hidden", type: "button", text: "Save pack" });
+  const edit = el("button", { class: "btn small", type: "button", text: "Edit pack" });
+  edit.addEventListener("click", () => { editor.classList.toggle("hidden"); save.classList.toggle("hidden"); });
+  save.addEventListener("click", () => withBusy(`Saving ${pack.pack_id}`, async () => {
+    let draft;
+    try { draft = JSON.parse(editor.value); } catch (err) { throw new Error(`Not valid JSON: ${err.message}`); }
+    const body = await putJson(`/api/runs/${state.runId}/reference_packs/${pack.pack_id}`, draft);
+    for (const later of STEPS.slice(1)) $(".result", $(`.step[data-step="${later}"]`)).textContent = "";
+    applyRun(body);
+    log(`${pack.pack_id} saved - questions, execute and evaluate must be run again`);
+    closeDrawer();
+  }, "#drawer-body .dsec"));
+  content.push(el("div", { class: "row" }, edit, save), editor);
+  const title = ["Reference pack", el("span", { class: "badge info", text: pack.edited ? "edited" : pack.pack_id })];
+  return section(title, ...content);
 }
 
 function checkTable(entries, rationale) {
@@ -506,29 +538,16 @@ function evaluationSections(ev) {
   const out = [];
   out.push(section(["Evaluation", verdictBadge(ev.verdict || "recorded_only")], pairs([
     ["Status", ev.evaluation_status.replaceAll("_", " ")], ["LLM opinion", ev.llm_verdict ? verdictBadge(ev.llm_verdict) : ""],
-    ["Plugins", ev.plugins_applied.join(", ")], ["Notes", ev.notes], ["Cheat sheet conflicts", ev.cheat_sheet_conflicts],
+    ["Notes", ev.notes],
   ])));
   if (ev.checks) {
     const applicable = Object.entries(ev.checks).filter(([, s]) => s !== "not_applicable");
-    out.push(section("Generic checks", checkTable(applicable, ev.check_rationale)));
+    out.push(section("Checks", checkTable(applicable, ev.check_rationale)));
   }
   if (ev.criteria_results.length) {
     const table = el("table", { class: "check-table" });
     for (const c of ev.criteria_results) table.append(el("tr", {}, el("td", {}, verdictBadge(c.status)), el("td", { text: c.criterion }), el("td", { class: "muted", text: c.rationale })));
     out.push(section("Goal completeness by success criterion", table));
-  }
-  if (Object.keys(ev.grounded_checks).length) {
-    out.push(section(`Grounded checks (${ev.plugins_applied.join(", ")})`, checkTable(Object.entries(ev.grounded_checks), ev.check_rationale)));
-  }
-  const sql = ev.plugin_analysis && ev.plugin_analysis.sql;
-  if (sql) {
-    out.push(section("SQL static analysis", pairs([
-      ["Parsed", sql.parse_ok ? "yes" : `no — ${sql.parse_errors.join("; ")}`], ["Tables", sql.tables],
-      ["Joins", (sql.joins || []).map((j) => `${j.kind} ${j.table}${j.condition ? ` ON ${j.condition}` : ""}`)],
-      ["Filters", sql.filters], ["Date expressions", sql.date_expressions], ["Aggregations", sql.aggregations],
-      ["Group / order / limit", [sql.group_by.join(", "), sql.order_by.join(", "), sql.limit].filter(Boolean).join(" · ")],
-      ["Unknown columns", sql.unknown_columns], ["Unverifiable tables", sql.unverifiable_tables], ["Join issues", sql.join_issues],
-    ])));
   }
   if (ev.findings.length) {
     out.push(section(`Findings (${ev.findings.length})`, ...ev.findings.map((f) => el("div", { class: `finding sev-${f.severity}` },
@@ -560,7 +579,7 @@ async function boot() {
   } catch (err) {
     log(`Could not load configuration: ${err.message}`, true);
   }
-  for (const kind of ["persona", "product", "reference_index"]) wireDropzone(kind);
+  for (const kind of ["persona", "product", "reference", "reference_guide"]) wireDropzone(kind);
   for (const b of $$(".segmented button", panel("persona"))) b.addEventListener("click", () => setPersonaSource(b.dataset.source));
   $("#use-index").addEventListener("change", (e) => setUseIndex(e.target.checked));
   $("#create-run").addEventListener("click", createRun);

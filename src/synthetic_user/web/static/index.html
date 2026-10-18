@@ -85,22 +85,36 @@
             <div class="preview"></div>
           </div>
 
-          <!-- Reference index -->
-          <div class="input-panel" data-kind="reference_index">
+          <!-- Reference -->
+          <div class="input-panel" data-kind="reference">
             <div class="panel-head">
-              <h3>Reference index</h3>
+              <h3>Reference</h3>
               <label class="switch"><input type="checkbox" id="use-index"> <span id="index-mode-label">Off</span></label>
             </div>
-            <div id="index-off" class="note"><b>Ungrounded run.</b> No reference data: scenarios have no cheat sheet and answers are judged on generic criteria only (relevance, goal completeness, honesty...).</div>
+            <div id="index-off" class="note"><b>Ungrounded run.</b> No reference data: scenarios have no reference pack and answers are judged on generic criteria only (relevance, goal completeness, honesty...).</div>
             <div id="index-on" class="hidden">
               <label class="dropzone" data-drop>
-                <input type="file" accept=".json" hidden>
-                <b>Choose the pre-built reference index JSON</b> or drop it here
-                <span class="small muted">Tables, columns, relationships, rules - enables grounded checks (e.g. SQL)</span>
+                <input type="file" accept=".json,.txt,.md,.markdown" hidden>
+                <b>Choose the reference file (JSON, TXT or Markdown)</b> or drop it here
+                <span class="small muted">Any reference: a data catalog, table descriptions, a policy... Each scenario gets a reference pack quoted from it.</span>
               </label>
               <div class="source small muted"></div>
               <div class="preview"></div>
             </div>
+          </div>
+
+          <!-- Usage guide (optional, grounded only) -->
+          <div class="input-panel hidden" data-kind="reference_guide" id="guide-panel">
+            <div class="panel-head">
+              <h3>Usage guide <span class="small muted">(optional)</span></h3>
+            </div>
+            <label class="dropzone" data-drop>
+              <input type="file" accept=".md,.markdown,.txt" hidden>
+              <b>Choose the usage guide (Markdown or TXT)</b> or drop it here
+              <span class="small muted">How to read the reference, what is authoritative, what counts as core, evaluation guidance. Without it: "descriptive reference, not exhaustive".</span>
+            </label>
+            <div class="source small muted"></div>
+            <div class="preview"></div>
           </div>
         </div>
       </div>
@@ -108,7 +122,7 @@
         <div class="checklist">
           <span id="chk-persona">Persona</span>
           <span id="chk-product">Product description</span>
-          <span id="chk-index">Reference index</span>
+          <span id="chk-index">Reference</span>
         </div>
         <div class="spacer"></div>
         <span id="start-hint" class="small muted"></span>
@@ -149,7 +163,7 @@
               </label>
               <a class="small" href="/api/contract-template" download>Download a contract template</a>
             </div>
-            <div id="contract-mock" class="note hidden"><b>Mock product.</b> No real call: an LLM stand-in answers from the reference index (needs the index switched on). For demos only.</div>
+            <div id="contract-mock" class="note hidden"><b>Mock product.</b> No real call: an LLM stand-in plays the product described in the product description (using the reference when one is given). For demos only.</div>
           </div>
         </div>
         <div class="row conn-actions">
@@ -198,7 +212,7 @@
           <div class="step" data-step="evaluate">
             <div class="step-top"><span class="step-no">Step 4</span><span class="status">Pending</span></div>
             <h3>Evaluate</h3>
-            <p>Generic checks for every answer; grounded checks (e.g. SQL) when a reference index is used.</p>
+            <p>One judge for every product: generic checks, plus reference alignment against each scenario's reference pack when a reference is used.</p>
             <div class="result"></div>
             <button class="btn step-btn" type="button" disabled>Run</button>
           </div>

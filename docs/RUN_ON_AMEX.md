@@ -52,21 +52,24 @@ Do **not** add `CONFIG_PATH` to `.env`: SafeChain reads `CONFIG_PATH` as *its* Y
 reload `.env`, which then points it at this app's config ("No models defined in config"). Pick
 this app's config with `--config` instead, as every command below does.
 
-**Your reference index:** copy your full index JSON (same format as
-`data/references/reference_index_sample_v2.json`) to `data\references\reference_index.json`.
-The **CLI** reads it from there (`inputs.reference_index_file` in `config\app.safechain.yaml`;
-remove that line to run the CLI ungrounded). The **Web UI** does not read it: you upload the
-index in the UI (toggle on = grounded, off = ungrounded).
+**Your reference (any format) + usage guide:** the reference can be any `.json`, `.txt` or `.md`
+file - your NL2SQL index JSON as it is, or e.g. a one-page table description for Voice of
+Customer. Write a short usage guide (`.md`) saying how to read it and what counts as core
+(template: `data/references/sample_card_spend_guide.md`). For the **CLI**, copy them to
+`data\references\reference_index.json` (or any name) and set `inputs.reference_file` /
+`inputs.reference_guide_file` in `config\app.safechain.yaml` (remove both lines to run the CLI
+ungrounded). The **Web UI** does not read them: you upload both in the UI (toggle on =
+grounded, off = ungrounded).
 
 Check it loads before running anything else:
 
 ```powershell
-poetry run synthetic-user validate-index --reference-index data/references/reference_index.json
+poetry run synthetic-user check-reference --config config/app.safechain.yaml --reference data/references/reference_index.json --reference-guide data/references/my_guide.md
 ```
 
-Expected: `index_id=<your id> ... tables=11 columns=... relationships=... warnings=N` (no LLM
-call), then one `WARNING` line per problem found. A load error names the exact file and field
-path - send it to me.
+Expected: `reference_id=<file>-<hash> format=json chars=... max_chars=200000 guide=my_guide.md`
+(no LLM call). If the file is larger than `max_chars`, trim it or raise `reference.max_chars`
+in the config if the model's context window allows.
 
 Leave `GOOGLE_API_KEY` / `GEMINI_MODEL` empty unless you use Gemini. If you set
 `LLM_PROVIDER=safechain`, it applies to *every* config, including the offline `app.fake.yaml` demo.
@@ -95,14 +98,14 @@ live log of every step and LLM call. Stop the server with **Ctrl+C**.
 In the UI (top to bottom):
 
 1. **Inputs** - Persona: keep the sample or upload your YAML; optionally paste sample queries
-   (one per line). Product description: upload your YAML (required, no sample). Reference
-   index: switch **on** and upload your index JSON for a grounded run, or leave it **off** for
-   an ungrounded run. Then **Start run**.
+   (one per line). Product description: upload your YAML (required, no sample). Reference:
+   switch **on** and upload your reference file (JSON / TXT / MD) and, optionally, its usage
+   guide for a grounded run, or leave it **off** for an ungrounded run. Then **Start run**.
 2. **Product connection** - enter the product URL, upload a contract (YAML/JSON: request
    template + where the answer is in the reply; **Download a contract template** shows the
    format) and click **Connect**. Put tokens in `.env` and reference them as
    `${PRODUCT_API_TOKEN}` in the contract headers - never paste a token into the file.
-   **Mock product** is for demos only (an LLM stand-in answers from the index). Without a
+   **Mock product** is for demos only (an LLM stand-in plays the described product). Without a
    connection the configured fixture product answers, and it only knows the offline demo
    questions: live questions come back as `error` (recorded only).
    **Your NL2SQL API (nlsql agent, `POST /generate/sql/?timeout=10` on port 8007):** upload
@@ -110,8 +113,9 @@ In the UI (top to bottom):
    `http://127.0.0.1:8007/generate/sql/?timeout=10` from the file, or type another one. Start the
    product first. If the call fails with a proxy error, add `NO_PROXY=localhost,127.0.0.1` to
    `.env` and restart. The UI and the product must not share a port (UI default 8000).
-3. **Test pipeline** - Generate scenarios -> Generate questions -> Run on product -> Evaluate,
-   or **Run all remaining steps**.
+3. **Test pipeline** - Generate scenarios -> (optional: click a scenario row to review or edit
+   its **Reference Pack**) -> Generate questions -> Run on product -> Evaluate, or **Run all
+   remaining steps**.
 4. **Results** - filter, search, click a row for details, **Download results.csv**.
 
 Run folders are under `artifacts\runs\<run_id>\`.
@@ -119,8 +123,8 @@ Run folders are under `artifacts\runs\<run_id>\`.
 ## 6. CLI instead of the UI (optional)
 
 ```powershell
-poetry run synthetic-user run --config config/app.safechain.yaml          # all steps (uses data\references\reference_index.json)
-poetry run synthetic-user run --config config/app.safechain.yaml --reference-index <path\to\index.json>
+poetry run synthetic-user run --config config/app.safechain.yaml          # all steps (uses inputs.reference_file)
+poetry run synthetic-user run --config config/app.safechain.yaml --reference <path\to\file> --reference-guide <path\to\guide.md>
 poetry run synthetic-user run --config config/app.safechain.yaml --from-step questions
 poetry run synthetic-user --help
 ```

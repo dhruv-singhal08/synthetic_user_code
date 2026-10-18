@@ -9,7 +9,9 @@ checked before they are accepted (bounded retry via llm/structured.py):
   clarification_handling not_applicable;
 - clarification: clarification detail present and consistent with clarification_handling,
   goal_completeness not_applicable;
-- denial: only capability_consistency judged, everything else not_applicable.
+- denial: only capability_consistency judged, everything else not_applicable;
+- reference_alignment: given (and, for an answer, applicable) exactly when the question is
+  grounded; null otherwise; not_applicable for a clarification.
 After the last retry the evaluation is inconclusive with the errors as notes (never guessed).
 """
 
@@ -40,6 +42,7 @@ from synthetic_user.models.execution import ProductResponse
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.prompts.response_evaluation import (
     EvaluationFocus,
@@ -91,10 +94,30 @@ def check_generic_evaluation(
     focus: EvaluationFocus,
     criteria: Sequence[str],
     response: str,
+    *,
+    grounded: bool = False,
 ) -> list[str]:
     """Problems with a generic evaluation draft (empty list = acceptable)."""
     errors: list[str] = []
     judgements = draft.judgements()
+    alignment = draft.reference_alignment
+    if grounded and alignment is None:
+        errors.append("reference_alignment is required for a grounded question")
+    if not grounded and alignment is not None:
+        errors.append("reference_alignment must be null: the question has no reference")
+    if (
+        grounded
+        and focus is EvaluationFocus.ANSWER
+        and alignment is not None
+        and alignment.status is NA
+    ):
+        errors.append("reference_alignment must be judged for a grounded answer")
+    if (
+        focus is EvaluationFocus.CLARIFICATION
+        and alignment is not None
+        and alignment.status is not NA
+    ):
+        errors.append("clarification: reference_alignment must be not_applicable")
     for i, finding in enumerate(draft.findings, start=1):
         if finding.category not in CHECK_NAMES:
             errors.append(f"finding {i}: category {finding.category!r} is not one of {CHECK_NAMES}")
@@ -172,6 +195,27 @@ def generic_verdict(checks: GenericChecks, findings: Sequence[Finding]) -> Verdi
     return Verdict.PASS
 
 
+_GAP_STOPWORDS = frozenset(
+    {"when", "with", "from", "that", "this", "into", "over", "than", "then", "they", "them"}
+    | {"have", "been", "being", "were", "will", "would", "should", "could", "does", "done"}
+    | {"link", "data", "rows", "value", "values", "product", "query", "queries", "user"}
+)
+
+
+def matches_known_gap(text: str, known_gaps: Sequence[str]) -> bool:
+    """True if at least two keywords of a known gap (or its only keyword) occur in text."""
+    words = _keywords(text)
+    for gap in known_gaps:
+        gap_words = _keywords(gap)
+        if gap_words and len(gap_words & words) >= min(2, len(gap_words)):
+            return True
+    return False
+
+
+def _keywords(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9_]+", text.lower()) if len(w) >= 4} - _GAP_STOPWORDS
+
+
 def _quoted(fragment: str, text: str) -> bool:
     return _normalise(fragment) in _normalise(text)
 
@@ -197,11 +241,13 @@ class GenericEvaluator:
         question: QuestionCase,
         response: ProductResponse,
         focus: EvaluationFocus,
+        grounding: tuple[ReferencePack, Reference] | None = None,
     ) -> GenericJudgement:
-        criteria = question.expectations.success_criteria or scenario.success_criteria
+        criteria = question.expectations.success_criteria
         quotable = response_text(response)
+        grounded = grounding is not None
         system, user = build_response_evaluation_prompt(
-            persona, product, scenario, question, response, focus
+            persona, product, scenario, question, response, focus, grounding
         )
         judgement = GenericJudgement(focus)
         try:
@@ -211,7 +257,9 @@ class GenericEvaluator:
                 user,
                 GenericEvaluationDraft,
                 max_retries=self._settings.llm.max_validation_retries,
-                post_validate=lambda d: check_generic_evaluation(d, focus, criteria, quotable),
+                post_validate=lambda d: check_generic_evaluation(
+                    d, focus, criteria, quotable, grounded=grounded
+                ),
             )
         except LLMOutputValidationError as exc:
             self._log.warning("%s: generic evaluation failed", question.question_id)

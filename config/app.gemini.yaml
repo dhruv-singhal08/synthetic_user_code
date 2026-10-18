@@ -17,15 +17,11 @@ product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.
   type: fixture             # fixture | http_json | python
   options:
     path: ./data/fixtures/product_responses/sample_responses.json
-evaluation:
-  plugins: [sql]            # artifact plugins for grounded evaluation (sql = SQL plugin)
-
-sql:
-  dialect: bigquery
+reference:
+  max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 generation:
   scenario:
     scenario_count: 3
-    allow_multi_table: true
     include_unsupported_scenarios: true
     diversity_preference: balanced
     max_topup_rounds: 1
@@ -34,13 +30,14 @@ generation:
     ambiguity_level: low
     language: en
     allow_vague_questions: false
-    reject_schema_leaks: true
+    reject_reference_leaks: true
 paths:
   artifacts_dir: ./artifacts
 inputs:
   persona_path: ./data/personas/finance_controller.yaml
   product_path: ./data/products/sample_product.yaml
-  reference_index_file: ./data/references/sample_card_spend_index.json   # pre-built index; omit -> ungrounded
+  reference_file: ./data/references/sample_card_spend_index.json   # .json / .txt / .md; omit -> ungrounded
+  reference_guide_file: ./data/references/sample_card_spend_guide.md   # optional usage guide (.md / .txt)
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json
   benchmark_product_paths: [./data/products/sample_product.yaml, ./data/products/sample_chatbot.yaml]

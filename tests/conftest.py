@@ -12,14 +12,41 @@ from synthetic_user.core.config import AppConfig, load_config
 from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference, ReferencePack, ReferencePackDraft
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.references.loader import load_reference_index
+from synthetic_user.references.loader import load_reference
+from synthetic_user.references.pack import build_pack
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_CONFIG = REPO_ROOT / "config" / "app.yaml"
-SAMPLE_INDEX = REPO_ROOT / "data" / "references" / "sample_card_spend_index.json"
+REFERENCES = REPO_ROOT / "data" / "references"
+SAMPLE_REFERENCE = REFERENCES / "sample_card_spend_index.json"
+SAMPLE_GUIDE = REFERENCES / "sample_card_spend_guide.md"
+SAMPLE_POLICY = REFERENCES / "sample_travel_policy.md"
+SAMPLE_POLICY_GUIDE = REFERENCES / "sample_travel_policy_guide.md"
+MAX_CHARS = 200_000
+
+# Quotes copied from data/references/sample_card_spend_index.json.
+AMOUNT = {
+    "name": "card_transactions.amount",
+    "quote": "Transaction amount in the transaction currency (see currency_code).",
+    "why": "spend is the sum of amount",
+}
+CURRENCY = {
+    "name": "card_transactions.currency_code",
+    "quote": "ISO 4217 currency of amount.",
+    "why": "amounts must stay per currency",
+}
+FULL_NAME = {
+    "name": "employees.full_name",
+    "quote": "Employee full name.",
+    "why": "the ranking is by employee",
+}
+CURRENCY_RULE = {
+    "rule": "never sum amounts across currencies",
+    "quote": "Amounts in different currency_code values must not be summed directly.",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -45,9 +72,15 @@ def app_config() -> AppConfig:
 
 
 @pytest.fixture
-def sample_index() -> ReferenceIndex:
-    """The pre-built sample reference index (card spend), loaded like a user's file."""
-    return load_reference_index(SAMPLE_INDEX)
+def sample_reference() -> Reference:
+    """The sample card-spend catalog (JSON) + its usage guide, loaded like a user's files."""
+    return load_reference(SAMPLE_REFERENCE, max_chars=MAX_CHARS, guide_path=SAMPLE_GUIDE)
+
+
+@pytest.fixture
+def policy_reference() -> Reference:
+    """A text (Markdown) reference: the sample travel policy + its usage guide."""
+    return load_reference(SAMPLE_POLICY, max_chars=MAX_CHARS, guide_path=SAMPLE_POLICY_GUIDE)
 
 
 SAMPLE_PERSONA = REPO_ROOT / "data" / "personas" / "finance_controller.yaml"
@@ -72,8 +105,8 @@ def sample_chatbot() -> ProductDescription:
 
 @pytest.fixture
 def scenario_drafts() -> list[dict[str, Any]]:
-    """Three distinct, valid scenario drafts for the sample index:
-    [0] supported multi-table ranking, [1] supported single-table trend, [2] unsupported."""
+    """Three distinct, valid grounded scenario drafts for the sample reference:
+    [0] supported ranking, [1] supported trend, [2] unsupported."""
     return [
         {
             "business_goal": "Identify which employees drive the most corporate card spend "
@@ -88,31 +121,9 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "capability": "supported",
             "capability_rationale": "Product supports 'ranking and top-N' and 'joins over "
             "documented relationships'",
-            "reference_cheat_sheet": {
-                "tables": ["card_transactions", "employees"],
-                "columns": [
-                    "card_transactions.amount",
-                    "card_transactions.currency_code",
-                    "employees.full_name",
-                ],
-                "relationships": [
-                    {
-                        "source": "card_transactions.employee_id",
-                        "target": "employees.employee_id",
-                        "verification": "verified",
-                    }
-                ],
-                "metrics": [
-                    {
-                        "name": "total_spend",
-                        "definition": "sum of amount within one currency",
-                        "columns": ["card_transactions.amount"],
-                    }
-                ],
-                "dimensions": ["employees.full_name", "card_transactions.currency_code"],
-                "operations": ["join", "group by", "sum", "order by desc", "limit"],
-                "optional_filters": ["transaction_date range"],
-                "semantic_considerations": ["amounts are in mixed currencies"],
+            "reference_pack": {
+                "core_refs": [AMOUNT, CURRENCY, FULL_NAME],
+                "rules": [CURRENCY_RULE],
             },
             "question_guidance": {
                 "intent": "rank employees by total card spend",
@@ -131,22 +142,20 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "capability": "supported",
             "capability_rationale": "Product supports 'single-table aggregation' and "
             "'filtering by date range'",
-            "reference_cheat_sheet": {
-                "tables": ["card_transactions"],
-                "columns": [
-                    "card_transactions.amount",
-                    "card_transactions.transaction_date",
-                    "card_transactions.merchant_category",
-                ],
-                "metrics": [
+            "reference_pack": {
+                "core_refs": [
+                    AMOUNT,
                     {
-                        "name": "total_spend",
-                        "definition": "sum of amount per month",
-                        "columns": ["card_transactions.amount"],
-                    }
-                ],
-                "dimensions": ["card_transactions.merchant_category"],
-                "operations": ["group by month", "sum"],
+                        "name": "card_transactions.transaction_date",
+                        "quote": "Date the transaction posted.",
+                        "why": "months come from the posting date",
+                    },
+                    {
+                        "name": "card_transactions.merchant_category",
+                        "quote": "Merchant category as reported on the transaction.",
+                        "why": "the trend is per category",
+                    },
+                ]
             },
             "question_guidance": {"intent": "monthly spend trend by category"},
         },
@@ -160,18 +169,14 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "task_type": "other",
             "capability": "unsupported",
             "capability_rationale": "Product lists 'forecasting' under not_supported_yet",
-            "reference_cheat_sheet": {
-                "tables": ["card_transactions"],
-                "columns": ["card_transactions.amount", "card_transactions.transaction_date"],
-                "metrics": [
+            "reference_pack": {
+                "core_refs": [
                     {
-                        "name": "projected_spend",
-                        "definition": "future spend projection",
-                        "columns": ["card_transactions.amount"],
+                        "name": "card_transactions",
+                        "quote": "Corporate card spend, one row per transaction",
+                        "why": "history a forecast would start from",
                     }
-                ],
-                "dimensions": ["card_transactions.transaction_date"],
-                "operations": ["forecast"],
+                ]
             },
             "question_guidance": {"intent": "forecast spend"},
         },
@@ -179,19 +184,37 @@ def scenario_drafts() -> list[dict[str, Any]]:
 
 
 @pytest.fixture
+def sample_packs(
+    scenario_drafts: list[dict[str, Any]], sample_reference: Reference
+) -> list[ReferencePack]:
+    """The drafts' packs as accepted ReferencePacks RP_SCN_001..RP_SCN_003."""
+    packs = []
+    for i, draft in enumerate(scenario_drafts, start=1):
+        pack, _ = build_pack(
+            ReferencePackDraft.model_validate(draft["reference_pack"]),
+            sample_reference,
+            f"SCN_{i:03d}",
+        )
+        assert pack is not None
+        packs.append(pack)
+    return packs
+
+
+@pytest.fixture
 def sample_scenarios(
-    scenario_drafts: list[dict[str, Any]], sample_index: ReferenceIndex
+    scenario_drafts: list[dict[str, Any]], sample_reference: Reference
 ) -> list[Scenario]:
-    """The three scenario drafts as accepted Scenarios SCN_001..SCN_003."""
+    """The three scenario drafts as accepted grounded Scenarios SCN_001..SCN_003."""
     return [
         Scenario(
             id=f"SCN_{i:03d}",
             persona_id="finance_controller",
             product_id="sample_nl2sql",
             mode=GenerationMode.GROUNDED,
-            reference_index_id=sample_index.versioned_id,
+            reference_id=sample_reference.reference_id,
+            reference_pack_id=f"RP_SCN_{i:03d}",
             signature=f"sig-{i}",
-            **draft,
+            **{k: v for k, v in draft.items() if k != "reference_pack"},
         )
         for i, draft in enumerate(scenario_drafts, start=1)
     ]

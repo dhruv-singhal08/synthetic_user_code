@@ -18,10 +18,8 @@ from pydantic import (
     Field,
     SecretStr,
     ValidationError,
-    field_validator,
     model_validator,
 )
-from sqlglot.dialects.dialect import Dialect
 
 from synthetic_user.core.exceptions import ConfigError, format_validation_error
 from synthetic_user.core.loaders import read_yaml_mapping
@@ -94,28 +92,13 @@ class ProductAdapterSettings(_Section):
     file: Path | None = None
 
 
-class EvaluationSettings(_Section):
-    # Artifact plugins for grounded evaluation (nodes/evaluators/plugins/registry.py).
-    plugins: list[str] = Field(default_factory=lambda: ["sql"])
-
-
-class SQLSettings(_Section):
-    # Spanner has no sqlglot dialect; bigquery is the closest supported default.
-    dialect: str = "bigquery"
-
-    @field_validator("dialect")
-    @classmethod
-    def _known_dialect(cls, value: str) -> str:
-        try:
-            Dialect.get_or_raise(value)
-        except ValueError as exc:
-            raise ValueError(f"unknown sqlglot dialect: {value!r}") from exc
-        return value
+class ReferenceSettings(_Section):
+    # The whole reference goes into the prompts, so its size is capped (characters).
+    max_chars: int = Field(default=200_000, ge=1_000)
 
 
 class ScenarioGenerationSettings(_Section):
     scenario_count: int = Field(default=10, ge=1)
-    allow_multi_table: bool = True
     include_unsupported_scenarios: bool = True
     diversity_preference: str = Field(default="balanced", min_length=1)
     max_topup_rounds: int = Field(default=1, ge=0)
@@ -126,7 +109,7 @@ class QuestionGenerationSettings(_Section):
     ambiguity_level: AmbiguityLevel = AmbiguityLevel.LOW
     language: str = Field(default="en", min_length=1)
     allow_vague_questions: bool = False
-    reject_schema_leaks: bool = True
+    reject_reference_leaks: bool = True
 
 
 class GenerationSettings(_Section):
@@ -141,8 +124,10 @@ class PathsSettings(_Section):
 class InputsSettings(_Section):
     persona_path: Path
     product_path: Path
-    # The user's pre-built reference index JSON. None -> ungrounded mode.
-    reference_index_file: Path | None = None
+    # The user's reference file (.json / .txt / .md). None -> ungrounded mode.
+    reference_file: Path | None = None
+    # Optional usage guide (.md / .txt) telling the LLM how to read the reference.
+    reference_guide_file: Path | None = None
     benchmark_cases_path: Path | None = None
     benchmark_scenarios_path: Path | None = None
     # Product descriptions for benchmark cases (by product_id). Empty -> product_path only.
@@ -157,8 +142,7 @@ class AppConfig(_Section):
     llm: LLMSettings = Field(default_factory=LLMSettings)
     product: ProductSettings = Field(default_factory=ProductSettings)
     product_adapter: ProductAdapterSettings
-    sql: SQLSettings = Field(default_factory=SQLSettings)
-    evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
+    reference: ReferenceSettings = Field(default_factory=ReferenceSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     paths: PathsSettings
     inputs: InputsSettings

@@ -14,7 +14,7 @@ _SECRET_KEY_MARKERS = ("secret", "api_key", "password")
 
 
 class GenerationMode(StrEnum):
-    """grounded: a pre-built reference index was given; ungrounded: persona + product only."""
+    """grounded: a reference file was given; ungrounded: persona + product only."""
 
     GROUNDED = "grounded"
     UNGROUNDED = "ungrounded"
@@ -35,9 +35,7 @@ class RunManifest(StrictModel):
     persona_id: NonEmptyStr
     product_id: NonEmptyStr
     mode: GenerationMode
-    catalog_id: NonEmptyStr | None = None
-    catalog_version: NonEmptyStr | None = None
-    reference_index_id: NonEmptyStr | None = None
+    reference_id: NonEmptyStr | None = None
     llm_provider: NonEmptyStr
     llm_model: NonEmptyStr
     pipeline_version: NonEmptyStr
@@ -46,10 +44,7 @@ class RunManifest(StrictModel):
 
     @model_validator(mode="after")
     def _reference_matches_mode(self) -> Self:
-        refs = (self.catalog_id, self.catalog_version, self.reference_index_id)
-        if any(r is not None for r in refs) and any(r is None for r in refs):
-            raise ValueError("catalog_id, catalog_version and reference_index_id go together")
-        problem = mode_mismatch(self.mode, self.reference_index_id is not None, "a reference index")
+        problem = mode_mismatch(self.mode, self.reference_id is not None, "a reference")
         if problem:
             raise ValueError(problem)
         return self

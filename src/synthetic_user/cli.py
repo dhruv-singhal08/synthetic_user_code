@@ -44,15 +44,13 @@ from synthetic_user.models.base import StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import ReferenceIndex
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.pipeline import RunInputs, RunSummary, Step, SyntheticUserPipeline
 from synthetic_user.prompts.smoke import SMOKE_SYSTEM, SMOKE_USER
-from synthetic_user.references.integrity import validate_index
-from synthetic_user.references.loader import load_optional_reference_index, load_reference_index
-from synthetic_user.references.snapshot import snapshots_for
+from synthetic_user.references.loader import load_optional_reference, load_reference
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact
 
@@ -69,12 +67,19 @@ RunIdOption = Annotated[
 ]
 
 
-ReferenceIndexOption = Annotated[
+ReferenceOption = Annotated[
     Path | None,
     typer.Option(
-        "--reference-index",
-        help="Pre-built reference index JSON -> grounded. Default: inputs.reference_index_file; "
+        "--reference",
+        help="Reference file (.json / .txt / .md) -> grounded. Default: inputs.reference_file; "
         "none -> ungrounded.",
+    ),
+]
+GuideOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--reference-guide",
+        help="Usage guide (.md / .txt) for the reference. Default: inputs.reference_guide_file.",
     ),
 ]
 
@@ -166,30 +171,29 @@ def _smoke_client(settings: AppConfig) -> LLMClient:
 # --- step commands ------------------------------------------------------------------------
 
 
-@app.command("validate-index")
-def validate_index_command(
+@app.command("check-reference")
+def check_reference_command(
     ctx: typer.Context,
-    reference_index: Annotated[
-        Path, typer.Option("--reference-index", help="Pre-built reference index JSON to check.")
+    reference: Annotated[
+        Path, typer.Option("--reference", help="Reference file (.json / .txt / .md) to check.")
     ],
+    guide: GuideOption = None,
     config: CommandConfigOption = None,
     log_level: CommandLogLevelOption = None,
 ) -> None:
-    """Load a pre-built reference index and list warnings (exit 1 on load errors)."""
-    _state(ctx, config, log_level)
-    _guard(lambda: _validate_index(reference_index))
+    """Load a reference (+ usage guide) and print its id and size (exit 1 on load errors)."""
+    state = _state(ctx, config, log_level)
+    _guard(lambda: _check_reference(state, reference, guide))
 
 
-def _validate_index(path: Path) -> None:
-    index = load_reference_index(path)
-    warnings = validate_index(index)
+def _check_reference(state: CliState, path: Path, guide: Path | None) -> None:
+    settings = load_config(state.config_path)
+    reference = load_reference(path, max_chars=settings.reference.max_chars, guide_path=guide)
     typer.echo(
-        f"index_id={index.index_id} versioned_id={index.versioned_id} "
-        f"tables={len(index.tables)} columns={sum(len(t.columns) for t in index.tables)} "
-        f"relationships={len(index.relationships)} warnings={len(warnings)}"
+        f"reference_id={reference.reference_id} format={reference.format} "
+        f"chars={len(reference.text)} max_chars={settings.reference.max_chars} "
+        f"guide={reference.guide_name or 'default'}"
     )
-    for warning in warnings:
-        typer.echo(f"WARNING {warning}")
 
 
 @app.command("generate-scenarios")
@@ -204,17 +208,18 @@ def generate_scenarios(
     product: Annotated[
         Path | None, typer.Option("--product", help="Product YAML. Default: inputs.product_path.")
     ] = None,
-    reference_index: ReferenceIndexOption = None,
+    reference: ReferenceOption = None,
+    guide: GuideOption = None,
     count: Annotated[
         int | None,
         typer.Option("--count", min=1, help="Scenarios to request. Default: scenario_count."),
     ] = None,
 ) -> None:
-    """Generate scenarios (+ cheat sheets when grounded) into artifacts/runs/<run_id>/."""
+    """Generate scenarios (+ reference packs when grounded) into artifacts/runs/<run_id>/."""
     state = _state(ctx, config, log_level)
     _guard(
         lambda: asyncio.run(
-            _generate_scenarios(state, run_id, persona, product, reference_index, count)
+            _generate_scenarios(state, run_id, persona, product, reference, guide, count)
         )
     )
 
@@ -224,19 +229,20 @@ async def _generate_scenarios(
     run_id: str | None,
     persona_path: Path | None,
     product_path: Path | None,
-    index_path: Path | None,
+    reference_path: Path | None,
+    guide_path: Path | None,
     count: int | None,
 ) -> None:
     settings = load_config(state.config_path)
     run_id = _valid_run_id(run_id or new_run_id())
-    inputs = _inputs(settings, persona_path, product_path, index_path)
+    inputs = _inputs(settings, persona_path, product_path, reference_path, guide_path)
     pipeline, store = _pipeline(settings, run_id)
     step = await pipeline.generate_scenarios(run_id, inputs, count=count, force=True)
     duplicates = sum(1 for r in step.rejected if r.reasons[0].startswith("duplicate of"))
     typer.echo(
         f"run_id={run_id} mode={inputs.mode} accepted={len(step.accepted)} "
         f"rejected={len(step.rejected) - duplicates} duplicates={duplicates} "
-        f"dir={_run_dir(store, run_id)}"
+        f"reference_packs={len(step.packs)} dir={_run_dir(store, run_id)}"
     )
 
 
@@ -250,28 +256,32 @@ def generate_questions(
         int | None,
         typer.Option("--count", min=1, help="Questions per scenario. Default: question_count."),
     ] = None,
-    reference_index: ReferenceIndexOption = None,
+    reference: ReferenceOption = None,
+    guide: GuideOption = None,
 ) -> None:
-    """Build snapshots and generate questions for a run's scenarios (always regenerates)."""
+    """Generate questions for a run's scenarios (always regenerates)."""
     state = _state(ctx, config, log_level)
-    _guard(lambda: asyncio.run(_generate_questions(state, run_id, count, reference_index)))
+    _guard(lambda: asyncio.run(_generate_questions(state, run_id, count, reference, guide)))
 
 
 async def _generate_questions(
-    state: CliState, run_id: str, count: int | None, index_path: Path | None
+    state: CliState,
+    run_id: str,
+    count: int | None,
+    reference_path: Path | None,
+    guide_path: Path | None,
 ) -> None:
     settings = load_config(state.config_path)
     run_id = _valid_run_id(run_id)
     pipeline, store = _pipeline(settings, run_id)
-    inputs = _inputs(settings, reference_index_path=index_path)
+    inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
     step = await pipeline.generate_questions(run_id, inputs, count=count, force=True)
     scenarios = len(
         {q.scenario_id for q in step.questions} | {r.scenario_id for r in step.rejected}
     )
-    leaks = sum(1 for q in step.questions if q.schema_leak_warnings)
+    leaks = sum(1 for q in step.questions if q.leak_warnings)
     typer.echo(
         f"run_id={run_id} mode={inputs.mode} scenarios={scenarios} "
-        f"snapshots={len(step.snapshots)} "
         f"questions={len(step.questions)} rejected={len(step.rejected)} "
         f"with_leak_warnings={leaks} dir={_run_dir(store, run_id)}"
     )
@@ -283,7 +293,8 @@ def execute(
     run_id: Annotated[str, typer.Option("--run-id", help="Run with questions.json.")],
     config: CommandConfigOption = None,
     log_level: CommandLogLevelOption = None,
-    reference_index: ReferenceIndexOption = None,
+    reference: ReferenceOption = None,
+    guide: GuideOption = None,
     adapter_config: Annotated[
         Path | None,
         typer.Option(
@@ -294,11 +305,15 @@ def execute(
 ) -> None:
     """Submit a run's questions through the product adapter (always regenerates)."""
     state = _state(ctx, config, log_level)
-    _guard(lambda: asyncio.run(_execute(state, run_id, reference_index, adapter_config)))
+    _guard(lambda: asyncio.run(_execute(state, run_id, reference, guide, adapter_config)))
 
 
 async def _execute(
-    state: CliState, run_id: str, index_path: Path | None, adapter_config: Path | None
+    state: CliState,
+    run_id: str,
+    reference_path: Path | None,
+    guide_path: Path | None,
+    adapter_config: Path | None,
 ) -> None:
     settings = load_config(state.config_path)
     if adapter_config is not None:
@@ -308,7 +323,7 @@ async def _execute(
     run_id = _valid_run_id(run_id)
     pipeline, store = _pipeline(settings, run_id, with_product=True)
     try:
-        inputs = _inputs(settings, reference_index_path=index_path)
+        inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
         step = await pipeline.execute_questions(run_id, inputs, force=True)
     finally:
         await pipeline.aclose()
@@ -370,39 +385,53 @@ def evaluate(
     questions: Annotated[Path | None, typer.Option("--questions", help="questions.json")] = None,
     executions: Annotated[Path | None, typer.Option("--executions", help="executions.json")] = None,
     scenarios: Annotated[Path | None, typer.Option("--scenarios", help="scenarios.json")] = None,
+    reference_packs: Annotated[
+        Path | None,
+        typer.Option("--reference-packs", help="reference_packs.json (grounded file mode)"),
+    ] = None,
     out_dir: Annotated[
         Path | None,
         typer.Option("--out-dir", help="File mode output dir. Default: the executions file's dir."),
     ] = None,
-    reference_index: ReferenceIndexOption = None,
+    reference: ReferenceOption = None,
+    guide: GuideOption = None,
 ) -> None:
     """Evaluate executions; writes evaluations.json and bug_candidates.json."""
     state = _state(ctx, config, log_level)
-    _guard(
-        lambda: asyncio.run(
-            _evaluate(state, run_id, questions, executions, scenarios, out_dir, reference_index)
-        )
-    )
+    files = _EvaluateFiles(questions, executions, scenarios, reference_packs, out_dir)
+    _guard(lambda: asyncio.run(_evaluate(state, run_id, files, reference, guide)))
+
+
+@dataclass(frozen=True)
+class _EvaluateFiles:
+    questions: Path | None
+    executions: Path | None
+    scenarios: Path | None
+    reference_packs: Path | None
+    out_dir: Path | None
 
 
 async def _evaluate(
     state: CliState,
     run_id: str | None,
-    questions_path: Path | None,
-    executions_path: Path | None,
-    scenarios_path: Path | None,
-    out_dir: Path | None,
-    index_path: Path | None,
+    files: _EvaluateFiles,
+    reference_path: Path | None,
+    guide_path: Path | None,
 ) -> None:
     settings = load_config(state.config_path)
-    files = (questions_path, executions_path, scenarios_path)
-    if (run_id is None) == all(f is None for f in files):
+    questions_path, executions_path, scenarios_path = (
+        files.questions,
+        files.executions,
+        files.scenarios,
+    )
+    given = (questions_path, executions_path, scenarios_path)
+    if (run_id is None) == all(f is None for f in given):
         raise ConfigError("Pass either --run-id or all of --questions --executions --scenarios")
 
     if run_id is not None:
         run_id = _valid_run_id(run_id)
         pipeline, store = _pipeline(settings, run_id)
-        inputs = _inputs(settings, reference_index_path=index_path)
+        inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
         step = await pipeline.evaluate_executions(run_id, inputs, force=True)
         questions = store.read_models(run_artifact(run_id, "questions.json"), QuestionCase)
         _print_evaluation(
@@ -414,19 +443,23 @@ async def _evaluate(
         raise ConfigError("File mode needs all of --questions --executions --scenarios")
     product = load_product(settings.inputs.product_path)
     persona = load_persona(settings.inputs.persona_path)
-    index_file = index_path or settings.inputs.reference_index_file
-    index = load_optional_reference_index(index_file, _log)
+    reference = _reference(settings, reference_path, guide_path)
     question_list = _read_file(questions_path, TypeAdapter(list[QuestionCase]))
     execution_items = _read_file(executions_path, TypeAdapter(list[ExecutionRecord]))
     scenario_list = _read_file(scenarios_path, TypeAdapter(list[Scenario]))
-    out_store = JsonArtifactStore(out_dir or executions_path.parent)
+    packs = (
+        _read_file(files.reference_packs, TypeAdapter(list[ReferencePack]))
+        if files.reference_packs is not None
+        else []
+    )
+    out_store = JsonArtifactStore(files.out_dir or executions_path.parent)
 
-    cases = _pair_cases(question_list, execution_items, scenario_list, index)
+    cases = _pair_cases(question_list, execution_items, scenario_list, packs)
     evaluator = Evaluator(
         create_llm_client(settings),
         settings,
         get_run_logger("synthetic_user.nodes.evaluator", new_run_id()),
-        index=index,
+        reference=reference,
         id_generator=SequentialIdGenerator(),
     )
     results = await evaluator.evaluate_many(cases, product, persona)
@@ -467,9 +500,10 @@ def run(
             help="Per scenario. Default: generation.question.question_count.",
         ),
     ] = None,
-    reference_index: ReferenceIndexOption = None,
+    reference: ReferenceOption = None,
+    guide: GuideOption = None,
 ) -> None:
-    """Full pipeline: index check -> scenarios -> questions -> execute -> evaluate."""
+    """Full pipeline: reference check -> scenarios -> questions -> execute -> evaluate."""
     state = _state(ctx, config, log_level)
     _guard(
         lambda: asyncio.run(
@@ -480,7 +514,8 @@ def run(
                 force_step or [],
                 scenario_count,
                 question_count,
-                reference_index,
+                reference,
+                guide,
             )
         )
     )
@@ -493,11 +528,12 @@ async def _run(
     force_steps: list[Step],
     scenario_count: int | None,
     question_count: int | None,
-    index_path: Path | None,
+    reference_path: Path | None,
+    guide_path: Path | None,
 ) -> None:
     settings = load_config(state.config_path)
     run_id = _valid_run_id(run_id or new_run_id())
-    inputs = _inputs(settings, reference_index_path=index_path)
+    inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
     pipeline, _store = _pipeline(settings, run_id, with_product=True)
     try:
         summary = await pipeline.run(
@@ -515,7 +551,7 @@ async def _run(
 
 def _print_summary(summary: RunSummary) -> None:
     typer.echo(f"run_id={summary.run_id}")
-    typer.echo(f"mode={summary.mode} reference_index={summary.reference_index_id or '-'}")
+    typer.echo(f"mode={summary.mode} reference={summary.reference_id or '-'}")
     typer.echo(
         f"steps_run={','.join(summary.steps_run) or '-'} "
         f"steps_reused={','.join(summary.steps_reused) or '-'}"
@@ -592,8 +628,7 @@ async def _benchmark(state: CliState, cases_path: Path | None, scenarios_path: P
         )
     if settings.llm.provider is LLMProvider.FAKE:
         raise ConfigError("benchmark-evaluator is live only: set llm.provider to a real provider")
-    index_file = settings.inputs.reference_index_file
-    index = load_reference_index(index_file) if index_file is not None else None
+    reference = _reference(settings)
     product_paths = settings.inputs.benchmark_product_paths or [settings.inputs.product_path]
     products = {p.product_id: p for p in (load_product(path) for path in product_paths)}
     persona = load_persona(settings.inputs.persona_path)
@@ -601,11 +636,12 @@ async def _benchmark(state: CliState, cases_path: Path | None, scenarios_path: P
         create_llm_client(settings),
         settings,
         get_run_logger("synthetic_user.benchmark", new_run_id()),
-        index=index,
+        reference=reference,
         id_generator=SequentialIdGenerator(),
     )
+    scenario_list, packs = load_scenarios(scenarios_path)
     report = await run_benchmark(
-        evaluator, load_cases(cases_path), load_scenarios(scenarios_path), index, products, persona
+        evaluator, load_cases(cases_path), scenario_list, packs, products, persona
     )
     for row in report.rows:
         mark = "ok  " if row.agrees else "DIFF"
@@ -636,25 +672,25 @@ def _inputs(
     settings: AppConfig,
     persona_path: Path | None = None,
     product_path: Path | None = None,
-    reference_index_path: Path | None = None,
+    reference_path: Path | None = None,
+    guide_path: Path | None = None,
 ) -> RunInputs:
-    """--reference-index, else inputs.reference_index_file; neither -> ungrounded (logged)."""
-    index_path = reference_index_path or settings.inputs.reference_index_file
+    """--reference, else inputs.reference_file; neither -> ungrounded (logged)."""
     return RunInputs(
         persona=load_persona(persona_path or settings.inputs.persona_path),
         product=load_product(product_path or settings.inputs.product_path),
-        reference_index=load_optional_reference_index(index_path, _log),
+        reference=_reference(settings, reference_path, guide_path),
     )
 
 
-def _require_index(settings: AppConfig, index_path: Path | None) -> ReferenceIndex:
-    path = index_path or settings.inputs.reference_index_file
-    if path is None:
-        raise ConfigError(
-            "This command needs a reference index: pass --reference-index or set "
-            "inputs.reference_index_file"
-        )
-    return load_reference_index(path)
+def _reference(
+    settings: AppConfig, reference_path: Path | None = None, guide_path: Path | None = None
+) -> Reference | None:
+    path = reference_path or settings.inputs.reference_file
+    guide = guide_path or (settings.inputs.reference_guide_file if path else None)
+    return load_optional_reference(
+        path, _log, max_chars=settings.reference.max_chars, guide_path=guide
+    )
 
 
 def _pipeline(
@@ -695,13 +731,11 @@ def _pair_cases(
     questions: list[QuestionCase],
     executions: list[ExecutionRecord],
     scenarios: list[Scenario],
-    index: ReferenceIndex | None,
+    packs: list[ReferencePack],
 ) -> list[EvaluationCase]:
     by_question = {q.question_id: q for q in questions}
     by_scenario = {s.id: s for s in scenarios}
-    snapshots = (
-        {snap.snapshot_id: snap for snap in snapshots_for(index, scenarios)} if index else {}
-    )
+    by_pack = {p.pack_id: p for p in packs}
     cases: list[EvaluationCase] = []
     for execution in executions:
         question = by_question.get(execution.question_id)
@@ -714,15 +748,15 @@ def _pair_cases(
             raise ArtifactIntegrityError(
                 f"{question.question_id} refers to unknown scenario {question.scenario_id}"
             )
-        snapshot = None
-        if question.reference_snapshot_id is not None:
-            snapshot = snapshots.get(question.reference_snapshot_id)
-            if snapshot is None:
+        pack = None
+        if question.reference_pack_id is not None:
+            pack = by_pack.get(question.reference_pack_id)
+            if pack is None:
                 raise ArtifactIntegrityError(
-                    f"{question.question_id} is grounded: pass the reference index it was built "
-                    "from (--reference-index)"
+                    f"{question.question_id} is grounded: pass the reference_packs.json of its "
+                    "run (--reference-packs) and the reference (--reference)"
                 )
-        cases.append(EvaluationCase(question, scenario, snapshot, execution))
+        cases.append(EvaluationCase(question, scenario, pack, execution))
     return cases
 
 

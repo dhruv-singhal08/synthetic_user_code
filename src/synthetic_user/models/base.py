@@ -9,14 +9,6 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
-# Fully qualified column reference "table.column".
-QualifiedColumn = Annotated[
-    str,
-    StringConstraints(
-        strip_whitespace=True, pattern=r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$"
-    ),
-]
-
 
 class AmbiguityLevel(StrEnum):
     LOW = "low"
@@ -37,8 +29,3 @@ def find_duplicates(names: list[str]) -> list[str]:
             dupes.append(name)
         seen.add(name)
     return dupes
-
-
-def table_of(qualified: str) -> str:
-    """``"t.c"`` -> ``"t"``."""
-    return qualified.split(".", 1)[0]

@@ -1,30 +1,32 @@
-# NL2SQL product API (POST /generate/sql/), same call as the team's test script:
-#   payload {"user_query": ..., "session_id": str(uuid4()), "conversation_history": []}
-#   reply   {"result": <SQL>, ...}
+# NL2SQL product API ("nlsql agent"), from its Swagger page:
+#   POST /generate/sql/?timeout=10   body {"input": "<question>", "session_id": "<id>"}
+#   200 -> {"type": "sql", "result": "<SQL>", "widget_title": ..., "column_display_hints": [...],
+#           "message": "Here is the SQL query for: ...", "session_id": "<id>"}
 #
 # Web UI: upload this file as the contract in "Product connection" (the URL field wins over
 #   options.url below).
 # CLI:    product_adapter: ./config/products/generate_sql.adapter.yaml
-#
-# Run the Synthetic User UI on another port than the product (the product uses 8000):
-#   poetry run synthetic-user serve --config config/app.safechain.yaml --port 8001
 type: http_json
 options:
-  url: http://localhost:8000/generate/sql/
+  url: http://127.0.0.1:8007/generate/sql/?timeout=10   # ?timeout = the product's own limit
   method: POST
-  timeout: 120                        # seconds per question (SQL generation can be slow)
+  timeout: 120                        # seconds this tool waits per question
   request_template:
-    user_query: "{utterance}"
-    session_id: "{uuid}"              # a fresh session per question, like uuid.uuid4()
-    conversation_history: []
+    input: "{utterance}"
+    session_id: "{uuid}"              # a fresh session per question (no shared history)
   response_mapping:
+    text: message                     # the product's explanation, judged by the generic checks
     artifacts:
       - kind: sql                     # the SQL plugin evaluates it (grounded runs)
-        path: result                  # change if the SQL sits deeper, e.g. result.sql
-    # If the reply also has an explanation / answer text, map it, e.g.:
-    # text: result.explanation
-    # If the product signals clarification or unsupported questions, map them, e.g.:
-    # clarification_when: "status == clarification"
+        path: result
+      - kind: widget_title            # kept for the record / evidence
+        path: widget_title
+      - kind: column_display_hints
+        path: column_display_hints
+    # `type` is "sql" for an answer. When you know the other values the product returns
+    # (e.g. for a clarification question or an unsupported request), map them so those replies
+    # are not judged as SQL answers - for example:
+    # clarification_when: "type == clarification"
     # clarification_message: message
-    # denied_when: "status == unsupported"
+    # denied_when: "type == unsupported"
     # denied_message: message

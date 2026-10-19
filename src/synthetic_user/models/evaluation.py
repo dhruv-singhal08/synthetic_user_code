@@ -85,6 +85,15 @@ class MetricName(StrEnum):
 # Lower is better for these (pass = score 0); higher is better for the others (pass = 1).
 LOWER_IS_BETTER = frozenset({MetricName.HALLUCINATION_RATE})
 
+# Metrics shown in results.csv, kpis.json / kpis.csv and the UI (D206). Groundedness is still
+# computed and stored in evaluations.json, but not reported for now (it overlaps correctness).
+REPORTED_METRICS = (
+    MetricName.RELEVANCY,
+    MetricName.CORRECTNESS,
+    MetricName.HALLUCINATION_RATE,
+    MetricName.COMPLETENESS,
+)
+
 
 class MetricStatus(StrEnum):
     SCORED = "scored"

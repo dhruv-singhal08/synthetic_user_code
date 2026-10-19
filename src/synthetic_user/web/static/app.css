@@ -346,7 +346,7 @@ pre { margin: 8px 0 0; background: #0f172a; color: #e2e8f0; border-radius: 8px; 
 .sev-row { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* --- report: metrics ------------------------------------------------------------------------ */
-.metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; }
+.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .metric { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .metric-name { font-size: 13.5px; font-weight: 650; color: var(--ink); display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 .metric-desc { font-size: 12px; color: var(--muted); min-height: 36px; }
@@ -434,7 +434,7 @@ pre { margin: 8px 0 0; background: #0f172a; color: #e2e8f0; border-radius: 8px; 
 .dsec h4 { font-size: 12.5px; margin: 14px 0 6px; color: var(--ink-2); }
 .dsec .kv-list { grid-template-columns: 150px minmax(0, 1fr); }
 .dsec .kv-list dd { white-space: pre-wrap; }
-.mini-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.mini-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .mini { border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 12px; background: var(--surface-2); min-width: 0; }
 .mini b { display: block; font-size: 11px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mini span { font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; }
@@ -460,7 +460,7 @@ pre { margin: 8px 0 0; background: #0f172a; color: #e2e8f0; border-radius: 8px; 
 /* --- responsive ----------------------------------------------------------------------------- */
 @media (max-width: 1280px) {
   .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stepper { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .step::after { display: none; }
 }
@@ -492,6 +492,6 @@ pre { margin: 8px 0 0; background: #0f172a; color: #e2e8f0; border-radius: 8px; 
   .table-wrap { max-height: none; overflow: visible; }
   .table thead th { position: static; }
   .summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .ring, .stack div, .meter div, .score, .pill { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

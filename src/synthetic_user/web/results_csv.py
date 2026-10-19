@@ -15,7 +15,13 @@ import io
 import json
 from collections.abc import Sequence
 
-from synthetic_user.models.evaluation import EvaluationResult, MetricName, MetricStatus
+from synthetic_user.models.evaluation import (
+    HALLUCINATED,
+    EvaluationResult,
+    MetricName,
+    MetricStatus,
+    Verdict,
+)
 from synthetic_user.models.execution import (
     AnsweredResponse,
     ClarificationResponse,
@@ -46,11 +52,19 @@ EXECUTION_COLUMNS = [
     "product_message",
     "latency_ms",
 ]
-METRIC_COLUMNS = [m.value for m in MetricName]
+# Each reported metric with the reason behind its score, then the verdict and its reason
+# (D206; groundedness is not reported for now).
 EVALUATION_COLUMNS = [
+    "relevancy",
+    "relevancy_reason",
+    "correctness",
+    "correctness_reason",
+    "hallucination_rate",
+    "hallucination_reason",
+    "completeness",
+    "completeness_reason",
     "final_verdict",
-    "criteria_results",
-    "findings",
+    "verdict_reason",
     "bug_ids",
     "evaluation_notes",
 ]
@@ -60,7 +74,6 @@ COLUMNS = [
     *QUESTION_COLUMNS,
     *REFERENCE_COLUMNS,
     *EXECUTION_COLUMNS,
-    *METRIC_COLUMNS,
     *EVALUATION_COLUMNS,
 ]
 
@@ -184,19 +197,54 @@ def _metric_cell(ev: EvaluationResult, name: MetricName) -> str:
     return f"{result.score:g}" if result.score is not None else ""
 
 
-def _evaluation_cells(ev: EvaluationResult) -> dict[str, str]:
-    return {
-        **{m.value: _metric_cell(ev, m) for m in MetricName},
-        "final_verdict": ev.verdict.value if ev.verdict else "recorded_only",
-        "criteria_results": bullets(
-            [f"{c.status.value}: {c.criterion}" for c in ev.criteria_results]
-        ),
-        "findings": bullets(
+def _judged_reason(ev: EvaluationResult, name: MetricName) -> str:
+    """The judge's reason for a 0 / 0.5 / 1 score, with the quote it relied on."""
+    if ev.metrics is None:
+        return ""
+    result = ev.metrics.by_name()[name]
+    if result.status is MetricStatus.NOT_APPLICABLE:
+        return f"not applicable: {result.rationale}"
+    return f"{result.rationale} - '{result.evidence}'" if result.evidence else result.rationale
+
+
+def _hallucination_reason(ev: EvaluationResult) -> str:
+    if ev.metrics is None:
+        return ""
+    bad = [c for c in ev.claims if c.status in HALLUCINATED]
+    if bad:
+        return bullets([f"'{c.text}' ({c.status.value}): {c.reason}" for c in bad])
+    if ev.claims:
+        return f"No hallucinated statements ({len(ev.claims)} checked)"
+    return ev.metrics.hallucination_rate.rationale
+
+
+def _verdict_reason(ev: EvaluationResult) -> str:
+    if ev.verdict is None:
+        return ""
+    if ev.findings:
+        return bullets(
             [
                 f"{f.finding_id} [{f.severity.value}] {f.category}: {f.description}"
                 for f in ev.findings
             ]
+        )
+    return "All metrics passed" if ev.verdict is Verdict.PASS else ""
+
+
+def _evaluation_cells(ev: EvaluationResult) -> dict[str, str]:
+    return {
+        "relevancy": _metric_cell(ev, MetricName.RELEVANCY),
+        "relevancy_reason": _judged_reason(ev, MetricName.RELEVANCY),
+        "correctness": _metric_cell(ev, MetricName.CORRECTNESS),
+        "correctness_reason": _judged_reason(ev, MetricName.CORRECTNESS),
+        "hallucination_rate": _metric_cell(ev, MetricName.HALLUCINATION_RATE),
+        "hallucination_reason": _hallucination_reason(ev),
+        "completeness": _metric_cell(ev, MetricName.COMPLETENESS),
+        "completeness_reason": bullets(
+            [f"{c.status.value}: {c.criterion}" for c in ev.criteria_results]
         ),
+        "final_verdict": ev.verdict.value if ev.verdict else "recorded_only",
+        "verdict_reason": _verdict_reason(ev),
         "bug_ids": bullets([b.bug_id for b in ev.bug_candidates]),
         "evaluation_notes": bullets(list(ev.notes)),
     }

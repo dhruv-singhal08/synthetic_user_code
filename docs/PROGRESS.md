@@ -343,3 +343,7 @@
 - D205: `models/product.py` (new fields, renames refused with a message), prompts (scenario / question / evaluation / mock product field sets, data-source and typical-question rules, matches_known_gap rule), `nodes/evaluator.py` (known_limitations), `nodes/question_generator.py` (typical questions in the near-duplicate check), web: `/api/product-template` + UI link + product preview fields. Data: new `data/products/voice_of_customer_agent.yaml` (transcribed from the user's screenshots), `sample_product.yaml` / `sample_chatbot.yaml` migrated. Tests: product loads / old keys refused / minimal product, template valid, field reach in prompts, typical-question copy rejected.
 - Gate (scratch 3.11 venv): ruff / format pass; mypy (71 files) pass; pytest -W error 496 passed, 2 deselected; app.js parses.
 - NOT verified: a live run with the VoC product description against the real VoC endpoint.
+
+## Score reasons in results.csv; groundedness hidden (2026-10-19) - user request
+- D206: `models/evaluation.py` (REPORTED_METRICS), `web/results_csv.py` (metric + reason columns, verdict_reason), `kpis.py` (reported metrics only), UI (4 metric cards, no groundedness column, drawer labels: completeness / hallucination / verdict reason). Tests: columns (28), reason contents, KPIs without groundedness, groundedness still in evaluations.json.
+- Gate (scratch 3.11 venv): ruff / format pass; mypy (71 files) pass; pytest -W error 497 passed, 2 deselected; app.js parses.

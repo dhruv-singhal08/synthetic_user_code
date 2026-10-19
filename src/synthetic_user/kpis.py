@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 
 from synthetic_user.models.evaluation import (
     LOWER_IS_BETTER,
+    REPORTED_METRICS,
     EvaluationResult,
     MetricName,
     MetricStatus,
@@ -84,7 +85,7 @@ def compute_kpis(
         judged=len(judged),
         verdicts={v.value: verdicts.get(v.value, 0) for v in Verdict},
         task_success_rate=_ratio(verdicts[Verdict.PASS.value], len(judged)),
-        metrics=[_metric_kpi(name, judged) for name in MetricName],
+        metrics=[_metric_kpi(name, judged) for name in REPORTED_METRICS],
         availability=_round(1 - failed_calls / asked) if asked else None,
         latency_p50_ms=_percentile(latencies, 50),
         latency_p95_ms=_percentile(latencies, 95),
@@ -175,7 +176,7 @@ def _breakdown(
                 questions=len(items),
                 judged=len(judged),
                 pass_rate=_ratio(passed, len(judged)),
-                metric_means={m: _metric_kpi(m, judged).mean for m in MetricName},
+                metric_means={m: _metric_kpi(m, judged).mean for m in REPORTED_METRICS},
             )
         )
     return out

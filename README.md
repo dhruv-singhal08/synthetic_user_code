@@ -25,7 +25,7 @@ Persona + Product [+ Reference + instructions] ──> [reference check] ──>
 | 2 Scenarios | Business goal + success criteria (guidance) for tasks this persona would do with this product. Grounded: also a **cheat sheet** (Reference Pack) - the tables / columns / joins / rule ids, or the documents, a correct answer needs, picked by exact name; code checks every pick and copies the reference's own text in (unknown picks dropped and recorded; none valid -> scenario rejected). Saved in `reference_packs.json`, editable in the UI. | yes |
 | 3 Questions | Natural-language questions in the persona's voice, each with its own `expected_behavior` (written, including which readings are acceptable) and 1-4 `success_criteria`. The persona decides how it is phrased. Grounded: the cheat sheet + instructions inform the question; identifier-like names must not leak into it. | yes |
 | 4 Product executor | Sends each question through the configured product adapter and records answered (text + artifacts, e.g. SQL) / clarification / denied / error / timeout. Artifacts are **never executed**. | no |
-| 5 Evaluator | One generic judge per **answered** response, given only the evaluation contract (question, goal, expected behaviour, success criteria, acceptable variations, product, full response with artifacts; grounded: the Reference Pack + guide). It scores **answer relevancy** and **correctness** (0 / 0.5 / 1), rates each success criterion and labels each factual claim; code computes **completeness**, **groundedness** and **hallucination rate**, the verdict and bug candidates. Clarification / denied / error / timeout are recorded only. Run KPIs (task success, metric means and pass rates, availability, latency, new vs known-gap bugs) go to `kpis.json` / `kpis.csv`. See design doc section 11. | yes |
+| 5 Evaluator | One generic judge per **answered** response, given only the evaluation contract (question, goal, expected behaviour, success criteria, product, full response with artifacts; grounded: the cheat sheet + usage instructions). It scores **answer relevancy** and **correctness** (0 / 0.5 / 1), rates each success criterion and labels each factual claim; code computes **completeness** and **hallucination rate**, the verdict and bug candidates. Each score comes with its reason (D206). Groundedness is still computed in `evaluations.json` but not reported for now. Clarification / denied / error / timeout are recorded only. Run KPIs (task success, metric means and pass rates, availability, latency, new vs known-gap bugs) go to `kpis.json` / `kpis.csv`. See design doc section 11. | yes |
 
 One orchestrator (`src/synthetic_user/pipeline.py`) runs the nodes; nodes are plain classes.
 
@@ -240,9 +240,10 @@ capability, results table). No external assets (system fonts, inline icons).
    everything after it. After scenarios, open a row to **review or edit its cheat sheet**
    (the picks as JSON; every name is re-checked against the reference); saving makes
    questions and later steps stale.
-4. **Results:** KPI scorecard (task success, availability + latency, new bugs, and the 5
-   quality metrics with pass rate and n), verdict distribution, filters/search and one row per
-   question - the same table as `runs/<run_id>/results.csv` (26 columns; cells with several
+4. **Results:** KPI scorecard (task success, availability + latency, new bugs, and the 4
+   reported quality metrics with pass rate and n), verdict distribution, filters/search and one
+   row per question - the same table as `runs/<run_id>/results.csv` (28 columns: each metric
+   followed by its reason, then final_verdict + verdict_reason, bug_ids, evaluation_notes; cells with several
    items use "• " bullet lines), rewritten after every step; **Download kpis.csv** for the
    run-level KPIs. Click a row
    for every field (scenario, reference pack, question + expectations, response, checks,

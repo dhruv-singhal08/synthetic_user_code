@@ -173,12 +173,14 @@ async def test_full_run_files_types_refs_and_outcomes(
     assert means == {
         "relevancy": 1.0,
         "correctness": 0.0,
-        "groundedness": 0.667,
         "hallucination_rate": 0.333,
         "completeness": 1.0,
     }
     assert (kpis.new_bugs, kpis.new_bugs_by_severity["high"], kpis.known_gap_bugs) == (1, 1, 0)
-    assert "Hallucination rate (mean),0.333,1" in (run_dir / "kpis.csv").read_text(encoding="utf-8")
+    kpi_csv = (run_dir / "kpis.csv").read_text(encoding="utf-8")
+    assert "Hallucination rate (mean),0.333,1" in kpi_csv and "Groundedness" not in kpi_csv
+    judged = next(e for e in evaluations if e.metrics is not None)
+    assert judged.metrics is not None and judged.metrics.groundedness  # still computed (D206)
 
     assert summary.steps_run == list(Step)
     assert summary.verdicts == {"pass": 0, "fail": 1, "inconclusive": 0, "recorded_only": 2}

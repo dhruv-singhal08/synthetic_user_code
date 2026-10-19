@@ -152,8 +152,7 @@ def test_kpis_from_evaluations(sample_scenarios: list[Scenario]) -> None:
     assert correctness.inconclusive == 1
     hallucination = by[MetricName.HALLUCINATION_RATE]
     assert hallucination.lower_is_better and hallucination.pass_rate == 0.667  # share at 0
-    assert by[MetricName.GROUNDEDNESS].mean is None
-    assert by[MetricName.GROUNDEDNESS].not_applicable == 3
+    assert MetricName.GROUNDEDNESS not in by  # computed, not reported (D206)
     # BUG_002 has an unknown-gap finding -> new (severity = its worst, high); BUG_003 known
     assert (kpis.new_bugs, kpis.new_bugs_by_severity["high"], kpis.known_gap_bugs) == (1, 1, 1)
     by_task = {g.group: g for g in kpis.by_task_type}
@@ -182,4 +181,4 @@ def test_empty_run_has_no_rates(sample_scenarios: list[Scenario]) -> None:
     )
     assert kpis.task_success_rate is None and kpis.availability is None
     assert all(m.mean is None and m.n == 0 for m in kpis.metrics)
-    assert kpis_csv(kpis).count("\n") == 19  # header + 18 KPI rows
+    assert kpis_csv(kpis).count("\n") == 17  # header + 16 KPI rows

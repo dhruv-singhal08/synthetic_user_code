@@ -89,14 +89,22 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
 
 
 def test_columns_are_the_evaluation_view() -> None:
-    assert len(COLUMNS) == 26
-    assert COLUMNS[-10:-5] == [
+    assert len(COLUMNS) == 28
+    assert COLUMNS[-12:] == [
         "relevancy",
+        "relevancy_reason",
         "correctness",
-        "groundedness",
+        "correctness_reason",
         "hallucination_rate",
+        "hallucination_reason",
         "completeness",
+        "completeness_reason",
+        "final_verdict",
+        "verdict_reason",
+        "bug_ids",
+        "evaluation_notes",
     ]
+    assert "groundedness" not in COLUMNS  # computed, not reported (D206)
     for removed in (
         "failed_checks",
         "inconclusive_checks",
@@ -234,12 +242,80 @@ def test_bullets_and_metric_cells(sample_scenarios: list[Scenario]) -> None:
     )
     row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [evaluation])[0]
     assert row["artifacts"].startswith("• sql:\nSELECT 1\n• tool_calls:\n[")
-    assert [row[m] for m in ("relevancy", "correctness", "groundedness")] == [
-        "1",
-        "inconclusive",
-        "",
-    ]
+    assert [row[m] for m in ("relevancy", "correctness")] == ["1", "inconclusive"]
+    assert (row["relevancy_reason"], row["correctness_reason"]) == ("ok", "cannot tell")
     assert (row["hallucination_rate"], row["completeness"]) == ("0.25", "0.5")
-    assert row["criteria_results"] == "• met: names the top spenders\n• not_met: per currency"
+    assert row["completeness_reason"] == "• met: names the top spenders\n• not_met: per currency"
+    assert row["verdict_reason"] == ""  # inconclusive without findings
     parsed = list(csv.DictReader(io.StringIO(to_csv([row]))))
     assert parsed == [row]  # multi-line cells survive the CSV round trip
+
+
+def test_reason_columns_explain_each_score(sample_scenarios: list[Scenario]) -> None:
+    question = _question(sample_scenarios[0])
+    execution = ExecutionRecord.model_validate(
+        {
+            "execution_id": "EXE_001",
+            "question_id": "Q_001",
+            "product_id": "p",
+            "adapter": "fixture",
+            "submitted_question": "Top spenders?",
+            "started_at": datetime(2026, 10, 14, tzinfo=UTC),
+            "response": {"outcome": "answered", "text": "Ann spent most."},
+        }
+    )
+    scored = {"status": "scored", "score": 1.0, "rationale": "on topic", "evidence": "Ann"}
+    base = {
+        "evaluation_id": "EVAL_001",
+        "question_id": "Q_001",
+        "scenario_id": "SCN_001",
+        "execution_id": "EXE_001",
+        "product_outcome": "answered",
+        "mode": "grounded",
+        "evaluation_status": "evaluated",
+    }
+    metrics = {
+        "relevancy": scored,
+        "correctness": {**scored, "score": 0.0, "rationale": "wrong join", "evidence": None},
+        "groundedness": {"status": "scored", "score": 0.5, "rationale": "1 of 2"},
+        "hallucination_rate": {"status": "scored", "score": 0.5, "rationale": "1 of 2"},
+        "completeness": {"status": "scored", "score": 1.0, "rationale": "all met"},
+    }
+    finding = {
+        "finding_id": "F_001",
+        "category": "correctness",
+        "description": "joins on the wrong key",
+        "expected_behavior": "e",
+        "observed_behavior": "o",
+        "severity": "high",
+        "evidence_status": "supported",
+        "source": "llm",
+    }
+    failed = EvaluationResult.model_validate(
+        {
+            **base,
+            "verdict": "fail",
+            "metrics": metrics,
+            "claims": [
+                {"text": "Ann", "status": "supported", "reason": "in the data"},
+                {"text": "spent most", "status": "contradicted", "reason": "wrong join"},
+            ],
+            "findings": [finding],
+        }
+    )
+    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [failed])[0]
+    assert row["relevancy_reason"] == "on topic - 'Ann'"  # reason + the quote it relied on
+    assert row["correctness_reason"] == "wrong join"
+    assert row["hallucination_reason"] == "'spent most' (contradicted): wrong join"
+    assert row["verdict_reason"] == "F_001 [high] correctness: joins on the wrong key"
+    clean = EvaluationResult.model_validate(
+        {
+            **failed.model_dump(mode="json"),
+            "verdict": "pass",
+            "findings": [],
+            "claims": [failed.claims[0].model_dump(mode="json")],
+        }
+    )
+    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [clean])[0]
+    assert row["hallucination_reason"] == "No hallucinated statements (1 checked)"
+    assert row["verdict_reason"] == "All metrics passed"

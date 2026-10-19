@@ -4,7 +4,8 @@
 
 const STEPS = ["scenarios", "questions", "execute", "evaluate"];
 const VIEWS = ["setup", "connect", "run", "report"];
-const METRICS = ["relevancy", "correctness", "groundedness", "hallucination_rate", "completeness"];
+// Reported metrics (D206): groundedness is computed but not shown for now.
+const METRICS = ["relevancy", "correctness", "hallucination_rate", "completeness"];
 const METRIC_LABELS = {
   relevancy: "Answer relevancy", correctness: "Correctness", groundedness: "Groundedness",
   hallucination_rate: "Hallucination rate", completeness: "Completeness",
@@ -20,7 +21,7 @@ const METRIC_HELP = {
   hallucination_rate: "Share of statements that contradict the reference or are invented.",
   completeness: "Share of the question's success criteria the answer meets.",
 };
-const NEEDS_REFERENCE = new Set(["correctness", "groundedness"]);
+const NEEDS_REFERENCE = new Set(["correctness"]);
 const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
 const OUTCOME_LABELS = { answered: "answered", clarification: "asked to clarify", denied: "declined", error: "error", timeout: "timed out" };
 const SOURCE_LABELS = { persona: "Persona", product: "Product description", reference: "Reference", reference_guide: "Usage instructions" };
@@ -849,7 +850,7 @@ function detailSections(ev) {
       table.append(el("tr", {}, el("td", { class: "fit" }, pill(c.status, c.status)),
         el("td", {}, el("div", { text: c.criterion }), el("div", { class: "muted", text: c.rationale }), c.evidence ? el("span", { class: "quote", text: c.evidence }) : null)));
     }
-    out.push(section(["Success criteria", el("span", { class: "section-note", text: "basis of completeness" })], table));
+    out.push(section(["Success criteria", el("span", { class: "section-note", text: "completeness reason" })], table));
   }
   if (ev.claims.length) {
     const table = el("table", { class: "dtable" });
@@ -858,10 +859,10 @@ function detailSections(ev) {
         el("td", {}, el("span", { class: "quote", text: c.text }), el("div", { class: "muted", text: c.reason }),
           c.reference_quote ? el("div", { class: "muted", text: `Reference: “${c.reference_quote}”` }) : null)));
     }
-    out.push(section([`Statements checked (${ev.claims.length})`, el("span", { class: "section-note", text: "basis of groundedness and hallucination rate" })], table));
+    out.push(section([`Statements checked (${ev.claims.length})`, el("span", { class: "section-note", text: "hallucination reason" })], table));
   }
   if (ev.findings.length) {
-    out.push(section(`Findings (${ev.findings.length})`, ...ev.findings.map((f) => el("div", { class: `finding sev-${f.severity}` },
+    out.push(section([`Findings (${ev.findings.length})`, el("span", { class: "section-note", text: "verdict reason" })], ...ev.findings.map((f) => el("div", { class: `finding sev-${f.severity}` },
       el("div", { class: "finding-meta" }, pill(f.severity, f.severity), el("span", { text: `${f.finding_id} · ${METRIC_LABELS[f.category] || human(f.category)} · evidence ${f.evidence_status}` }), f.matches_known_gap ? pill("known gap", "neutral") : null),
       el("div", { text: f.description }),
       el("div", { class: "exp" }, el("b", { text: "Expected: " }), f.expected_behavior),

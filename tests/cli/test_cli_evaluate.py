@@ -67,7 +67,11 @@ def _questions(scenarios: list[Scenario]) -> list[QuestionCase]:
                 "utterance": text,
                 "intended_goal": scenarios[0].business_goal,
                 "intent": {"task_type": "ranking"},
-                "question_characteristics": {"ambiguity_level": "low"},
+                "question_characteristics": {
+                    "style": "precise",
+                    "ambiguity_level": "low",
+                    "complexity": "simple",
+                },
                 "expectations": {
                     "expected_behavior": "Return a query ranking the top spenders.",
                     "success_criteria": ["names the top spenders"],
@@ -187,7 +191,7 @@ def test_evaluate_file_mode(
     assert (out / "kpis.csv").read_text(encoding="utf-8").startswith("kpi,value,n")
     # one generic judgement per response; no SQL plugin call (design v3)
     assert len(llm.calls) == 2
-    assert all("Reference pack (AUTHORITATIVE" in c.user for c in llm.calls)
+    assert all("Cheat sheet of this scenario (AUTHORITATIVE" in c.user for c in llm.calls)
 
 
 def test_grounded_file_mode_needs_the_packs(

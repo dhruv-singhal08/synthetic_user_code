@@ -86,7 +86,11 @@ def _q(utterance: str) -> dict[str, Any]:
     return {
         "utterance": utterance,
         "intent": {"task_type": "ranking"},
-        "question_characteristics": {"style": "precise", "ambiguity_level": "low"},
+        "question_characteristics": {
+            "style": "precise",
+            "ambiguity_level": "low",
+            "complexity": "simple",
+        },
         "expectations": {"expected_behavior": "answers", "success_criteria": ["answers"]},
     }
 
@@ -170,8 +174,8 @@ def test_changed_reference_is_refused(
             "--run-id",
             RUN_ID,
             "--reference-guide",
-            str(REPO_ROOT / "data" / "references" / "sample_travel_policy_guide.md"),
+            str(REPO_ROOT / "data" / "references" / "sample_travel_policy_instructions.md"),
         ],
     )
     assert result.exit_code == 1
-    assert "file or usage guide changed" in result.output
+    assert "file or usage guide changed" in result.output  # instructions changed the id

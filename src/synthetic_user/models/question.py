@@ -18,19 +18,22 @@ class QuestionStyle(StrEnum):
     INVESTIGATIVE = "investigative"
 
 
+class QuestionComplexity(StrEnum):
+    """Matches the persona's question_preferences.complexity (mixed = any of these)."""
+
+    SIMPLE = "simple"
+    MEDIUM = "medium"
+    COMPLEX = "complex"
+
+
 class QuestionIntent(StrictModel):
     task_type: TaskType
-    metrics: list[NonEmptyStr] = Field(default_factory=list)
-    dimensions: list[NonEmptyStr] = Field(default_factory=list)
-    filters: list[NonEmptyStr] = Field(default_factory=list)
-    time_range: str | None = None
 
 
 class QuestionCharacteristics(StrictModel):
-    style: QuestionStyle = QuestionStyle.PRECISE
+    style: QuestionStyle
     ambiguity_level: AmbiguityLevel
-    uses_business_terms: bool = True
-    language: NonEmptyStr = "en"
+    complexity: QuestionComplexity
 
 
 MAX_SUCCESS_CRITERIA = 4
@@ -47,10 +50,6 @@ class Expectations(StrictModel):
         max_length=MAX_SUCCESS_CRITERIA,
         description="must-haves of a goal-complete answer; may be negative "
         '("does not mix currencies")',
-    )
-    acceptable_variations: list[NonEmptyStr] = Field(
-        default_factory=list,
-        description="valid interpretations / behaviours that must NOT be penalised",
     )
 
 

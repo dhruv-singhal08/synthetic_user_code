@@ -40,6 +40,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from synthetic_user.adapters.base import ProductRequest
 from synthetic_user.core.exceptions import ConfigError, ProductAdapterError, format_validation_error
+from synthetic_user.core.trace import record_product_http
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.execution import (
     AnsweredResponse,
@@ -234,11 +235,27 @@ class HttpJsonAdapter:
             body=body,
             timeout=options.timeout,
         )
+        trace_request = {
+            "method": options.method,
+            "url": options.url,
+            "header_names": sorted(request.headers),  # never the values
+            "body": render_template(options.request_template, req) if body is not None else None,
+        }
         try:
             result = await self._transport(request)
         except ProductAdapterError as exc:
-            raise ProductAdapterError(self._scrub(str(exc))) from None
+            message = self._scrub(str(exc))
+            record_product_http(request=trace_request, response=None, error=message)
+            raise ProductAdapterError(message) from None
         _log.debug("http_json %s %s -> HTTP %d", options.method, _host(options.url), result.status)
+        record_product_http(
+            request=trace_request,
+            response={
+                "status": result.status,
+                "body": self._scrub(result.body.decode("utf-8", errors="replace")),
+            },
+            error=None,
+        )
         return self._to_response(result)
 
     async def aclose(self) -> None:

@@ -28,7 +28,9 @@ from synthetic_user.models.question import (
     Expectations,
     QuestionCase,
     QuestionCharacteristics,
+    QuestionComplexity,
     QuestionIntent,
+    QuestionStyle,
 )
 from synthetic_user.models.reference import ReferencePack
 from synthetic_user.models.run import GenerationMode
@@ -180,7 +182,11 @@ def build_evaluation_cases(
             utterance=case.question,
             intended_goal=scenario.business_goal,
             intent=QuestionIntent(task_type=scenario.task_type),
-            question_characteristics=QuestionCharacteristics(ambiguity_level=AmbiguityLevel.MEDIUM),
+            question_characteristics=QuestionCharacteristics(
+                style=QuestionStyle.PRECISE,
+                ambiguity_level=AmbiguityLevel.MEDIUM,
+                complexity=QuestionComplexity.MEDIUM,
+            ),
             expectations=Expectations(
                 expected_behavior=case.expected_behavior,
                 success_criteria=list(scenario.success_criteria)[:4],

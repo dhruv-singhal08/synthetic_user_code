@@ -50,13 +50,6 @@ class ProductAdapterType(StrEnum):
     PYTHON = "python"
 
 
-class WebUi(StrEnum):
-    """Which web UI ``/`` serves; both stay reachable at /modern and /classic (D199)."""
-
-    MODERN = "modern"
-    CLASSIC = "classic"
-
-
 class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -104,8 +97,9 @@ class ReferenceSettings(_Section):
     max_chars: int = Field(default=200_000, ge=1_000)
 
 
-class WebSettings(_Section):
-    ui: WebUi = WebUi.MODERN
+class TraceSettings(_Section):
+    # Append every LLM / product call (prompt in, output out) to runs/<run_id>/run.log (D202).
+    enabled: bool = True
 
 
 class ScenarioGenerationSettings(_Section):
@@ -158,7 +152,7 @@ class AppConfig(_Section):
     paths: PathsSettings
     inputs: InputsSettings
     secrets: SecretsSettings = Field(default_factory=SecretsSettings)
-    web: WebSettings = Field(default_factory=WebSettings)
+    trace: TraceSettings = Field(default_factory=TraceSettings)
 
     @model_validator(mode="after")
     def _provider_has_credentials(self) -> Self:

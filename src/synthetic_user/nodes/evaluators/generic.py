@@ -5,7 +5,8 @@ Draft checks before acceptance (bounded retry via llm/structured.py):
 - correctness given exactly for grounded questions;
 - one criterion result per success criterion;
 - every quote (scores, criteria, claims, findings) occurs in the response; a claim's
-  reference_quote occurs in the reference; claim statuses fit the mode;
+  reference_quote occurs in the scenario's cheat sheet or the usage instructions; claim
+  statuses fit the mode;
 - finding categories are metric names; required findings: relevancy 0, correctness 0, a
   not_met criterion, every hallucinated claim.
 After the last retry the evaluation is inconclusive with the errors as notes (never guessed).
@@ -51,7 +52,7 @@ from synthetic_user.models.evaluation import (
 from synthetic_user.models.execution import AnsweredResponse
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import Reference, ReferencePack
+from synthetic_user.models.reference import Reference, ReferencePack, quote_in
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.prompts.response_evaluation import (
     build_response_evaluation_prompt,
@@ -85,11 +86,14 @@ def check_evaluation(
     draft: EvaluationDraft,
     criteria: Sequence[str],
     response: str,
-    reference: Reference | None = None,
+    pack: ReferencePack | None = None,
+    instructions: str = "",
 ) -> list[str]:
-    """Problems with an evaluation draft (empty list = acceptable). ``reference`` is given
-    exactly for grounded questions."""
-    grounded = reference is not None
+    """Problems with an evaluation draft (empty list = acceptable). ``pack`` (the scenario's
+    cheat sheet) is given exactly for grounded questions, with the usage ``instructions``
+    the judge also saw (a reference_quote may come from either)."""
+    grounded = pack is not None
+    quotable_reference = f"{pack.render()}\n{instructions}" if pack is not None else ""
     errors: list[str] = []
     if grounded and draft.correctness is None:
         errors.append("correctness is required for a grounded question")
@@ -132,12 +136,12 @@ def check_evaluation(
                 f"{sorted(s.value for s in allowed)}"
             )
         if claim.reference_quote:
-            if reference is None:
+            if pack is None:
                 errors.append(f"claim {i}: reference_quote must be null (no reference)")
-            elif not reference.contains(claim.reference_quote):
+            elif not quote_in(claim.reference_quote, quotable_reference):
                 errors.append(
-                    f"claim {i}: reference_quote is not in the reference (use one of the "
-                    "pack's quote values as it is, or null)"
+                    f"claim {i}: reference_quote is not in the cheat sheet or the usage "
+                    "instructions (copy one short passage character for character, or null)"
                 )
 
     for i, finding in enumerate(draft.findings, start=1):
@@ -311,7 +315,8 @@ class GenericEvaluator:
     ) -> GenericJudgement:
         criteria = question.expectations.success_criteria
         quotable = response_text(response)
-        reference = grounding[1] if grounding is not None else None
+        pack = grounding[0] if grounding is not None else None
+        instructions = grounding[1].instructions_text() if grounding is not None else ""
         system, user = build_response_evaluation_prompt(
             product, scenario, question, response, grounding
         )
@@ -323,7 +328,7 @@ class GenericEvaluator:
                 user,
                 EvaluationDraft,
                 max_retries=self._settings.llm.max_validation_retries,
-                post_validate=lambda d: check_evaluation(d, criteria, quotable, reference),
+                post_validate=lambda d: check_evaluation(d, criteria, quotable, pack, instructions),
             )
         except LLMOutputValidationError as exc:
             self._log.warning("%s: evaluation failed", question.question_id)

@@ -17,7 +17,8 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -33,8 +34,10 @@ from synthetic_user.core.exceptions import (
     ArtifactNotFoundError,
 )
 from synthetic_user.core.identifiers import SequentialIdGenerator, new_run_id
+from synthetic_user.core.trace import RUN_LOG, trace_step
 from synthetic_user.kpis import compute_kpis, kpis_csv
 from synthetic_user.llm.base import LLMClient
+from synthetic_user.llm.tracing import TracingLLMClient
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
@@ -244,7 +247,7 @@ class SyntheticUserPipeline:
         id_generators: Callable[[], SequentialIdGenerator] = SequentialIdGenerator,
     ) -> None:
         self._settings = settings
-        self._llm = llm
+        self._llm = TracingLLMClient.wrap(llm)
         self._product = product_adapter
         self._store = store
         self._log = logger
@@ -266,13 +269,13 @@ class SyntheticUserPipeline:
             self._log.info(
                 "Reference %s (%s, %d chars): mode grounded",
                 reference.reference_id,
-                reference.format,
-                len(reference.text),
+                reference.kind.value,
+                len(reference.render()),
             )
-            if reference.guide is None:
+            if reference.instructions is None:
                 warnings.append(
-                    "no usage guide: the reference is read with the default guide "
-                    "(descriptive, not exhaustive)"
+                    f"no usage instructions: the default instructions for a "
+                    f"{reference.kind.value} are used"
                 )
         for warning in warnings:
             self._log.warning("Reference warning: %s", warning)
@@ -301,9 +304,10 @@ class SyntheticUserPipeline:
         generator = ScenarioGenerator(
             self._llm, self._settings, self._log, id_generator=self._ids()
         )
-        result = await generator.generate(
-            inputs.persona, inputs.product, inputs.reference, count=count
-        )
+        with self._trace(run_id, Step.SCENARIOS):
+            result = await generator.generate(
+                inputs.persona, inputs.product, inputs.reference, count=count
+            )
         rejected = [*result.rejected, *result.duplicates]
         self._store.write_models(self._file(run_id, "scenarios"), result.accepted, Scenario)
         self._store.write_models(
@@ -375,9 +379,10 @@ class SyntheticUserPipeline:
         generator = QuestionGenerator(
             self._llm, self._settings, self._log, id_generator=self._ids()
         )
-        result = await generator.generate(
-            inputs.persona, inputs.product, scenarios, inputs.reference, packs, count=count
-        )
+        with self._trace(run_id, Step.QUESTIONS):
+            result = await generator.generate(
+                inputs.persona, inputs.product, scenarios, inputs.reference, packs, count=count
+            )
         self._store.write_models(self._file(run_id, "questions"), result.questions, QuestionCase)
         self._store.write_models(
             self._file(run_id, "questions_rejected"), result.rejected, RejectedQuestion
@@ -409,9 +414,10 @@ class SyntheticUserPipeline:
         executor = ProductExecutor(
             self._product, self._settings, self._log, id_generator=self._ids()
         )
-        executions = await executor.execute_many(
-            questions, product_id=inputs.product.product_id, raw_writer=write_raw
-        )
+        with self._trace(run_id, Step.EXECUTE):
+            executions = await executor.execute_many(
+                questions, product_id=inputs.product.product_id, raw_writer=write_raw
+            )
         self._store.write_models(self._file(run_id, "executions"), executions, ExecutionRecord)
         self._save_manifest(manifest, Step.EXECUTE)
         return ExecuteStep(executions, reused=False)
@@ -462,7 +468,8 @@ class SyntheticUserPipeline:
             reference=inputs.reference,
             id_generator=self._ids(),
         )
-        evaluations = await evaluator.evaluate_many(cases, inputs.product)
+        with self._trace(run_id, Step.EVALUATE):
+            evaluations = await evaluator.evaluate_many(cases, inputs.product)
         bugs = [b for e in evaluations for b in e.bug_candidates]
         kpis = compute_kpis(
             run_id=run_id,
@@ -596,6 +603,15 @@ class SyntheticUserPipeline:
                 f"not {inputs.reference_id} (file or usage guide changed); regenerate from the "
                 "scenarios step"
             )
+
+    @contextmanager
+    def _trace(self, run_id: str, step: Step) -> Iterator[None]:
+        """Append this step's LLM / product calls (prompts and outputs) to run.log."""
+        if not self._settings.trace.enabled:
+            yield
+            return
+        with trace_step(self._store.path_for(run_artifact(run_id, RUN_LOG)), run_id, step.value):
+            yield
 
     def _save_manifest(
         self, manifest: RunManifest, step: Step, skip: set[str] | frozenset[str] = frozenset()

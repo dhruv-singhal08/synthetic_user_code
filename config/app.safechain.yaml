@@ -37,8 +37,8 @@ paths:
 inputs:
   persona_path: ./data/personas/finance_controller.yaml
   product_path: ./data/products/sample_product.yaml
-  reference_file: ./data/references/reference_index.json   # .json / .txt / .md; omit -> ungrounded
-  reference_guide_file: null   # optional usage guide (.md / .txt)
+  reference_file: ./data/references/reference_index.yaml   # data_catalog / document_collection (.yaml/.json); omit -> ungrounded
+  reference_guide_file: null   # optional usage instructions (.md / .txt)
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json
   benchmark_product_paths: [./data/products/sample_product.yaml, ./data/products/sample_chatbot.yaml]

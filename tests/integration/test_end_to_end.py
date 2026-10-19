@@ -23,7 +23,7 @@ from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
-from synthetic_user.models.reference import CoreRef, ReferencePack, ReferencePackDraft
+from synthetic_user.models.reference import CatalogPackDraft, ReferencePack, TablePick
 from synthetic_user.models.run import RunManifest
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline, validate_run
@@ -31,6 +31,7 @@ from synthetic_user.references.loader import load_reference
 from synthetic_user.storage.json_store import JsonArtifactStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+STEP_NAMES = ("scenarios", "questions", "execute", "evaluate")
 RUN_ID = "RUN_20261014_120000_abcd"
 
 
@@ -125,8 +126,24 @@ async def test_full_run_files_types_refs_and_outcomes(
     bugs = _load(run_dir, "bug_candidates.json", TypeAdapter(list[BugCandidate]))
     manifest = RunManifest.model_validate_json((run_dir / "manifest.json").read_bytes())
     assert set(manifest.artifacts.values()) == {p.name for p in run_dir.iterdir()} - {
-        "manifest.json"
+        "manifest.json",
+        "run.log",
     }
+
+    # run log: every LLM / product call of every step, prompts in and outputs out (D202)
+    log = (run_dir / "run.log").read_text(encoding="utf-8")
+    for step in STEP_NAMES:
+        assert f"step {step} STARTED" in log and f"step {step} FINISHED" in log
+    assert "LLM CALL  round 1  _RawScenarioBatch attempt 1" in log
+    assert "VALIDATION _RawScenarioBatch attempt 1: ACCEPTED" in log
+    for scenario in scenarios:
+        assert f"LLM CALL  {scenario.id}  _RawQuestionBatch attempt 1" in log
+    for question in questions:
+        assert f"PRODUCT CALL  {question.question_id}  fixture adapter" in log
+    for evaluation in evaluations:
+        judged = f"LLM CALL  {evaluation.question_id}  EvaluationDraft"
+        assert (judged in log) is (evaluation.verdict is not None)
+    assert log.count(">>> SYSTEM PROMPT") == log.count(">>> OUTPUT") == log.count("LLM CALL")
     assert manifest.reference_id == summary.reference_id == inputs.reference_id
     assert [p.pack_id for p in packs] == [s.reference_pack_id for s in scenarios]
 
@@ -342,26 +359,46 @@ async def test_pack_edit_invalidates_later_steps(settings: AppConfig, inputs: Ru
     pipeline, _, _ = _pipeline(settings)
     summary = await pipeline.run(inputs, run_id=RUN_ID)
     run_dir = Path(summary.run_dir)
-    draft = ReferencePackDraft(
-        core_refs=[CoreRef(name="employees.full_name", quote="Employee full name.", why="ranking")]
+    draft = CatalogPackDraft(
+        tables=[TablePick(table="employees", columns=["full_name"], why="ranking")]
     )
     edited = pipeline.update_reference_pack(RUN_ID, inputs, "RP_SCN_001", draft)
-    assert edited.edited and [r.name for r in edited.core_refs] == ["employees.full_name"]
+    assert edited.edited and edited.item_names() == ["employees", "employees.full_name"]
+    assert edited.tables[0].description  # the catalog's own text, copied by code
     packs = TypeAdapter(list[ReferencePack]).validate_json(
         (run_dir / "reference_packs.json").read_bytes()
     )
     assert packs[0] == edited and not packs[1].edited
     for stale in ("questions.json", "executions.json", "evaluations.json"):
         assert not (run_dir / stale).exists()
-    with pytest.raises(InputAssetError, match="quote not found"):
+    with pytest.raises(InputAssetError, match="unknown table 'x'"):
         pipeline.update_reference_pack(
             RUN_ID,
             inputs,
             "RP_SCN_002",
-            ReferencePackDraft(core_refs=[CoreRef(name="x", quote="not in the file", why="y")]),
+            CatalogPackDraft(tables=[TablePick(table="x", why="y")]),
         )
     # the next run regenerates questions and later steps from the edited pack
     pipeline2, llm2, _ = _pipeline(settings)
     again = await pipeline2.run(inputs, run_id=RUN_ID)
     assert again.steps_run == [Step.QUESTIONS, Step.EXECUTE, Step.EVALUATE]
     assert "Employee full name." in llm2.calls[0].user
+
+
+async def test_rerun_appends_to_the_run_log_and_it_can_be_off(
+    settings: AppConfig, inputs: RunInputs
+) -> None:
+    pipeline, _llm, _product = _pipeline(settings)
+    summary = await pipeline.run(inputs, run_id=RUN_ID)
+    log_file = Path(summary.run_dir) / "run.log"
+    pipeline, _llm, _product = _pipeline(settings)
+    await pipeline.generate_questions(RUN_ID, inputs, force=True)
+    assert log_file.read_text(encoding="utf-8").count("step questions STARTED") == 2
+
+    off = settings.model_copy(
+        update={"trace": settings.trace.model_copy(update={"enabled": False})}
+    )
+    size = log_file.stat().st_size
+    pipeline, _llm, _product = _pipeline(off)
+    await pipeline.execute_questions(RUN_ID, inputs, force=True)
+    assert log_file.stat().st_size == size

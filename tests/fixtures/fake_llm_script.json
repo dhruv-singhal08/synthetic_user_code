@@ -46,9 +46,7 @@
               "states the nightly hotel limit that applies",
               "says whether taxes are included"
             ],
-            "question_guidance": {
-              "intent": "learn the hotel cap for Paris"
-            }
+            "question_intent": "learn the hotel cap for Paris"
           },
           {
             "business_goal": "Get my expense report approved without leaving the chat",
@@ -60,9 +58,7 @@
               "says clearly that it cannot approve reports",
               "explains where approval is done"
             ],
-            "question_guidance": {
-              "intent": "approve a report via chat"
-            }
+            "question_intent": "approve a report via chat"
           }
         ]
       }
@@ -84,35 +80,35 @@
               "keeps amounts separate per currency or states which currency is used",
               "covers the requested time period"
             ],
-            "question_guidance": {
-              "intent": "rank employees by total card spend",
-              "expected_ambiguity": "medium"
-            },
             "reference_pack": {
-              "core_refs": [
+              "tables": [
                 {
-                  "name": "card_transactions.amount",
-                  "quote": "Transaction amount in the transaction currency (see currency_code).",
+                  "table": "card_transactions",
+                  "columns": [
+                    "amount",
+                    "currency_code"
+                  ],
                   "why": "spend is the sum of amount"
                 },
                 {
-                  "name": "card_transactions.currency_code",
-                  "quote": "ISO 4217 currency of amount.",
-                  "why": "amounts must stay per currency"
-                },
-                {
-                  "name": "employees.full_name",
-                  "quote": "Employee full name.",
+                  "table": "employees",
+                  "columns": [
+                    "full_name"
+                  ],
                   "why": "the ranking is by employee"
                 }
               ],
-              "rules": [
+              "joins": [
                 {
-                  "rule": "never sum amounts across currencies",
-                  "quote": "Amounts in different currency_code values must not be summed directly."
+                  "from": "card_transactions.employee_id",
+                  "to": "employees.employee_id"
                 }
+              ],
+              "rules": [
+                "R1"
               ]
-            }
+            },
+            "question_intent": "rank employees by total card spend"
           },
           {
             "business_goal": "Track how monthly card spend per merchant category evolves to spot budget drift",
@@ -124,29 +120,22 @@
               "shows card spend per merchant category for each month",
               "covers the requested period"
             ],
-            "question_guidance": {
-              "intent": "monthly spend trend by category"
-            },
             "reference_pack": {
-              "core_refs": [
+              "tables": [
                 {
-                  "name": "card_transactions.amount",
-                  "quote": "Transaction amount in the transaction currency (see currency_code).",
+                  "table": "card_transactions",
+                  "columns": [
+                    "amount",
+                    "transaction_date",
+                    "merchant_category"
+                  ],
                   "why": "spend is the sum of amount"
-                },
-                {
-                  "name": "card_transactions.transaction_date",
-                  "quote": "Date the transaction posted.",
-                  "why": "months come from the posting date"
-                },
-                {
-                  "name": "card_transactions.merchant_category",
-                  "quote": "Merchant category as reported on the transaction.",
-                  "why": "the trend is per category"
                 }
               ],
+              "joins": [],
               "rules": []
-            }
+            },
+            "question_intent": "monthly spend trend by category"
           },
           {
             "business_goal": "Forecast next quarter's card spend to plan the budget",
@@ -158,19 +147,18 @@
               "states clearly whether a forecast can be produced",
               "does not present invented future figures as facts"
             ],
-            "question_guidance": {
-              "intent": "forecast spend"
-            },
             "reference_pack": {
-              "core_refs": [
+              "tables": [
                 {
-                  "name": "card_transactions",
-                  "quote": "Corporate card spend, one row per transaction",
+                  "table": "card_transactions",
+                  "columns": [],
                   "why": "history a forecast would start from"
                 }
               ],
+              "joins": [],
               "rules": []
-            }
+            },
+            "question_intent": "forecast spend"
           }
         ]
       }
@@ -185,14 +173,12 @@
           {
             "utterance": "Who were our top 10 card spenders over the last three months?",
             "intent": {
-              "task_type": "ranking",
-              "metrics": [
-                "card spend"
-              ]
+              "task_type": "ranking"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low"
+              "ambiguity_level": "low",
+              "complexity": "medium"
             },
             "expectations": {
               "expected_behavior": "Return the top 10 employees by total card spend for the last three months, keeping amounts separate per currency. Asking which currency to use is reasonable; refusing is not.",
@@ -200,9 +186,6 @@
                 "names the employees ranked by total card spend",
                 "keeps amounts separate per currency or states which currency is used",
                 "covers the requested time period"
-              ],
-              "acceptable_variations": [
-                "returns more than the requested columns"
               ]
             }
           }
@@ -219,23 +202,18 @@
           {
             "utterance": "How has our monthly card spend per merchant category changed this year?",
             "intent": {
-              "task_type": "trend",
-              "metrics": [
-                "card spend"
-              ]
+              "task_type": "trend"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low"
+              "ambiguity_level": "low",
+              "complexity": "medium"
             },
             "expectations": {
               "expected_behavior": "Show card spend per merchant category for each month of this year, or ask which currency to report in.",
               "success_criteria": [
                 "shows card spend per merchant category for each month",
                 "covers the requested period"
-              ],
-              "acceptable_variations": [
-                "asks which currency to use"
               ]
             }
           }
@@ -252,22 +230,19 @@
           {
             "utterance": "Can you forecast our card spend for next quarter?",
             "intent": {
-              "task_type": "other",
-              "metrics": [
-                "card spend"
-              ]
+              "task_type": "other"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low"
+              "ambiguity_level": "low",
+              "complexity": "medium"
             },
             "expectations": {
               "expected_behavior": "Say that forecasting is not supported yet; do not invent future figures.",
               "success_criteria": [
                 "states clearly whether a forecast can be produced",
                 "does not present invented future figures as facts"
-              ],
-              "acceptable_variations": []
+              ]
             }
           }
         ]
@@ -287,15 +262,15 @@
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low"
+              "ambiguity_level": "low",
+              "complexity": "medium"
             },
             "expectations": {
               "expected_behavior": "State the nightly hotel limit that applies in Paris and whether taxes are included.",
               "success_criteria": [
                 "states the nightly hotel limit that applies",
                 "says whether taxes are included"
-              ],
-              "acceptable_variations": []
+              ]
             }
           }
         ]
@@ -315,15 +290,15 @@
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low"
+              "ambiguity_level": "low",
+              "complexity": "medium"
             },
             "expectations": {
               "expected_behavior": "Decline: the assistant cannot approve reports; say where approval is done.",
               "success_criteria": [
                 "says clearly that it cannot approve reports",
                 "explains where approval is done"
-              ],
-              "acceptable_variations": []
+              ]
             }
           }
         ]

@@ -1,22 +1,30 @@
 """Prompt for Node 3: natural-language questions for one scenario (any product type).
 
-Both modes: persona + product + scenario. Grounded adds the scenario's Reference Pack and the
-usage guide (for the model's understanding only - reference names are never quoted).
-Each question owns its expectations: expected_behavior (written), 1-4 success_criteria and
-acceptable_variations (design v3).
+Both modes: persona (read as prompts/persona.py says) + product + scenario. The persona alone
+decides HOW the question is asked; the scenario says only WHAT the user wants (D204).
+Grounded adds the scenario's cheat sheet (Reference Pack) and the usage instructions, for the
+model's understanding only - reference names are never quoted. Each question owns its
+expectations: expected_behavior (written) and 1-4 success_criteria (design v3).
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from synthetic_user.models.base import AmbiguityLevel
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.question import MAX_SUCCESS_CRITERIA, QuestionBatchDraft
+from synthetic_user.models.question import (
+    MAX_SUCCESS_CRITERIA,
+    QuestionComplexity,
+    QuestionStyle,
+)
 from synthetic_user.models.reference import Reference, ReferencePack
-from synthetic_user.models.scenario import Scenario
+from synthetic_user.models.scenario import Scenario, TaskType
+from synthetic_user.prompts.contracts import choices, render_contract
+from synthetic_user.prompts.persona import question_persona_block
 
 SYSTEM = (
     "You role-play a real user typing questions into a conversational product, in their own "
@@ -29,6 +37,25 @@ _STYLE_MIX = {
     AmbiguityLevel.MEDIUM: "A mix of precise, vague and investigative questions.",
     AmbiguityLevel.HIGH: "Mostly vague or investigative questions that need interpretation "
     "or clarification.",
+}
+
+QUESTION_EXAMPLE: dict[str, Any] = {
+    "questions": [
+        {
+            "utterance": "<the question exactly as this persona would type it>",
+            "intent": {"task_type": choices(TaskType)},
+            "question_characteristics": {
+                "style": choices(QuestionStyle),
+                "ambiguity_level": choices(AmbiguityLevel),
+                "complexity": choices(QuestionComplexity),
+            },
+            "expectations": {
+                "expected_behavior": "<1-3 sentences: what the product should do for this "
+                "question>",
+                "success_criteria": [f"<1-{MAX_SUCCESS_CRITERIA} short, checkable must-haves>"],
+            },
+        }
+    ]
 }
 
 
@@ -53,18 +80,15 @@ def build_question_prompt(
 
     ``grounding`` (pack + reference) is given for grounded scenarios, None for ungrounded.
     """
-    persona_json = persona.model_dump(
-        mode="json",
-        include={"identity", "expertise", "behavior", "primary_motivation"},
-    )
     product_json = product.model_dump(
         mode="json",
         include={
             "name",
-            "product_type",
+            "description",
+            "data_sources",
             "supported",
-            "not_supported_yet",
-            "known_gaps",
+            "not_supported",
+            "known_limitations",
             "user_visible_capabilities",
         },
     )
@@ -73,11 +97,12 @@ def build_question_prompt(
         include={
             "business_goal",
             "title",
+            "typical_task",
             "task_type",
             "capability",
             "capability_rationale",
             "success_criteria",
-            "question_guidance",
+            "question_intent",
         },
     )
     vague_rule = (
@@ -92,72 +117,70 @@ def build_question_prompt(
         else "Plain language only: no internal identifiers, IDs, field or table names, "
         "snake_case words, code or query language."
     )
-    examples = "\n".join(f"- {u}" for u in persona.example_utterances) or "- (none)"
-    schema = json.dumps(QuestionBatchDraft.model_json_schema(), indent=2)
-    style_mix = _STYLE_MIX[options.ambiguity_level]
+    ambiguity_rule = (
+        f'level "{options.ambiguity_level.value}" - {_STYLE_MIX[options.ambiguity_level]} '
+        f"{vague_rule}"
+    )
+    persona_block = question_persona_block(persona, ambiguity_rule=ambiguity_rule)
 
     if grounding is not None:
         pack, reference = grounding
         reference_block = f"""
-Usage guide of the reference (for YOUR understanding):
-{reference.guide_text()}
+Cheat sheet of this scenario (for YOUR understanding only - never use its names):
+{pack.render()}
 
-Reference pack of this scenario (for YOUR understanding only - never quote its names):
-{json.dumps(pack.view(), indent=2)}
+Usage instructions of the reference (for YOUR understanding):
+{reference.instructions_text()}
 """
         missing = (
-            "If the pack shows the goal depends on something ambiguous, say in "
-            "expected_behavior\nwhether the product should ask or state its assumption, and "
-            "list the valid readings in\nacceptable_variations. Do not guess silently."
+            "If the cheat sheet shows the goal depends on something ambiguous, say in "
+            "expected_behavior\nwhether the product should ask or state its assumption. Do not "
+            "guess silently."
         )
     else:
         reference_block = ""
         missing = (
             "No reference data is available: do not invent names, fields or numbers. If the "
-            "goal could\nbe read several ways, list the readings in acceptable_variations and "
-            "say in expected_behavior\nwhether the product should ask for clarification."
+            "goal could\nbe read several ways, say in expected_behavior which readings are fine "
+            "and whether the\nproduct should ask for clarification."
         )
 
     user = f"""## TASK
 Write {options.count} question(s) this persona would type into the product to pursue the
-scenario's business goal. Language: {options.language}. The product type
-({product.product_type}) is context only; ask what this persona would naturally ask.
+scenario's business goal. Language: {options.language}.
 
 ## INPUT
-Persona (sound like this person):
-{json.dumps(persona_json, indent=2)}
-
+{persona_block}
 Product:
 {json.dumps(product_json, indent=2)}
 
-Scenario:
+Scenario (WHAT the user wants):
 {json.dumps(scenario_json, indent=2)}
 {reference_block}
 ## CONSTRAINTS
-- Sound like the persona: their role, vocabulary, expertise and behaviour.
+- The persona decides HOW the question is asked: wording, tone, length, complexity and
+  ambiguity come only from "How to use the persona". The scenario only says WHAT is wanted.
+- Do not reuse the wording of the scenario's business_goal, title or question_intent; write
+  the question as this person would type it.
 - {identifiers_rule}
-- Style mix for ambiguity level "{options.ambiguity_level.value}": {style_mix}
-  Set question_characteristics.style to precise | vague | investigative and
-  ambiguity_level to low | medium | high for each question. {vague_rule}
-- For each question give its intent and expectations:
-  - expected_behavior: 1-3 plain sentences describing what the product should do for THIS
-    question (what it should return or do; whether asking a clarification or declining
-    would be right or wrong). Not a label.
-  - success_criteria: 1-{MAX_SUCCESS_CRITERIA} short, checkable must-haves of a goal-complete
-    answer, refined from the scenario's success_criteria to this exact question. Include an
-    important "must not" as a negative criterion (e.g. "does not mix currencies").
-  - acceptable_variations: valid readings or behaviours the evaluator must NOT penalise
-    (e.g. "calendar or fiscal quarter", "may add extra columns").
+- Set question_characteristics (style, ambiguity_level, complexity) to describe each
+  question honestly, following the persona's rules.
+- expected_behavior: 1-3 plain sentences: what the product should do for THIS question (what
+  it should return or do; whether asking for clarification or declining would be right or
+  wrong). If the question can fairly be read in more than one way, say which readings are
+  acceptable.
+- success_criteria: 1-{MAX_SUCCESS_CRITERIA} short, checkable must-haves of a goal-complete
+  answer, refined from the scenario's success_criteria to this exact question. Include an
+  important "must not" as a negative criterion (e.g. "does not mix currencies"). Word each
+  criterion so that every acceptable reading passes it.
 - The intended goal is the scenario's business_goal (code copies it; do not restate it).
 - Questions must differ meaningfully from each other.
 
 ## OUTPUT CONTRACT
-Return one JSON object matching this JSON Schema:
-{schema}
+{render_contract(QUESTION_EXAMPLE)}
 
 ## PROHIBITED
-- Copying or lightly rewording the persona's example utterances:
-{examples}
+- Copying or lightly rewording the persona's style examples.
 - ids, goals, leak warnings, timestamps (code adds these).
 - Any text outside the JSON object.
 

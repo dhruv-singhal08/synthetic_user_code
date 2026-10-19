@@ -25,13 +25,15 @@ from synthetic_user.core.exceptions import (
     format_validation_error,
 )
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
+from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import AmbiguityLevel, StrictModel
-from synthetic_user.models.persona import ExpertiseLevel, Persona
+from synthetic_user.models.persona import AmbiguityPreference, ComplexityPreference, Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
     QuestionCase,
+    QuestionComplexity,
     QuestionDraft,
     QuestionGenerationResult,
     QuestionStyle,
@@ -46,6 +48,12 @@ from synthetic_user.references.leaks import find_leaks, pack_identifiers
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
 NEAR_DUPLICATE_JACCARD = 0.8
+# Persona question_preferences.ambiguity -> (style mix level, vague questions allowed).
+PERSONA_AMBIGUITY = {
+    AmbiguityPreference.NONE: (AmbiguityLevel.LOW, False),
+    AmbiguityPreference.OCCASIONAL: (AmbiguityLevel.MEDIUM, True),
+    AmbiguityPreference.FREQUENT: (AmbiguityLevel.HIGH, True),
+}
 VAGUE_NOT_ALLOWED = "vague_not_allowed"
 SURPLUS = "surplus: more questions returned than requested"
 
@@ -54,6 +62,32 @@ class _RawQuestionBatch(StrictModel):
     """Each question is validated individually so one bad item is rejected on its own."""
 
     questions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PersonaQuestionRules:
+    """What the persona allows, from question_preferences (config fills what it leaves out)."""
+
+    ambiguity_level: AmbiguityLevel
+    allow_vague: bool
+    complexity: QuestionComplexity | None  # None = mixed (any complexity)
+    technical: bool
+
+
+def persona_question_rules(persona: Persona, settings: AppConfig) -> PersonaQuestionRules:
+    cfg = settings.generation.question
+    prefs = persona.question_preferences
+    level, vague = (
+        PERSONA_AMBIGUITY[prefs.ambiguity]
+        if prefs.ambiguity is not None
+        else (cfg.ambiguity_level, cfg.allow_vague_questions)
+    )
+    complexity = (
+        None
+        if prefs.complexity is ComplexityPreference.MIXED
+        else QuestionComplexity(prefs.complexity.value)
+    )
+    return PersonaQuestionRules(level, vague, complexity, persona.is_technical)
 
 
 @dataclass
@@ -113,6 +147,8 @@ class QuestionGenerator:
         seen = _NearDuplicates()
         for utterance in persona.example_utterances:
             seen.add(utterance, "persona example utterance")
+        for utterance in product.typical_user_questions:
+            seen.add(utterance, "product typical user question")
         for scenario, grounding, outcome in zip(scenarios, groundings, outcomes, strict=True):
             identifiers = pack_identifiers(grounding[0]) if grounding is not None else []
             result.rejected.extend(outcome.rejected)
@@ -165,40 +201,45 @@ class QuestionGenerator:
         semaphore: asyncio.Semaphore,
     ) -> _ScenarioOutcome:
         cfg = self._settings.generation.question
-        technical = persona.expertise.sql is ExpertiseLevel.HIGH
+        rules = persona_question_rules(persona, self._settings)
         # Leak check only in grounded mode (there are no identifiers otherwise).
-        enforce_leaks = bool(identifiers) and cfg.reject_reference_leaks and not technical
+        enforce_leaks = bool(identifiers) and cfg.reject_reference_leaks and not rules.technical
         options = QuestionPromptOptions(
             count=count,
-            ambiguity_level=cfg.ambiguity_level,
+            ambiguity_level=rules.ambiguity_level,
             language=cfg.language,
-            allow_vague_questions=cfg.allow_vague_questions,
-            technical_persona=technical,
+            allow_vague_questions=rules.allow_vague,
+            technical_persona=rules.technical,
         )
         system, user = build_question_prompt(persona, product, scenario, grounding, options)
         last: list[_RawQuestionBatch] = []
 
         def post_validate(batch: _RawQuestionBatch) -> list[str]:
             last[:] = [batch]
-            if not enforce_leaks:
-                return []
-            return [
-                f"question {i}: uses internal reference names {leaks}; rephrase in the "
-                "persona's own words"
-                for i, raw in enumerate(batch.questions, start=1)
-                if (leaks := find_leaks(str(raw.get("utterance", "")), identifiers))
-            ]
+            errors: list[str] = []
+            for i, raw in enumerate(batch.questions, start=1):
+                if enforce_leaks and (
+                    leaks := find_leaks(str(raw.get("utterance", "")), identifiers)
+                ):
+                    errors.append(
+                        f"question {i}: uses internal reference names {leaks}; rephrase in "
+                        "the persona's own words"
+                    )
+                if (problem := _complexity_problem(raw, rules)) is not None:
+                    errors.append(f"question {i}: {problem}")
+            return errors
 
         async with semaphore:
             try:
-                batch = await generate_structured(
-                    self._llm,
-                    system,
-                    user,
-                    _RawQuestionBatch,
-                    max_retries=self._settings.llm.max_validation_retries,
-                    post_validate=post_validate,
-                )
+                with trace_subject(scenario.id):
+                    batch = await generate_structured(
+                        self._llm,
+                        system,
+                        user,
+                        _RawQuestionBatch,
+                        max_retries=self._settings.llm.max_validation_retries,
+                        post_validate=post_validate,
+                    )
             except LLMOutputValidationError as exc:
                 if not last:
                     return _ScenarioOutcome(
@@ -217,7 +258,7 @@ class QuestionGenerator:
             if len(outcome.drafts) >= count:
                 outcome.rejected.append(_reject(scenario, raw, [SURPLUS]))
                 continue
-            checked = self._check(raw, identifiers, enforce_leaks)
+            checked = self._check(raw, identifiers, enforce_leaks, rules)
             if isinstance(checked, QuestionDraft):
                 outcome.drafts.append((checked, raw))
             else:
@@ -229,7 +270,11 @@ class QuestionGenerator:
         return outcome
 
     def _check(
-        self, raw: dict[str, Any], identifiers: Sequence[str], enforce_leaks: bool
+        self,
+        raw: dict[str, Any],
+        identifiers: Sequence[str],
+        enforce_leaks: bool,
+        rules: PersonaQuestionRules,
     ) -> QuestionDraft | list[str]:
         try:
             draft = QuestionDraft.model_validate(raw)
@@ -239,12 +284,27 @@ class QuestionGenerator:
         if enforce_leaks and (leaks := find_leaks(draft.utterance, identifiers)):
             reasons.append(f"reference leak: {leaks}")
         traits = draft.question_characteristics
+        if (problem := _complexity_problem(raw, rules)) is not None:
+            reasons.append(problem)
         if traits.style is QuestionStyle.VAGUE:
-            if not self._settings.generation.question.allow_vague_questions:
+            if not rules.allow_vague:
                 reasons.append(VAGUE_NOT_ALLOWED)
             if traits.ambiguity_level is AmbiguityLevel.LOW:
                 reasons.append("vague question must have ambiguity_level medium or high")
         return reasons or draft
+
+
+def _complexity_problem(raw: dict[str, Any], rules: PersonaQuestionRules) -> str | None:
+    """The persona asks for one complexity (not mixed): each question must state it."""
+    if rules.complexity is None:
+        return None
+    characteristics = raw.get("question_characteristics")
+    stated = characteristics.get("complexity") if isinstance(characteristics, dict) else None
+    if stated == rules.complexity.value:
+        return None
+    return (
+        f"complexity {stated or 'missing'}: the persona asks for {rules.complexity.value} questions"
+    )
 
 
 def _reject(scenario: Scenario, raw: dict[str, Any], reasons: list[str]) -> RejectedQuestion:

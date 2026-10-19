@@ -29,6 +29,7 @@ from synthetic_user.adapters.base import ProductAdapter, ProductRequest
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import ProductAdapterError, format_validation_error
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
+from synthetic_user.core.trace import record_product_call, trace_subject
 from synthetic_user.models.base import StrictModel
 from synthetic_user.models.execution import (
     ErrorResponse,
@@ -120,7 +121,8 @@ class ProductExecutor:
         async with semaphore:
             start = time.perf_counter()
             try:
-                output = await asyncio.wait_for(self._adapter.send(request), timeout)
+                with trace_subject(question.question_id):
+                    output = await asyncio.wait_for(self._adapter.send(request), timeout)
                 measured = (time.perf_counter() - start) * 1000
                 response = self._validated(output, question)
             except TimeoutError:
@@ -133,6 +135,14 @@ class ProductExecutor:
                 )
                 response = ErrorResponse(error_type=type(exc).__name__, message=str(exc)[:1000])
         latency = response.latency_ms if response.latency_ms is not None else measured
+        with trace_subject(question.question_id):
+            record_product_call(
+                adapter=self._adapter.name,
+                question=question.utterance,
+                outcome=response.outcome.value,
+                answer=response.model_dump(mode="json", exclude={"raw_response"}),
+                latency_ms=latency,
+            )
         raw_body = response.raw_response
         if raw_body is not None:
             response = response.model_copy(update={"raw_response": None})

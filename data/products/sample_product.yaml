@@ -1,24 +1,26 @@
-# PROVISIONAL: SPEC section 5 not yet transcribed; replace with the spec's product verbatim.
+# Sample NL2SQL product (product description schema v2). Illustrative.
 product_id: sample_nl2sql
 product_version: "0.1.0"
 name: Sample NL2SQL Assistant
 description: Answers business questions about corporate card spend by generating SQL.
-product_type: nl2sql
+data_sources:
+  - name: Corporate card warehouse
+    description: Card transactions, employees and departments (see the sample data catalog).
 supported:
   - single-table aggregation
   - filtering by date range
   - ranking and top-N
   - joins over documented relationships
-not_supported_yet:
+not_supported:
   - currency conversion
   - forecasting
-known_gaps:
+known_limitations:
   - may ignore currency_code when summing amounts across currencies
   - department attribution is unreliable (employee-to-department link not verified)
 user_visible_capabilities:
   - ask questions in plain English
   - receive generated SQL
   - receive clarification questions when the request is ambiguous
-response_artifacts_expected:
-  - sql
-  - text
+expected_outputs:
+  - SQL query
+  - Short text explanation

@@ -9,6 +9,7 @@ from typing import TypeVar
 from pydantic import BaseModel, ValidationError
 
 from synthetic_user.core.exceptions import LLMOutputValidationError, format_validation_error
+from synthetic_user.core.trace import record_validation, trace_attempt
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.prompts.structured import with_retry_feedback
 
@@ -40,8 +41,11 @@ async def generate_structured(
     attempts = max_retries + 1
     all_errors: list[str] = []
     prompt = user
+    purpose = model_cls.__name__
     for attempt in range(1, attempts + 1):
-        result = await _attempt(llm, system, prompt, model_cls, post_validate)
+        with trace_attempt(purpose, attempt):
+            result = await _attempt(llm, system, prompt, model_cls, post_validate)
+        record_validation(purpose, attempt, [] if isinstance(result, BaseModel) else result)
         if isinstance(result, BaseModel):
             return result
         errors = result

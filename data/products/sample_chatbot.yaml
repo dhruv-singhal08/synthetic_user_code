@@ -4,19 +4,18 @@ product_id: sample_policy_chatbot
 product_version: "0.1.0"
 name: Sample Travel & Expense Policy Assistant
 description: Answers employee questions about the corporate travel and expense policy in plain text.
-product_type: chatbot
 supported:
   - explain expense policy rules
   - explain per-diem and hotel limits
   - explain receipt and approval requirements
-not_supported_yet:
+not_supported:
   - submitting or approving expense reports
   - checking the status of a specific reimbursement
-known_gaps:
+known_limitations:
   - may give outdated limits for recently changed countries
 user_visible_capabilities:
   - ask policy questions in plain English
   - receive a short text answer, optionally with the policy section it relies on
   - receive clarification questions when the request is ambiguous
-response_artifacts_expected:
-  - text
+expected_outputs:
+  - Short text answer

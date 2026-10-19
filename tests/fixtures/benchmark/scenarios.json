@@ -15,15 +15,10 @@
         "keeps amounts separate per currency or states which currency is used",
         "covers the requested time period"
       ],
-      "question_guidance": {
-        "intent": "rank employees by total card spend",
-        "expected_ambiguity": "medium",
-        "phrasing_hints": [],
-        "terms_to_avoid": []
-      },
       "signature": "benchmark-1",
-      "reference_id": "sample_card_spend_index-a40ecd4f",
-      "reference_pack_id": "RP_SCN_001"
+      "reference_id": "sample_card_spend_catalog-252134aa",
+      "reference_pack_id": "RP_SCN_001",
+      "question_intent": "rank employees by total card spend"
     },
     {
       "id": "SCN_002",
@@ -39,15 +34,10 @@
         "shows card spend per merchant category for each month",
         "covers the requested period"
       ],
-      "question_guidance": {
-        "intent": "monthly spend trend by category",
-        "expected_ambiguity": "low",
-        "phrasing_hints": [],
-        "terms_to_avoid": []
-      },
       "signature": "benchmark-2",
-      "reference_id": "sample_card_spend_index-a40ecd4f",
-      "reference_pack_id": "RP_SCN_002"
+      "reference_id": "sample_card_spend_catalog-252134aa",
+      "reference_pack_id": "RP_SCN_002",
+      "question_intent": "monthly spend trend by category"
     },
     {
       "id": "SCN_003",
@@ -63,12 +53,10 @@
         "states a nightly hotel limit for Paris",
         "says whether taxes are included"
       ],
-      "question_guidance": {
-        "intent": "learn the hotel cap for Paris"
-      },
       "signature": "explanation|book hotel limit night paris spent|supported",
       "reference_id": null,
-      "reference_pack_id": null
+      "reference_pack_id": null,
+      "question_intent": "learn the hotel cap for Paris"
     },
     {
       "id": "SCN_004",
@@ -84,67 +72,122 @@
         "says clearly that it cannot approve reports",
         "explains where approval is done"
       ],
-      "question_guidance": {
-        "intent": "approve a report via chat"
-      },
       "signature": "how_to|approved chat expense leaving report without|unsupported",
       "reference_id": null,
-      "reference_pack_id": null
+      "reference_pack_id": null,
+      "question_intent": "approve a report via chat"
     }
   ],
   "reference_packs": [
     {
       "pack_id": "RP_SCN_001",
       "scenario_id": "SCN_001",
-      "reference_id": "sample_card_spend_index-a40ecd4f",
-      "core_refs": [
+      "reference_id": "sample_card_spend_catalog-252134aa",
+      "kind": "data_catalog",
+      "tables": [
         {
-          "name": "card_transactions.amount",
-          "quote": "Transaction amount in the transaction currency (see currency_code).",
+          "name": "card_transactions",
+          "description": "Corporate card spend, one row per posted card transaction.",
+          "rules": [
+            "Amounts are in the transaction currency; amounts in different currencies must not be summed directly."
+          ],
+          "columns": [
+            {
+              "name": "amount",
+              "type": "NUMERIC",
+              "description": "Transaction amount in the transaction currency (see currency_code).",
+              "values": []
+            },
+            {
+              "name": "currency_code",
+              "type": "STRING",
+              "description": "ISO 4217 currency of amount.",
+              "values": [
+                "USD",
+                "EUR",
+                "GBP",
+                "INR"
+              ]
+            }
+          ],
           "why": "spend is the sum of amount"
         },
         {
-          "name": "card_transactions.currency_code",
-          "quote": "ISO 4217 currency of amount.",
-          "why": "amounts must stay per currency"
-        },
-        {
-          "name": "employees.full_name",
-          "quote": "Employee full name.",
+          "name": "employees",
+          "description": "Employee directory used to attribute card spend to people, one row per employee.",
+          "rules": [],
+          "columns": [
+            {
+              "name": "full_name",
+              "type": "STRING",
+              "description": "Employee full name.",
+              "values": []
+            }
+          ],
           "why": "the ranking is by employee"
+        }
+      ],
+      "joins": [
+        {
+          "from": "card_transactions.employee_id",
+          "to": "employees.employee_id",
+          "verified": true
         }
       ],
       "rules": [
         {
-          "rule": "never sum amounts across currencies",
-          "quote": "Amounts in different currency_code values must not be summed directly."
+          "id": "R1",
+          "rule": "Amounts in different currency_code values must not be summed directly."
         }
       ],
+      "documents": [],
       "rejected_items": [],
       "edited": false
     },
     {
       "pack_id": "RP_SCN_002",
       "scenario_id": "SCN_002",
-      "reference_id": "sample_card_spend_index-a40ecd4f",
-      "core_refs": [
+      "reference_id": "sample_card_spend_catalog-252134aa",
+      "kind": "data_catalog",
+      "tables": [
         {
-          "name": "card_transactions.amount",
-          "quote": "Transaction amount in the transaction currency (see currency_code).",
+          "name": "card_transactions",
+          "description": "Corporate card spend, one row per posted card transaction.",
+          "rules": [
+            "Amounts are in the transaction currency; amounts in different currencies must not be summed directly."
+          ],
+          "columns": [
+            {
+              "name": "amount",
+              "type": "NUMERIC",
+              "description": "Transaction amount in the transaction currency (see currency_code).",
+              "values": []
+            },
+            {
+              "name": "transaction_date",
+              "type": "DATE",
+              "description": "Date the transaction posted.",
+              "values": []
+            },
+            {
+              "name": "merchant_category",
+              "type": "STRING",
+              "description": "Merchant category as reported on the transaction.",
+              "values": [
+                "travel",
+                "dining",
+                "software",
+                "office_supplies",
+                "other"
+              ]
+            }
+          ],
           "why": "spend is the sum of amount"
-        },
-        {
-          "name": "card_transactions.transaction_date",
-          "quote": "Date the transaction posted.",
-          "why": "months come from the posting date"
-        },
-        {
-          "name": "card_transactions.merchant_category",
-          "quote": "Merchant category as reported on the transaction.",
-          "why": "the trend is per category"
         }
       ],
+      "joins": [],
       "rules": [],
+      "documents": [],
       "rejected_items": [],
       "edited": false
     }

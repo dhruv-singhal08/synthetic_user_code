@@ -20,10 +20,13 @@ from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import (
+    DEFAULT_INSTRUCTIONS,
+    CatalogPackDraft,
     Reference,
+    ReferenceKind,
     ReferencePack,
-    ReferencePackDraft,
     normalise_quote,
+    quote_in,
 )
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
@@ -64,10 +67,15 @@ def _pack(**overrides: Any) -> dict[str, Any]:
         "pack_id": "RP_SCN_001",
         "scenario_id": "SCN_001",
         "reference_id": "catalog-1234abcd",
-        "core_refs": [
-            {"name": "card_transactions.amount", "quote": "Transaction amount", "why": "spend"}
+        "kind": "data_catalog",
+        "tables": [
+            {
+                "name": "card_transactions",
+                "columns": [{"name": "amount", "description": "Transaction amount"}],
+                "why": "spend",
+            }
         ],
-        "rules": [{"rule": "no cross-currency sums", "quote": "must not be summed"}],
+        "rules": [{"id": "R1", "rule": "Amounts must not be summed across currencies."}],
         **overrides,
     }
 
@@ -86,7 +94,7 @@ def _scenario(**overrides: Any) -> dict[str, Any]:
         "capability": "supported",
         "capability_rationale": "Ranking over one join is supported.",
         "success_criteria": ["lists employees ranked by card spend"],
-        "question_guidance": {"intent": "rank employees by spend"},
+        "question_intent": "rank employees by spend",
         "signature": "ranking|card_transactions,employees",
         **overrides,
     }
@@ -101,12 +109,15 @@ def _question(**overrides: Any) -> dict[str, Any]:
         "reference_pack_id": "RP_SCN_001",
         "utterance": "Who spent the most on cards last month?",
         "intended_goal": "Rank employees by card spend",
-        "intent": {"task_type": "ranking", "metrics": ["spend"]},
-        "question_characteristics": {"ambiguity_level": "medium"},
+        "intent": {"task_type": "ranking"},
+        "question_characteristics": {
+            "style": "precise",
+            "ambiguity_level": "medium",
+            "complexity": "simple",
+        },
         "expectations": {
             "expected_behavior": "Rank employees by card spend, per currency.",
             "success_criteria": ["ranks employees by spend"],
-            "acceptable_variations": ["asks which currency"],
         },
         **overrides,
     }
@@ -122,7 +133,7 @@ def _question(**overrides: Any) -> dict[str, Any]:
         (EvaluationResult, _evaluation(comment="x")),
         (Scenario, _scenario(priority=1)),
         (QuestionCase, _question(tone="casual")),
-        (ReferencePack, _pack(tables=[])),
+        (ReferencePack, _pack(note="x")),
     ],
 )
 def test_extra_fields_rejected(model: type[BaseModel], payload: dict[str, Any]) -> None:
@@ -160,8 +171,8 @@ def test_bad_enums_rejected(model: type[BaseModel], payload: dict[str, Any]) -> 
 
 def test_valid_payloads_parse() -> None:
     assert Scenario.model_validate(_scenario()).reference_pack_id == "RP_SCN_001"
-    assert ReferencePack.model_validate(_pack()).rules[0].quote == "must not be summed"
-    assert QuestionCase.model_validate(_question()).intent.metrics == ["spend"]
+    assert ReferencePack.model_validate(_pack()).rules[0].id == "R1"
+    assert QuestionCase.model_validate(_question()).intent.task_type == "ranking"
     result = EvaluationResult.model_validate(
         _evaluation(
             findings=[_finding(confidence=0.7)],
@@ -231,51 +242,53 @@ def test_confidence_bounded() -> None:
     assert Finding.model_validate(_finding()).confidence is None
 
 
-def test_pack_needs_a_core_ref_and_a_well_formed_id() -> None:
-    with pytest.raises(ValidationError, match="core_refs"):
-        ReferencePack.model_validate(_pack(core_refs=[]))
-    with pytest.raises(ValidationError, match="core_refs"):
-        ReferencePackDraft.model_validate({"core_refs": []})
+def test_pack_fits_its_kind_and_has_a_well_formed_id() -> None:
+    with pytest.raises(ValidationError, match="at least one"):
+        ReferencePack.model_validate(_pack(tables=[]))
+    with pytest.raises(ValidationError, match="documents only"):
+        ReferencePack.model_validate(
+            _pack(kind="document_collection", documents=[{"name": "d", "summary": "s", "why": "w"}])
+        )
+    with pytest.raises(ValidationError, match="tables"):
+        CatalogPackDraft.model_validate({"tables": []})
     with pytest.raises(ValidationError, match="pack_id"):
         ReferencePack.model_validate(_pack(pack_id="PACK_1"))
 
 
-def test_reference_contains_is_whitespace_case_and_quote_mark_insensitive() -> None:
-    reference = Reference(
-        reference_id="r-1",
-        source_name="policy.md",
-        format="markdown",
-        text="## Hotels\nThe nightly hotel limit is USD 250 in Tier 1 cities\n(New York).",
-    )
-    assert reference.contains("the NIGHTLY hotel limit is usd 250 in tier 1 cities (new york)")
-    assert reference.contains('"The nightly hotel limit is USD 250."')
-    assert not reference.contains("The nightly hotel limit is USD 300")
-    assert not reference.contains("   ")
+def test_quote_in_is_whitespace_case_and_quote_mark_insensitive() -> None:
+    text = "## Hotels\nThe nightly hotel limit is USD 250 in Tier 1 cities\n(New York)."
+    assert quote_in("the NIGHTLY hotel limit is usd 250 in tier 1 cities (new york)", text)
+    assert quote_in('"The nightly hotel limit is USD 250."', text)
+    assert not quote_in("The nightly hotel limit is USD 300", text)
+    assert not quote_in("   ", text)
     assert normalise_quote(" \u201cA  b.\u201d ") == "a b"
 
 
-def test_reference_guide_falls_back_to_default() -> None:
-    reference = Reference(reference_id="r", source_name="r.txt", format="text", text="x")
-    assert "not exhaustive" in reference.guide_text()
-    assert (
-        Reference.model_validate(
-            {**reference.model_dump(), "guide": "Read it as a policy."}
-        ).guide_text()
-        == "Read it as a policy."
+def test_reference_instructions_fall_back_to_the_default_of_its_kind() -> None:
+    reference = Reference(
+        reference_id="r",
+        source_name="r.yaml",
+        content={
+            "kind": "document_collection",
+            "name": "KB",
+            "documents": [{"name": "d", "summary": "s"}],
+        },
     )
+    assert reference.instructions_text() == DEFAULT_INSTRUCTIONS[ReferenceKind.DOCUMENT_COLLECTION]
+    guided = reference.model_copy(update={"instructions": "Read it as a policy."})
+    assert guided.instructions_text() == "Read it as a policy."
 
 
 def test_product_supported_overlap_rejected() -> None:
-    with pytest.raises(ValidationError, match="both supported and not_supported_yet"):
+    with pytest.raises(ValidationError, match="both supported and not_supported"):
         ProductDescription.model_validate(
             {
                 "product_id": "p",
                 "product_version": "1",
                 "name": "n",
-                "product_type": "chatbot",
                 "description": "d",
                 "supported": ["forecasting"],
-                "not_supported_yet": ["forecasting"],
+                "not_supported": ["forecasting"],
             }
         )
 
@@ -476,12 +489,26 @@ SAMPLE_CHATBOT = Path(__file__).resolve().parents[2] / "data" / "products" / "sa
 
 def test_sample_chatbot_is_a_non_sql_product() -> None:
     product = load_product(SAMPLE_CHATBOT)
-    assert product.product_type == "chatbot"
-    assert product.response_artifacts_expected == ["text"]
+    assert product.expected_outputs == ["Short text answer"]
 
 
-def test_product_requires_product_type() -> None:
-    with pytest.raises(ValidationError, match="product_type"):
-        ProductDescription.model_validate(
-            {"product_id": "p", "product_version": "1", "name": "n", "description": "d"}
-        )
+def test_voc_product_description_loads() -> None:
+    product = load_product(SAMPLE_CHATBOT.with_name("voice_of_customer_agent.yaml"))
+    assert [s.name for s in product.data_sources] == ["Complaints", "CSATResult"]
+    assert len(product.supported) == 10 and len(product.not_supported) == 9
+    assert len(product.typical_user_questions) == 8 and len(product.expected_outputs) == 8
+    assert product.business_problem and product.known_limitations
+
+
+def test_previous_product_schema_is_refused_with_the_new_names() -> None:
+    old = {"product_id": "p", "product_version": "1", "name": "n", "description": "d"}
+    for key, message in (
+        ("product_type", "'product_type' was removed"),
+        ("not_supported_yet", "'not_supported_yet' is now 'not_supported'"),
+        ("known_gaps", "'known_gaps' is now 'known_limitations'"),
+        ("response_artifacts_expected", "is now 'expected_outputs'"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            ProductDescription.model_validate({**old, key: ["x"]})
+    minimal = ProductDescription.model_validate(old)  # everything else is optional
+    assert minimal.data_sources == [] and minimal.business_problem is None

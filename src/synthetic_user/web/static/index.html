@@ -3,287 +3,395 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Synthetic User - Product Testing</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>Synthetic User · Product Quality Testing</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2300175a'/%3E%3Ctext x='16' y='21' font-family='Arial' font-size='13' font-weight='700' fill='white' text-anchor='middle'%3ESU%3C/text%3E%3C/svg%3E">
 </head>
 <body>
-<header class="topbar">
+<!-- Icons (inline, no external requests) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-setup" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0V7zM12 17v5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10 8.5v7l5.5-3.5z" fill="currentColor"/></symbol>
+  <symbol id="i-report" viewBox="0 0 24 24"><path d="M5 3h10l4 4v14H5zM9 17v-4M12 17v-7M15 17v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 9V3h10v6M7 17H4v-7h16v7h-3M7 14h10v7H7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2zM12 10v5M12 18v.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 11v6M12 7.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-bug" viewBox="0 0 24 24"><path d="M8 8a4 4 0 0 1 8 0M7 10h10v5a5 5 0 0 1-10 0zM12 10v10M3 13h4M17 13h4M4 7l3 2M20 7l-3 2M4 20l3-2M20 20l-3-2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+</svg>
+
+<header class="appbar">
   <div class="brand">
-    <div class="brand-mark">SU</div>
-    <div>
-      <h1>Synthetic User</h1>
-      <p>Automated testing of conversational products</p>
+    <div class="brand-mark" aria-hidden="true">SU</div>
+    <div class="brand-text">
+      <span class="brand-name">Synthetic User</span>
+      <span class="brand-sub">Conversational product quality testing</span>
     </div>
   </div>
+  <div class="crumb" id="crumb"></div>
   <div class="spacer"></div>
-  <div id="config-badge" class="env">loading configuration…</div>
+  <span id="env" class="env" title="Evaluation environment">Loading configuration…</span>
+  <a id="new-run" class="btn btn-on-dark" href="#setup"><svg class="ic"><use href="#i-plus"/></svg>New run</a>
+  <div class="busy-line" id="busy-line" aria-hidden="true"></div>
 </header>
 
-<div class="layout">
-  <nav class="rail" aria-label="Sections">
-    <ol>
-      <li id="nav-inputs"><a href="#inputs"><span class="dot">1</span>Inputs</a></li>
-      <li id="nav-connection"><a href="#connection"><span class="dot">2</span>Product connection</a></li>
-      <li id="nav-pipeline"><a href="#pipeline"><span class="dot">3</span>Test pipeline</a></li>
-      <li id="nav-results"><a href="#results"><span class="dot">4</span>Results</a></li>
-    </ol>
-    <div class="run-box">
-      <b>Current run</b>
-      <div id="rail-run" class="muted">No run started</div>
-      <div id="rail-mode" class="chips"></div>
-      <div id="rail-sources" class="small"></div>
+<div class="shell">
+  <aside class="sidenav" aria-label="Workflow">
+    <nav>
+      <p class="nav-label">Workflow</p>
+      <a class="nav-item" href="#setup" data-nav="setup">
+        <span class="nav-ic"><svg class="ic"><use href="#i-setup"/></svg></span>
+        <span class="nav-text"><b>Test setup</b><small data-nav-status>Persona, product, reference</small></span>
+      </a>
+      <a class="nav-item" href="#connect" data-nav="connect">
+        <span class="nav-ic"><svg class="ic"><use href="#i-plug"/></svg></span>
+        <span class="nav-text"><b>Product connection</b><small data-nav-status>Not connected</small></span>
+      </a>
+      <a class="nav-item" href="#run" data-nav="run">
+        <span class="nav-ic"><svg class="ic"><use href="#i-play"/></svg></span>
+        <span class="nav-text"><b>Run tests</b><small data-nav-status>0 of 4 steps</small></span>
+      </a>
+      <a class="nav-item" href="#report" data-nav="report">
+        <span class="nav-ic"><svg class="ic"><use href="#i-report"/></svg></span>
+        <span class="nav-text"><b>Test report</b><small data-nav-status>Not available yet</small></span>
+      </a>
+    </nav>
+    <div class="run-card">
+      <p class="nav-label">Current run</p>
+      <div id="run-id" class="run-id muted">No run started</div>
+      <div id="run-mode"></div>
+      <dl id="run-sources" class="run-sources"></dl>
     </div>
-  </nav>
+    <div class="sidenav-foot">
+      <a href="/api/docs" target="_blank" rel="noopener">API documentation</a>
+    </div>
+  </aside>
 
-  <main>
-    <!-- 1. Inputs ---------------------------------------------------------------------------->
-    <section class="card" id="inputs">
-      <div class="card-head">
-        <span class="num">1</span>
+  <main class="content">
+    <!-- 1. Setup ======================================================================== -->
+    <section class="view" data-view="setup" aria-labelledby="h-setup">
+      <div class="page-head">
         <div>
-          <h2>Inputs</h2>
-          <p>Who is testing, what is being tested, and (optionally) the reference data used to check answers.</p>
+          <p class="eyebrow">Step 1 of 4</p>
+          <h1 id="h-setup">Test setup</h1>
+          <p class="lede">Define who is testing, which product is under test and, optionally, the reference data used to check answers.</p>
         </div>
       </div>
-      <div class="card-body">
-        <div class="grid-3">
-          <!-- Persona -->
-          <div class="input-panel" data-kind="persona">
-            <div class="panel-head">
-              <h3>Persona</h3>
-              <div class="segmented" role="group" aria-label="Persona source">
-                <button type="button" data-source="sample" class="on">Sample</button>
-                <button type="button" data-source="upload">Upload</button>
+
+      <div class="grid-3">
+        <!-- Persona -->
+        <article class="card">
+          <div class="card-head">
+            <div><h2>Persona</h2><p class="card-sub">Who the synthetic user is</p></div>
+            <div class="seg" id="persona-source" role="group" aria-label="Persona source">
+              <button type="button" data-source="sample" class="on">Sample</button>
+              <button type="button" data-source="upload">Upload</button>
+            </div>
+          </div>
+          <div class="card-body input" data-kind="persona">
+            <label class="drop hidden" data-drop>
+              <input type="file" accept=".yaml,.yml" hidden>
+              <svg class="ic drop-ic"><use href="#i-upload"/></svg>
+              <span><b>Upload persona YAML</b> or drop it here</span>
+              <small>Role, expertise, style, typical tasks</small>
+            </label>
+            <div class="source"></div>
+            <div class="preview"></div>
+            <div class="field-block">
+              <label class="label" for="persona-queries">Example questions <span class="opt">optional · one per line</span></label>
+              <textarea id="persona-queries" rows="3" placeholder="e.g. Which teams overspent on travel last quarter?"></textarea>
+              <p class="help">Used only to mimic the user's writing style. Generated questions never copy them.</p>
+            </div>
+          </div>
+        </article>
+
+        <!-- Product description -->
+        <article class="card">
+          <div class="card-head">
+            <div><h2>Product description</h2><p class="card-sub">What the product does and does not do</p></div>
+            <span class="pill pill-req" data-status-for="product">Required</span>
+          </div>
+          <div class="card-body input" data-kind="product">
+            <label class="drop" data-drop>
+              <input type="file" accept=".yaml,.yml" hidden>
+              <svg class="ic drop-ic"><use href="#i-upload"/></svg>
+              <span><b>Upload product description YAML</b> or drop it here</span>
+              <small>What it does, its data sources, supported / not supported, known limitations</small>
+            </label>
+            <a class="link" href="/api/product-template" download><svg class="ic"><use href="#i-download"/></svg>Download a product description template</a>
+            <div class="source"></div>
+            <div class="preview"></div>
+          </div>
+        </article>
+
+        <!-- Reference -->
+        <article class="card">
+          <div class="card-head">
+            <div><h2>Reference data</h2><p class="card-sub">The answer key used to check facts</p></div>
+            <label class="toggle"><input type="checkbox" id="use-reference"><span id="reference-label">Off</span></label>
+          </div>
+          <div class="card-body">
+            <div id="reference-off" class="callout callout-info">
+              <svg class="ic"><use href="#i-info"/></svg>
+              <div><b>Ungrounded run.</b> Without reference data, answers are judged on relevancy, completeness and hallucination only. Correctness and groundedness need a reference.</div>
+            </div>
+            <div id="reference-on" class="hidden">
+              <div class="input" data-kind="reference">
+                <label class="drop" data-drop>
+                  <input type="file" accept=".yaml,.yml,.json" hidden>
+                  <svg class="ic drop-ic"><use href="#i-upload"/></svg>
+                  <span><b>Upload reference</b> (YAML or JSON) or drop it here</span>
+                  <small>A data catalog (tables, columns, relationships, rules) or a document collection (documents with summaries)</small>
+                </label>
+                <p class="help">Templates: <a class="link" href="/api/reference-template/data_catalog" download><svg class="ic"><use href="#i-download"/></svg>Data catalog</a> · <a class="link" href="/api/reference-template/document_collection" download><svg class="ic"><use href="#i-download"/></svg>Document collection</a></p>
+                <div class="source"></div>
+                <div class="preview"></div>
+              </div>
+              <div class="sub-input">
+                <div class="label-row">
+                  <span class="label">Usage instructions <span class="opt">optional</span></span>
+                  <div class="seg" id="instructions-source" role="group" aria-label="Usage instructions">
+                    <button type="button" data-source="none" class="on">Default</button>
+                    <button type="button" data-source="upload">Upload</button>
+                    <button type="button" data-source="write">Write</button>
+                  </div>
+                </div>
+                <p id="instructions-default" class="help">How to read the reference and judge answers. Without your own, the default instructions for the reference's format are used.</p>
+                <div class="input hidden" data-kind="reference_guide">
+                  <label class="drop drop-compact" data-drop>
+                    <input type="file" accept=".md,.markdown,.txt" hidden>
+                    <span><b>Upload instructions</b> (Markdown or TXT)</span>
+                    <small>How to read the reference and what counts as correct</small>
+                  </label>
+                  <div class="source"></div>
+                  <div class="preview"></div>
+                </div>
+                <div id="instructions-write" class="hidden">
+                  <textarea id="instructions-text" rows="7" aria-label="Usage instructions"></textarea>
+                  <p class="help">The placeholder shows the default instructions for this format.</p>
+                </div>
               </div>
             </div>
-            <label class="dropzone hidden" data-drop>
-              <input type="file" accept=".yaml,.yml" hidden>
-              <b>Choose a persona YAML</b> or drop it here
-              <span class="small muted">Who the synthetic user is: role, expertise, style</span>
-            </label>
-            <div class="source small muted"></div>
-            <div class="preview"></div>
-            <div>
-              <label class="field" for="persona-queries">Sample queries (optional, one per line)</label>
-              <textarea id="persona-queries" rows="4" placeholder="e.g. Which teams overspent on travel last quarter?"></textarea>
-              <div class="small muted">Used only to mimic the user's style. Generated questions never copy them.</div>
-            </div>
           </div>
-
-          <!-- Product description -->
-          <div class="input-panel" data-kind="product">
-            <div class="panel-head">
-              <h3>Product description</h3>
-              <span class="badge req" data-status>Required</span>
-            </div>
-            <label class="dropzone" data-drop>
-              <input type="file" accept=".yaml,.yml" hidden>
-              <b>Choose the product description YAML</b> or drop it here
-              <span class="small muted">Product type, supported / not supported yet, known gaps</span>
-            </label>
-            <div class="source small muted"></div>
-            <div class="preview"></div>
-          </div>
-
-          <!-- Reference -->
-          <div class="input-panel" data-kind="reference">
-            <div class="panel-head">
-              <h3>Reference</h3>
-              <label class="switch"><input type="checkbox" id="use-index"> <span id="index-mode-label">Off</span></label>
-            </div>
-            <div id="index-off" class="note"><b>Ungrounded run.</b> No reference data: scenarios have no reference pack and answers are judged on generic criteria only (relevance, goal completeness, honesty...).</div>
-            <div id="index-on" class="hidden">
-              <label class="dropzone" data-drop>
-                <input type="file" accept=".json,.txt,.md,.markdown" hidden>
-                <b>Choose the reference file (JSON, TXT or Markdown)</b> or drop it here
-                <span class="small muted">Any reference: a data catalog, table descriptions, a policy... Each scenario gets a reference pack quoted from it.</span>
-              </label>
-              <div class="source small muted"></div>
-              <div class="preview"></div>
-            </div>
-          </div>
-
-          <!-- Usage guide (optional, grounded only) -->
-          <div class="input-panel hidden" data-kind="reference_guide" id="guide-panel">
-            <div class="panel-head">
-              <h3>Usage guide <span class="small muted">(optional)</span></h3>
-            </div>
-            <label class="dropzone" data-drop>
-              <input type="file" accept=".md,.markdown,.txt" hidden>
-              <b>Choose the usage guide (Markdown or TXT)</b> or drop it here
-              <span class="small muted">How to read the reference, what is authoritative, what counts as core, evaluation guidance. Without it: "descriptive reference, not exhaustive".</span>
-            </label>
-            <div class="source small muted"></div>
-            <div class="preview"></div>
-          </div>
-        </div>
+        </article>
       </div>
-      <div class="startbar">
-        <div class="checklist">
-          <span id="chk-persona">Persona</span>
-          <span id="chk-product">Product description</span>
-          <span id="chk-index">Reference</span>
-        </div>
+
+      <div class="actionbar">
+        <ul class="checklist" aria-label="Readiness">
+          <li id="chk-persona">Persona</li>
+          <li id="chk-product">Product description</li>
+          <li id="chk-reference">Reference</li>
+        </ul>
         <div class="spacer"></div>
-        <span id="start-hint" class="small muted"></span>
-        <button id="create-run" class="btn primary" type="button" disabled>Start run</button>
+        <span id="start-hint" class="hint"></span>
+        <button id="create-run" class="btn btn-primary" type="button" disabled>Start run</button>
       </div>
+
+      <article class="card" id="recent-card">
+        <div class="card-head">
+          <div><h2>Recent runs</h2><p class="card-sub">Reopen a previous run and its report</p></div>
+        </div>
+        <div class="table-wrap flat"><table class="table" id="recent-table"><thead></thead><tbody></tbody></table></div>
+      </article>
     </section>
 
-    <!-- 2. Product connection ---------------------------------------------------------------->
-    <section class="card" id="connection">
-      <div class="card-head">
-        <span class="num">2</span>
+    <!-- 2. Connection =================================================================== -->
+    <section class="view" data-view="connect" aria-labelledby="h-connect">
+      <div class="page-head">
         <div>
-          <h2>Product connection</h2>
-          <p>Point the test at the product under test: its URL and the contract that says how to call it and read its reply.</p>
+          <p class="eyebrow">Step 2 of 4</p>
+          <h1 id="h-connect">Product connection</h1>
+          <p class="lede">Point the test at the product: its endpoint and the contract describing how to call it and where the answer is in its reply.</p>
         </div>
-        <div class="right"><span id="conn-badge" class="badge info">Not connected</span></div>
+        <span id="conn-pill" class="pill pill-neutral">Not connected</span>
       </div>
-      <div class="card-body">
-        <div class="conn-grid">
-          <div class="conn-field">
-            <label class="field" for="product-url">Product URL</label>
-            <input id="product-url" type="url" placeholder="https://product.example.com/v1/ask">
-            <div class="small muted">The endpoint each question is sent to.</div>
-          </div>
-          <div class="conn-field">
-            <div class="panel-head">
-              <label class="field">Contract</label>
-              <div class="segmented" id="contract-source" role="group" aria-label="Contract source">
-                <button type="button" data-source="upload" class="on">Upload contract</button>
-                <button type="button" data-source="mock">Mock product</button>
+
+      <article class="card">
+        <div class="card-body">
+          <div class="conn-grid">
+            <div>
+              <label class="label" for="product-url">Product endpoint URL</label>
+              <input id="product-url" type="url" placeholder="https://product.example.com/v1/ask" autocomplete="off">
+              <p class="help">Every generated question is sent to this endpoint.</p>
+            </div>
+            <div>
+              <div class="label-row">
+                <span class="label">Contract</span>
+                <div class="seg" id="contract-source" role="group" aria-label="Contract source">
+                  <button type="button" data-source="upload" class="on">Upload contract</button>
+                  <button type="button" data-source="mock">Mock product</button>
+                </div>
+              </div>
+              <div id="contract-upload">
+                <label class="drop drop-compact" data-contract-drop>
+                  <input type="file" accept=".yaml,.yml,.json" hidden>
+                  <span><b>Upload contract YAML / JSON</b> or drop it here</span>
+                  <small id="contract-file">Request body template and response mapping</small>
+                </label>
+                <a class="link" href="/api/contract-template" download><svg class="ic"><use href="#i-download"/></svg>Download a contract template</a>
+              </div>
+              <div id="contract-mock" class="callout callout-info hidden">
+                <svg class="ic"><use href="#i-info"/></svg>
+                <div><b>Mock product (demo only).</b> No real call is made: an AI stand-in plays the product from its description.</div>
               </div>
             </div>
-            <div id="contract-upload">
-              <label class="dropzone compact" data-contract-drop>
-                <input type="file" accept=".yaml,.yml,.json" hidden>
-                <b>Choose the contract YAML / JSON</b> or drop it here
-                <span id="contract-file" class="small muted">Request body template + where the answer is in the reply</span>
-              </label>
-              <a class="small" href="/api/contract-template" download>Download a contract template</a>
-            </div>
-            <div id="contract-mock" class="note hidden"><b>Mock product.</b> No real call: an LLM stand-in plays the product described in the product description (using the reference when one is given). For demos only.</div>
           </div>
+          <div class="form-actions">
+            <button id="connect" class="btn btn-primary" type="button" disabled>Connect</button>
+            <button id="disconnect" class="btn" type="button" disabled>Disconnect</button>
+            <span id="adapter-note" class="hint"></span>
+          </div>
+          <div id="contract"></div>
         </div>
-        <div class="row conn-actions">
-          <button id="connect" class="btn navy" type="button" disabled>Connect</button>
-          <button id="disconnect" class="btn" type="button" disabled>Disconnect</button>
-          <span id="adapter-note" class="small muted"></span>
-        </div>
-        <div id="contract"></div>
-      </div>
+      </article>
     </section>
 
-    <!-- 3. Pipeline -------------------------------------------------------------------------->
-    <section class="card" id="pipeline">
-      <div class="card-head">
-        <span class="num">3</span>
+    <!-- 3. Run ========================================================================== -->
+    <section class="view" data-view="run" aria-labelledby="h-run">
+      <div class="page-head">
         <div>
-          <h2>Test pipeline</h2>
-          <p>Run the steps in order. Re-running a step regenerates everything after it.</p>
+          <p class="eyebrow">Step 3 of 4</p>
+          <h1 id="h-run">Run tests</h1>
+          <p class="lede">Run the steps in order. Re-running a step regenerates everything after it.</p>
         </div>
+        <button id="run-all" class="btn btn-primary" type="button" disabled><svg class="ic"><use href="#i-play"/></svg>Run all remaining steps</button>
       </div>
-      <div class="card-body">
-        <div class="steps">
-          <div class="step" data-step="scenarios">
-            <div class="step-top"><span class="step-no">Step 1</span><span class="status">Pending</span></div>
-            <h3>Generate scenarios</h3>
-            <p id="scenarios-desc">Business goals and success criteria this persona would pursue with the product.</p>
-            <div class="count-row"><label for="scenario-count">Scenarios</label><input id="scenario-count" type="number" min="1" max="50"></div>
-            <div class="result"></div>
-            <button class="btn step-btn" type="button" disabled>Run</button>
-          </div>
-          <div class="step" data-step="questions">
-            <div class="step-top"><span class="step-no">Step 2</span><span class="status">Pending</span></div>
-            <h3>Generate questions</h3>
-            <p>Natural questions in the persona's own words, with expected behaviour.</p>
-            <div class="count-row"><label for="question-count">Per scenario</label><input id="question-count" type="number" min="1" max="50"></div>
-            <div class="result"></div>
-            <button class="btn step-btn" type="button" disabled>Run</button>
-          </div>
-          <div class="step" data-step="execute">
-            <div class="step-top"><span class="step-no">Step 3</span><span class="status">Pending</span></div>
-            <h3>Run on product</h3>
-            <p id="execute-desc">Each question is sent to the product; answers are recorded, never executed.</p>
-            <div class="result"></div>
-            <button class="btn step-btn" type="button" disabled>Run</button>
-          </div>
-          <div class="step" data-step="evaluate">
-            <div class="step-top"><span class="step-no">Step 4</span><span class="status">Pending</span></div>
-            <h3>Evaluate</h3>
-            <p>One judge for every product: generic checks, plus reference alignment against each scenario's reference pack when a reference is used.</p>
-            <div class="result"></div>
-            <button class="btn step-btn" type="button" disabled>Run</button>
-          </div>
-        </div>
-        <div class="pipeline-actions">
-          <button id="run-all" class="btn primary" type="button" disabled>Run all remaining steps</button>
-          <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
-          <span id="busy" class="small muted"></span>
-        </div>
-        <details>
-          <summary>Activity log</summary>
-          <div id="log" class="log"></div>
-        </details>
+
+      <div id="run-callout"></div>
+
+      <ol class="stepper">
+        <li class="step" data-step="scenarios">
+          <div class="step-head"><span class="step-dot">1</span><span class="step-status">Pending</span></div>
+          <h3>Generate scenarios</h3>
+          <p id="scenarios-desc" class="step-desc">Business goals this persona would pursue with the product.</p>
+          <div class="step-count"><label for="scenario-count">Scenarios</label><input id="scenario-count" type="number" min="1" max="50"></div>
+          <div class="step-result"></div>
+          <button class="btn step-btn" type="button" disabled>Run</button>
+        </li>
+        <li class="step" data-step="questions">
+          <div class="step-head"><span class="step-dot">2</span><span class="step-status">Pending</span></div>
+          <h3>Generate questions</h3>
+          <p class="step-desc">Natural questions in the persona's own words, each with its expected behaviour.</p>
+          <div class="step-count"><label for="question-count">Per scenario</label><input id="question-count" type="number" min="1" max="50"></div>
+          <div class="step-result"></div>
+          <button class="btn step-btn" type="button" disabled>Run</button>
+        </li>
+        <li class="step" data-step="execute">
+          <div class="step-head"><span class="step-dot">3</span><span class="step-status">Pending</span></div>
+          <h3>Ask the product</h3>
+          <p id="execute-desc" class="step-desc">Each question is sent to the product and the answer is recorded.</p>
+          <div class="step-result"></div>
+          <button class="btn step-btn" type="button" disabled>Run</button>
+        </li>
+        <li class="step" data-step="evaluate">
+          <div class="step-head"><span class="step-dot">4</span><span class="step-status">Pending</span></div>
+          <h3>Evaluate answers</h3>
+          <p class="step-desc">Scores relevancy, correctness, groundedness, hallucination and completeness.</p>
+          <div class="step-result"></div>
+          <button class="btn step-btn" type="button" disabled>Run</button>
+        </li>
+      </ol>
+
+      <div class="progress-row">
+        <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
+        <span id="progress-label" class="hint">0 of 4 steps</span>
       </div>
+
+      <details class="card disclosure">
+        <summary>Activity log</summary>
+        <div id="log" class="log"></div>
+      </details>
     </section>
 
-    <!-- 4. Results --------------------------------------------------------------------------->
-    <section class="card" id="results">
-      <div class="card-head">
-        <span class="num">4</span>
+    <!-- 4. Report ======================================================================= -->
+    <section class="view" data-view="report" aria-labelledby="h-report">
+      <div class="page-head">
         <div>
-          <h2>Results</h2>
-          <p>One row per question - the same table as <code>results.csv</code>. Click a row for the full evaluation.</p>
+          <p class="eyebrow">Step 4 of 4</p>
+          <h1 id="h-report">Test report</h1>
+          <p class="lede" id="report-meta">Run the tests to produce a report.</p>
         </div>
-        <div class="right">
-          <a id="download-kpis" class="btn disabled" href="#">Download kpis.csv</a>
-          <a id="download-csv" class="btn primary disabled" href="#">Download results.csv</a>
+        <div class="head-actions">
+          <button id="print" class="btn" type="button"><svg class="ic"><use href="#i-print"/></svg>Print / PDF</button>
+          <a id="download-kpis" class="btn disabled" href="#"><svg class="ic"><use href="#i-download"/></svg>kpis.csv</a>
+          <a id="download-csv" class="btn btn-primary disabled" href="#"><svg class="ic"><use href="#i-download"/></svg>results.csv</a>
         </div>
       </div>
-      <div class="card-body">
-        <div class="kpis" id="kpis"></div>
-        <h3 class="kpi-title">Answer quality <span class="small muted">(mean score over judged answers · pass rate · n)</span></h3>
-        <div class="kpis metrics" id="metric-kpis"></div>
-        <div class="dist" id="dist"></div>
-        <div class="legend">
-          <span><i style="background:var(--pass)"></i>Pass</span>
-          <span><i style="background:var(--fail)"></i>Fail</span>
-          <span><i style="background:#d4a72c"></i>Inconclusive</span>
-          <span><i style="background:#9aa5b3"></i>Recorded only (clarification / denied / error / timeout)</span>
+
+      <div id="report-notice"></div>
+
+      <h2 class="section-title">Executive summary</h2>
+      <div class="summary" id="summary"></div>
+
+      <h2 class="section-title">Answer quality <span class="section-note">Mean score over judged answers</span></h2>
+      <div class="metrics" id="metric-cards"></div>
+
+      <div id="bugs-block">
+        <h2 class="section-title">Bug candidates <span class="section-note">Need review before filing</span></h2>
+        <div id="bugs"></div>
+      </div>
+
+      <div id="breakdown-block">
+        <div class="section-row">
+          <h2 class="section-title">Breakdown</h2>
+          <div class="seg" id="breakdown-by" role="group" aria-label="Breakdown">
+            <button type="button" data-by="by_task_type" class="on">By task type</button>
+            <button type="button" data-by="by_capability">By capability</button>
+          </div>
         </div>
+        <div class="card"><div class="table-wrap flat"><table class="table" id="breakdown-table"><thead></thead><tbody></tbody></table></div></div>
+      </div>
+
+      <div class="section-row">
+        <h2 class="section-title">Question results <span class="section-note">Same rows as results.csv · select a row for the full evaluation</span></h2>
+      </div>
+      <article class="card">
         <div class="toolbar">
-          <div class="segmented" id="filter" role="group" aria-label="Filter by verdict">
+          <div class="seg" id="filter" role="group" aria-label="Filter by verdict">
             <button type="button" data-filter="all" class="on">All</button>
             <button type="button" data-filter="fail">Fail</button>
             <button type="button" data-filter="inconclusive">Inconclusive</button>
             <button type="button" data-filter="pass">Pass</button>
-            <button type="button" data-filter="bugs">Bug candidates</button>
+            <button type="button" data-filter="recorded_only">Not judged</button>
+            <button type="button" data-filter="bugs">Bugs</button>
           </div>
-          <input id="search" type="search" placeholder="Search questions, scenarios, findings…">
+          <div class="search"><svg class="ic"><use href="#i-search"/></svg><input id="search" type="search" placeholder="Search questions, scenarios, findings" aria-label="Search results"></div>
           <div class="spacer"></div>
-          <label class="switch"><input type="checkbox" id="all-columns"> All CSV columns</label>
+          <label class="toggle small"><input type="checkbox" id="all-columns"><span>All CSV columns</span></label>
         </div>
-        <div class="table-wrap"><table id="results-table"><thead></thead><tbody></tbody></table></div>
-        <details class="sub-details">
+        <div class="table-wrap"><table class="table results" id="results-table"><thead></thead><tbody></tbody></table></div>
+      </article>
+
+      <div class="grid-2 extras">
+        <details class="card disclosure">
           <summary>Rejected scenarios and questions</summary>
-          <div id="rejected"></div>
+          <div id="rejected" class="disclosure-body"></div>
         </details>
-        <details class="sub-details">
+        <details class="card disclosure">
           <summary>Run artifacts (JSON)</summary>
-          <div id="artifacts" class="chips"></div>
+          <div id="artifacts" class="chips disclosure-body"></div>
         </details>
       </div>
     </section>
   </main>
 </div>
 
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <div id="scrim" class="scrim hidden"></div>
-<aside id="drawer" class="drawer hidden" aria-label="Question details">
+<aside id="drawer" class="drawer hidden" aria-label="Question details" role="dialog" aria-modal="true">
   <div class="drawer-head">
-    <h2 id="drawer-title">Details</h2>
-    <button id="drawer-close" class="btn small" type="button">Close</button>
+    <div>
+      <p class="eyebrow on-dark" id="drawer-eyebrow"></p>
+      <h2 id="drawer-title">Details</h2>
+    </div>
+    <span id="drawer-verdict"></span>
+    <button id="drawer-close" class="icon-btn" type="button" aria-label="Close"><svg class="ic"><use href="#i-close"/></svg></button>
   </div>
   <div id="drawer-body" class="drawer-body"></div>
 </aside>

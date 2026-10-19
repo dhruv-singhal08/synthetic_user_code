@@ -29,8 +29,8 @@ product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.
 reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 
-web:
-  ui: modern                 # modern | classic: the UI served at / (both stay at /modern and /classic)
+trace:
+  enabled: true              # runs/<run_id>/run.log: every LLM / product call, prompt + output
 
 generation:
   scenario:
@@ -52,8 +52,8 @@ paths:
 inputs:
   persona_path: ./data/personas/finance_controller.yaml
   product_path: ./data/products/sample_product.yaml
-  reference_file: ./data/references/sample_card_spend_index.json   # .json / .txt / .md; omit -> ungrounded
-  reference_guide_file: ./data/references/sample_card_spend_guide.md   # optional usage guide (.md / .txt)
+  reference_file: ./data/references/sample_card_spend_catalog.yaml   # data_catalog / document_collection (.yaml/.json); omit -> ungrounded
+  reference_guide_file: ./data/references/sample_card_spend_instructions.md   # optional usage instructions (.md / .txt)
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl   # benchmark-evaluator
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json
   benchmark_product_paths: [./data/products/sample_product.yaml, ./data/products/sample_chatbot.yaml]

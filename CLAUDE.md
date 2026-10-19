@@ -12,10 +12,10 @@ synthetic-user. Synthetic User for automated testing of conversational products
 Pipeline (single-turn, design v3: `docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md`):
 
 ```
-Persona + Product [+ Reference file (any JSON/TXT/MD) + optional Usage guide]
+Persona + Product [+ Reference (data_catalog | document_collection) + optional instructions]
   -> [1] Scenarios (+ Reference Pack only when grounded) -> [2] Questions
-  -> [3] Product Executor (ProductAdapter) -> [4] Evaluator (one generic judge;
-     + reference_alignment against the pack when grounded) -> Bug Candidates
+  -> [3] Product Executor (ProductAdapter) -> [4] Evaluator (one generic judge, 5 metrics;
+     correctness / groundedness against the cheat sheet when grounded) -> Bug Candidates
 ```
 
 One orchestrator. Nodes are classes, not agents.
@@ -24,19 +24,21 @@ One orchestrator. Nodes are classes, not agents.
 
 1. PRODUCT AGNOSTIC. The tool tests ANY conversational product, not only NL2SQL.
    - No NL2SQL / SQL wording in generic models, prompts or nodes.
-   - Artifacts (e.g. SQL) are judged by the generic evaluator against the
-     Reference Pack; there is no product-specific evaluation code. The artifact
+   - Artifacts (e.g. SQL) are judged by the generic evaluator against the cheat sheet
+     (Reference Pack); there is no product-specific evaluation code. The artifact
      plugin hook (`nodes/evaluators/plugins/`) is kept but DISCONNECTED.
 2. REFERENCE OPTIONAL. Mode is automatic: reference given -> `grounded`, else
    `ungrounded`.
-   - The reference is ANY user-supplied file (.json / .txt / .md), plus an
-     optional usage guide (.md / .txt) telling the LLM how to read it. The
-     tool never generates or rewrites a reference (no LLM indexing) and has no
-     special format for it.
-   - `grounded`: scenarios WITH a Reference Pack (core_refs + rules) -> questions
-     -> evaluation adds `reference_alignment` against the pack.
-   - Every pack item quotes the reference VERBATIM; code checks each quote and
-     rejects (and records) items whose quote is not found.
+   - The reference has ONE of two fixed formats (design v4, D203), YAML or JSON:
+     `data_catalog` (tables with description / rules / columns, relationships with a
+     user-set `verified`, catalog rules R1..) or `document_collection` (documents: name +
+     free-text summary). Anything else is refused. Optional usage instructions (.md/.txt
+     upload or typed in the UI); without them a default per format is used. The tool never
+     generates or rewrites a reference (`convert-reference` only maps a REFIDX index).
+   - `grounded`: scenarios WITH a cheat sheet (Reference Pack): the LLM PICKS tables /
+     columns / joins / rule ids, or documents, by exact name; code checks every pick exists
+     (unknown picks rejected AND recorded) and copies the user's own text into the pack.
+   - Question generation and evaluation see the cheat sheet, never the whole reference.
    - `ungrounded`: persona + product only -> no pack -> generic criteria only.
    - The mode is recorded in every scenario, question, evaluation and the run
      manifest.

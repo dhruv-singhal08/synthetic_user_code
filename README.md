@@ -3,10 +3,10 @@
 A **synthetic user** for automated testing of conversational products (NL2SQL, chatbot,
 search, summariser, ...). It invents realistic scenarios for a persona, asks the product
 questions in that persona's voice, and judges what the product returns, producing **bug
-candidates** for a human to review. With a **reference** - any file you supply (JSON, TXT or
-Markdown: a data catalog, table descriptions, a policy...) plus an optional **usage guide** that
-says how to read it - runs are **grounded**: every scenario gets a **Reference Pack** quoted
-verbatim from the reference, and answers are checked against it. Without one, runs are
+candidates** for a human to review. With a **reference** - a `data_catalog` (tables, columns,
+relationships, rules) or a `document_collection` (documents with summaries), plus optional
+usage instructions - runs are **grounded**: every scenario gets a **cheat sheet** picked from
+the reference and checked by code, and answers are checked against it. Without one, runs are
 **ungrounded** (generic checks only). Design: [docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md](docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md).
 
 > **Status: MVP 1, not production-ready.** See [Limitations](#limitations).
@@ -14,16 +14,16 @@ verbatim from the reference, and answers are checked against it. Without one, ru
 ## Pipeline
 
 ```
-Persona + Product [+ Reference file + Usage guide] ──> [reference check] ──> [2] Scenarios
+Persona + Product [+ Reference + instructions] ──> [reference check] ──> [2] Scenarios
         (+ Reference Pack when grounded) ──> [3] Questions ──> [4] Product Executor
         ──> [5] Evaluator ──> Bug Candidates
 ```
 
 | Node | What it does | LLM? |
 |---|---|---|
-| Reference check | Loads your reference file (.json/.txt/.md, size-capped) and optional usage guide as text; the id changes when either changes. None given -> ungrounded. | no |
-| 2 Scenarios | Business goal + success criteria (guidance) for tasks this persona would do with this product. Grounded: also a **Reference Pack** - `core_refs` (what a correct answer must rely on) and `rules`, each with a verbatim quote that code checks against the reference (items whose quote is missing are dropped and recorded; no valid core_ref -> scenario rejected). Saved in `reference_packs.json`, editable in the UI. | yes |
-| 3 Questions | Natural-language questions in the persona's voice, each with its own `expected_behavior` (written), 1-4 `success_criteria` and `acceptable_variations`. Grounded: the pack + guide inform the question; identifier-like pack names must not leak into it. | yes |
+| Reference check | Loads your reference (data_catalog or document_collection, YAML/JSON, size-capped) and optional usage instructions; the id changes when either changes. None given -> ungrounded. | no |
+| 2 Scenarios | Business goal + success criteria (guidance) for tasks this persona would do with this product. Grounded: also a **cheat sheet** (Reference Pack) - the tables / columns / joins / rule ids, or the documents, a correct answer needs, picked by exact name; code checks every pick and copies the reference's own text in (unknown picks dropped and recorded; none valid -> scenario rejected). Saved in `reference_packs.json`, editable in the UI. | yes |
+| 3 Questions | Natural-language questions in the persona's voice, each with its own `expected_behavior` (written, including which readings are acceptable) and 1-4 `success_criteria`. The persona decides how it is phrased. Grounded: the cheat sheet + instructions inform the question; identifier-like names must not leak into it. | yes |
 | 4 Product executor | Sends each question through the configured product adapter and records answered (text + artifacts, e.g. SQL) / clarification / denied / error / timeout. Artifacts are **never executed**. | no |
 | 5 Evaluator | One generic judge per **answered** response, given only the evaluation contract (question, goal, expected behaviour, success criteria, acceptable variations, product, full response with artifacts; grounded: the Reference Pack + guide). It scores **answer relevancy** and **correctness** (0 / 0.5 / 1), rates each success criterion and labels each factual claim; code computes **completeness**, **groundedness** and **hallucination rate**, the verdict and bug candidates. Clarification / denied / error / timeout are recorded only. Run KPIs (task success, metric means and pass rates, availability, latency, new vs known-gap bugs) go to `kpis.json` / `kpis.csv`. See design doc section 11. | yes |
 
@@ -99,6 +99,7 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `product_adapter.options` | `{path: ./data/fixtures/product_responses/sample_responses.json}` | Per type; or set `product_adapter: <path to .adapter.yaml>` |
 | `product.timeout_seconds` | `30` | Per product call; exceeded -> `timeout` outcome |
 | `reference.max_chars` | `200000` | Size limit of the reference as sent to prompts (the whole file goes in); larger files are refused |
+| `trace.enabled` | `true` | Write `runs/<run_id>/run.log` (every LLM / product call, prompt + output) |
 | `generation.scenario.scenario_count` | `10` | Scenarios requested per run |
 | `generation.scenario.include_unsupported_scenarios` | `true` | Keep scenarios the product should refuse |
 | `generation.scenario.diversity_preference` | `balanced` | Free-text hint to the scenario generator |
@@ -110,9 +111,9 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `generation.question.reject_reference_leaks` | `true` | Retry/reject questions repeating identifier-like reference names, e.g. `card_transactions` (non-technical personas) |
 | `paths.artifacts_dir` | `./artifacts` | Where runs are written |
 | `inputs.persona_path` | `./data/personas/finance_controller.yaml` | Persona |
-| `inputs.product_path` | `./data/products/sample_product.yaml` | Product description (supported / not_supported_yet / known_gaps) |
-| `inputs.reference_file` | `./data/references/sample_card_spend_index.json` | Your reference (.json / .txt / .md); omit -> ungrounded |
-| `inputs.reference_guide_file` | `./data/references/sample_card_spend_guide.md` | Optional usage guide (.md / .txt); omit -> default reading |
+| `inputs.product_path` | `./data/products/sample_product.yaml` | Product description (schema v2, see [Product description](#product-description)) |
+| `inputs.reference_file` | `./data/references/sample_card_spend_catalog.yaml` | Your reference (data_catalog / document_collection, .yaml / .json); omit -> ungrounded |
+| `inputs.reference_guide_file` | `./data/references/sample_card_spend_instructions.md` | Optional usage instructions (.md / .txt); omit -> default for the format |
 | `inputs.benchmark_cases_path` | `./tests/fixtures/benchmark/labeled_cases.jsonl` | `benchmark-evaluator` cases |
 | `inputs.benchmark_scenarios_path` | `./tests/fixtures/benchmark/scenarios.json` | `benchmark-evaluator` scenarios |
 
@@ -128,7 +129,8 @@ Global options `--config PATH`, `--log-level LEVEL` (also accepted after the com
 | Command | Options (defaults) | Does |
 |---|---|---|
 | `smoke-llm` | – | One tiny JSON request; prints provider, model, latency |
-| `check-reference` | `--reference PATH` (required), `--reference-guide PATH` | Load a reference (+ guide); prints id, format, size; exit 1 on load errors |
+| `check-reference` | `--reference PATH` (required), `--reference-guide PATH` | Load a reference (+ instructions); prints id, kind, counts, size; exit 1 on load errors |
+| `convert-reference` | `--input` REFIDX JSON, `--out` YAML | Convert an existing reference index into the `data_catalog` format (validated before writing) |
 | `generate-scenarios` | `--run-id` (new), `--persona`/`--product` (inputs), `--reference` / `--reference-guide` (`inputs.reference_file` / `reference_guide_file`; none -> ungrounded), `--count` (`scenario_count`) | Node 2 (+ reference packs when grounded); always regenerates |
 | `generate-questions` | `--run-id` (required), `--count` (`question_count`) | Node 3; always regenerates |
 | `execute` | `--run-id` (required), `--adapter-config FILE` (config `product_adapter`) | Node 4 via the product adapter; always regenerates |
@@ -136,7 +138,7 @@ Global options `--config PATH`, `--log-level LEVEL` (also accepted after the com
 | `evaluate` | `--run-id`, **or** `--questions --executions --scenarios` (+ `--reference-packs` for grounded questions, `--out-dir`, default: executions file's folder) | Node 5 |
 | `run` | `--run-id` (new), `--reference-index`, `--from-step STEP`, `--force-step STEP` (repeatable), `--scenario-count`, `--question-count` | Full pipeline with reuse |
 | `benchmark-evaluator` | `--cases`, `--scenarios` (from `inputs.benchmark_*`; products from `inputs.benchmark_product_paths`) | **Live only**: evaluator agreement with labeled cases, per mode/product and overall |
-| `serve` | `--host` (`127.0.0.1`), `--port` (`8000`), `--ui modern\|classic` (`web.ui`) | Web UI + API (see [Web UI](#web-ui)) |
+| `serve` | `--host` (`127.0.0.1`), `--port` (`8000`) | Web UI + API (see [Web UI](#web-ui)) |
 
 Steps: `index`, `scenarios`, `questions`, `execute`, `evaluate`.
 
@@ -156,6 +158,47 @@ synthetic-user run --run-id RUN_... --from-step evaluate    # re-judge only
 `run` prints scenarios accepted/rejected, questions, outcomes, verdicts, bug candidates
 and the run folder.
 
+## Product description
+
+A product description YAML (`data/products/`; schema v2, D205; template at
+`/api/product-template`, linked in the UI). Example: `data/products/voice_of_customer_agent.yaml`.
+
+| Field | Required | Used by |
+|---|---|---|
+| `product_id`, `product_version`, `name`, `description` | yes | all prompts |
+| `business_problem` | no | scenarios (why the product exists) |
+| `data_sources` (name + description) | no | scenarios (goals must fit the data), questions, evaluation, mock product |
+| `supported`, `not_supported` | no | scenarios (capability + rationale), questions, evaluation (out-of-scope requests should be declined) |
+| `known_limitations` | no | scenarios, questions, evaluation (findings matching them are known gaps, not new bugs) |
+| `user_visible_capabilities` | no | scenarios, questions, mock product |
+| `typical_user_questions` | no | scenarios (realistic goals and coverage); generated questions that copy one are rejected |
+| `expected_outputs` | no | scenarios, evaluation ("an answer is expected to consist of ..."), mock product |
+
+Files with the previous names are refused with the new name: `not_supported_yet` ->
+`not_supported`, `known_gaps` -> `known_limitations`, `response_artifacts_expected` ->
+`expected_outputs`; `product_type` was removed.
+
+## Persona
+
+A persona YAML (`data/personas/`; schema v2, D200) describes the synthetic user. Every field
+is read by the scenario and/or question prompt with an explicit rule
+(`prompts/persona.py`), so changing a value changes what is generated:
+
+| Field | Required | Used by | How |
+|---|---|---|---|
+| `id`, `version` | yes | - | metadata only (never sent to the LLM) |
+| `identity` (`name`, `role`, `description`) | name, role | scenarios, questions | who the user is |
+| `expertise` | `domain` | scenarios, questions | `domain` + any named areas (`product_management`, `data_analysis`, `sql`, ...), each `low` \| `medium` \| `high`, plus `notes`. High areas -> specialist vocabulary and depth. `sql` or `technical_knowledge` high -> internal names allowed in questions (else plain language, enforced) |
+| `behavior.style` | yes | questions | tone and length |
+| `behavior.traits` | no | scenarios, questions | shape goals / success criteria; every question reflects at least one |
+| `typical_tasks` | at least 1 | scenarios | scenarios are spread over them; each scenario records its `typical_task` (must be one of them, else rejected) |
+| `primary_motivation` | yes | scenarios, questions | frames each business goal and the reason behind each question |
+| `decision_inputs` | no | scenarios, questions | evidence the persona relies on; goals and questions draw on it |
+| `question_preferences.complexity` | no (`mixed`) | scenarios, questions | `simple` \| `medium` \| `complex` \| `mixed`; a fixed value is enforced per question (`question_characteristics.complexity`, retry then reject) |
+| `question_preferences.follow_up_questions` | no (`false`) | questions | `true` -> self-contained deeper follow-up questions (why, impact, risk) |
+| `question_preferences.ambiguity` | no (config) | questions | `none` (precise only, no vague) \| `occasional` (mix, vague allowed) \| `frequent` (mostly vague / investigative); overrides `generation.question.ambiguity_level` / `allow_vague_questions`, which apply only when it is left out |
+| `example_utterances` | no | questions | style examples (with the UI's example questions); never copied (near-copies rejected) |
+
 ## Web UI
 
 ```bash
@@ -167,22 +210,20 @@ A local FastAPI server (`src/synthetic_user/web/`) with a single-page UI. It bin
 `127.0.0.1` by default and has no authentication, so do not expose it on a network.
 API docs are at `/api/docs`.
 
-Two UIs over the same API (D199): the **modern** UI (default; `static/modern/`) - workflow
-sidebar, one page per step (Test setup, Product connection, Run tests, Test report), recent
-runs, and a printable test report (executive summary, the 5 quality metrics, bug candidates,
-breakdown by task type / capability, results table) - and the **classic** single-page UI
-(`static/`). `/` serves the one named by `web.ui` (`modern` | `classic`, or `serve --ui`); both
-stay reachable at `/modern` and `/classic`, so switching back is one config line. Steps below
-apply to both.
+The UI (`static/`, D199 / D201) has a workflow sidebar, one page per step (Test setup,
+Product connection, Run tests, Test report), recent runs, and a printable test report
+(executive summary, the 5 quality metrics, bug candidates, breakdown by task type /
+capability, results table). No external assets (system fonts, inline icons).
 
 1. **Inputs:**
    - **Persona:** the sample persona or your own YAML upload, plus optional **sample queries**
      (one per line) that are added to the persona's example utterances to mimic the user's
      style; generated questions never copy them.
    - **Product description:** upload only (YAML), no sample.
-   - **Reference:** toggle. Off (default) -> ungrounded run. On -> upload the reference file
-     (JSON / TXT / Markdown) and, optionally, its usage guide -> grounded run with reference
-     packs and reference alignment.
+   - **Reference:** toggle. Off (default) -> ungrounded run. On -> upload the reference
+     (data_catalog or document_collection, YAML / JSON; templates linked) and, optionally,
+     usage instructions (Default / Upload / Write; the box shows the default as placeholder)
+     -> grounded run with a cheat sheet per scenario.
    Each file is validated on upload and previewed.
 2. **Product connection:** the **product URL** plus a **contract** (YAML/JSON) that says how
    to call the product and read its reply: `method`, `headers` (`${ENV_VAR}` only for
@@ -196,12 +237,12 @@ apply to both.
    Not connected -> the configured `product_adapter` answers.
 3. **Pipeline:** generate scenarios (the reference check runs first), generate questions, run
    on product, evaluate - one by one, in order, or **Run all**. Re-running a step regenerates
-   everything after it. After scenarios, open a row to **review or edit its Reference Pack**
-   (JSON; quotes are re-checked against the reference); saving makes questions and later
-   steps stale.
+   everything after it. After scenarios, open a row to **review or edit its cheat sheet**
+   (the picks as JSON; every name is re-checked against the reference); saving makes
+   questions and later steps stale.
 4. **Results:** KPI scorecard (task success, availability + latency, new bugs, and the 5
    quality metrics with pass rate and n), verdict distribution, filters/search and one row per
-   question - the same table as `runs/<run_id>/results.csv` (27 columns; cells with several
+   question - the same table as `runs/<run_id>/results.csv` (26 columns; cells with several
    items use "• " bullet lines), rewritten after every step; **Download kpis.csv** for the
    run-level KPIs. Click a row
    for every field (scenario, reference pack, question + expectations, response, checks,
@@ -228,8 +269,19 @@ artifacts/
     evaluations.json          # EvaluationResult[] (5 metrics, claims, criteria results, findings, verdict)
     bug_candidates.json       # BugCandidate[] (status needs_review, full id chain)
     kpis.json, kpis.csv       # run KPIs for product managers (code-computed)
+    run.log                   # every LLM / product call: prompts sent, outputs received (see below)
   notebook_runs/<run_id>/     # notebooks/pipeline_walkthrough.ipynb output
 ```
+
+**Run log** (`run.log`, D202): one readable text file per run, appended as each call
+finishes, so `tail -f artifacts/runs/<run_id>/run.log` follows a live run. Per step a
+STARTED / FINISHED banner; per LLM call the step, subject (scenario or question id), what was
+asked for + attempt, model and latency, then the full SYSTEM PROMPT, USER PROMPT and OUTPUT
+(for unparseable output: the error and the raw text), followed by a VALIDATION line (accepted,
+or the errors that caused a retry / rejection). Per product call the question sent and the
+answer recorded; for HTTP products also the request body and the reply (header values never
+written). The run's own INFO / WARNING lines are interleaved. Re-running a step appends.
+Switch off with `trace.enabled: false`.
 
 All JSON writes are atomic. Ids: `RUN_…`, `SCN_001`, `RP_SCN_001`, `Q_001`, `EXE_001`,
 `EVAL_001`, `F_001`, `BUG_001` - assigned by code, never by the LLM.
@@ -280,29 +332,36 @@ custom adapter: `examples/adapters/my_product_adapter.py`. HTTP errors and non-J
 become `error` outcomes with the status code; header secrets are never logged and are
 written to the run manifest only as their `${ENV_VAR}` template (literal values show `***`).
 
-## Reference (any file) and usage guide
+## Reference: two formats, cheat sheet per scenario
 
-A reference is any file you supply (`inputs.reference_file` or `--reference`): `.json`, `.txt`
-or `.md`. There is no required format - a data catalog, a page of table descriptions, a policy
-document all work. The tool never generates or rewrites it (JSON is only re-indented for
-prompts). Loader: `references/loader.py`.
+A reference (`inputs.reference_file` / `--reference` / the UI) is a YAML or JSON file in ONE
+of two formats (D203); anything else is refused with the field that is wrong. Templates:
+`/api/reference-template/data_catalog`, `/api/reference-template/document_collection` (also
+linked in the UI). Loader: `references/loader.py`.
 
-- **Usage guide** (optional, `inputs.reference_guide_file` / `--reference-guide`, `.md`/`.txt`):
-  tells the LLM how to read the reference. Suggested headings: *What this reference is*, *How
-  to read it*, *What is authoritative*, *What counts as core*, *Evaluation guidance*, *Ignore*.
-  Without one: "descriptive reference, not exhaustive". Samples:
-  `data/references/sample_card_spend_guide.md`, `sample_travel_policy_guide.md`.
-- **Size:** the whole reference goes into the prompts, so it is capped by `reference.max_chars`
-  (default 200,000 characters); a larger file is refused with a clear error.
-- **Reference Pack** per grounded scenario (`reference_packs.json`): `core_refs` (name, verbatim
-  quote, why) and `rules` (rule, verbatim quote). Quotes are checked by code
-  (whitespace/case-insensitive); items whose quote is not in the reference are dropped and
-  listed in `rejected_items`, never fixed. The pack is the authoritative answer key for the
-  evaluator; editing a pack in the UI re-checks every quote.
-- Runs record `<file stem>-<hash of reference + guide>`, so editing either regenerates later
-  steps.
-- Samples: `data/references/sample_card_spend_index.json` (JSON catalog),
-  `data/references/sample_travel_policy.md` (Markdown policy for the chatbot).
+| | `kind: data_catalog` | `kind: document_collection` |
+|---|---|---|
+| Content | `tables` (name, description, `rules`, `columns`: name, type, description, values), `relationships` (`from` / `to` as `table.column`, `verified`), catalog `rules` (R1, R2, ... in order) | `documents`: `name` + free-text `summary` |
+| Cheat sheet (per scenario) | the tables + columns, joins (listed relationships only) and rule ids the answer must use; table rules come with their table | the documents whose content answers the goal |
+| Evaluation | correctness = right tables / columns / joins, rules respected (extras fine; a NOT verified join presented as reliable is at most 0.5); claims checked against the cheat sheet | claims checked against the documents' summaries (not covered = not wrong; contradicted = hallucination); the product does not cite sources, content only |
+
+- **Picks, not quotes:** the scenario step picks items by exact name / id; code checks each
+  one exists, copies the reference's own text (descriptions, rules, summaries) into the pack
+  and rejects (records) unknown picks; no valid table / document rejects the scenario. Packs
+  are in `reference_packs.json` and editable in the UI (the same picks as JSON; all-or-nothing).
+- **Only the cheat sheet** goes to question generation and evaluation, never the whole
+  reference. The scenario step sees the whole reference (rendered compactly by code).
+- **Usage instructions** (optional): `inputs.reference_guide_file` / `--reference-guide`
+  (.md/.txt), or uploaded / typed in the UI. Without them a default per format is used (shown
+  as the placeholder in the UI). Samples: `data/references/sample_card_spend_instructions.md`,
+  `sample_travel_policy_instructions.md`.
+- **Size:** the rendered reference is capped by `reference.max_chars` (default 200,000).
+- Runs record `<file stem>-<hash of content + instructions>`, so editing either regenerates
+  later steps.
+- **Existing REFIDX index** (tables / columns / relationships / business rules JSON):
+  `synthetic-user convert-reference --input index.json --out catalog.yaml`.
+- Samples: `data/references/sample_card_spend_catalog.yaml` (data catalog),
+  `data/references/sample_travel_policy_docs.yaml` (document collection).
 
 ## Switching providers
 
@@ -344,7 +403,8 @@ SafeChain YAML `model_kwargs`, not `llm.temperature`.
 | `403` when installing packages | Your package mirror quarantined a version. Use the pinned versions known to work (`aiohttp==3.13.1`, `safechain==1.5.0`) or ask for the package to be released; do not bypass the mirror |
 | `Invalid config ...: llm.modle: Extra inputs are not permitted` | Typo or unknown key - every config key is listed above |
 | `... output invalid after N attempt(s)` | The LLM kept returning invalid output. Retry or raise `llm.max_validation_retries`; the reasons are in the notes / rejection files |
-| Scenarios rejected with `quote not found in the reference` | The LLM paraphrased instead of quoting. Retry; make the usage guide say what to quote; very large references make exact quoting harder |
+| Scenarios rejected with `reference pack names no table / document that is in the reference` | The LLM picked names the reference does not have. Retry; check the names in the reference are the ones users and the product use |
+| `Reference ...: 'kind' must be one of data_catalog, document_collection` | The file is not in one of the two formats; download a template from the UI, or convert a REFIDX index with `convert-reference` |
 | `Reference ... has N characters; the limit is ...` | Trim the file (or split it per product area) or raise `reference.max_chars` if your LLM's context allows |
 | Gemini `503 UNAVAILABLE` / `504 DEADLINE_EXCEEDED` | Provider overload; re-run (completed steps are reused) or raise `llm.timeout_seconds` |
 | `Run artifacts are inconsistent` | Files in `runs/<run_id>/` were edited or mixed; re-run with `--from-step` at the first broken step |

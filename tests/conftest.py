@@ -14,7 +14,7 @@ from synthetic_user.core.config import AppConfig, load_config
 from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.reference import Reference, ReferencePack, ReferencePackDraft
+from synthetic_user.models.reference import CatalogPackDraft, Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.references.loader import load_reference
@@ -23,32 +23,14 @@ from synthetic_user.references.pack import build_pack
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_CONFIG = REPO_ROOT / "config" / "app.yaml"
 REFERENCES = REPO_ROOT / "data" / "references"
-SAMPLE_REFERENCE = REFERENCES / "sample_card_spend_index.json"
-SAMPLE_GUIDE = REFERENCES / "sample_card_spend_guide.md"
-SAMPLE_POLICY = REFERENCES / "sample_travel_policy.md"
-SAMPLE_POLICY_GUIDE = REFERENCES / "sample_travel_policy_guide.md"
+SAMPLE_REFERENCE = REFERENCES / "sample_card_spend_catalog.yaml"
+SAMPLE_GUIDE = REFERENCES / "sample_card_spend_instructions.md"
+SAMPLE_POLICY = REFERENCES / "sample_travel_policy_docs.yaml"
+SAMPLE_POLICY_GUIDE = REFERENCES / "sample_travel_policy_instructions.md"
 MAX_CHARS = 200_000
 
-# Quotes copied from data/references/sample_card_spend_index.json.
-AMOUNT = {
-    "name": "card_transactions.amount",
-    "quote": "Transaction amount in the transaction currency (see currency_code).",
-    "why": "spend is the sum of amount",
-}
-CURRENCY = {
-    "name": "card_transactions.currency_code",
-    "quote": "ISO 4217 currency of amount.",
-    "why": "amounts must stay per currency",
-}
-FULL_NAME = {
-    "name": "employees.full_name",
-    "quote": "Employee full name.",
-    "why": "the ranking is by employee",
-}
-CURRENCY_RULE = {
-    "rule": "never sum amounts across currencies",
-    "quote": "Amounts in different currency_code values must not be summed directly.",
-}
+# Cheat-sheet picks against data/references/sample_card_spend_catalog.yaml.
+EMPLOYEE_JOIN = {"from": "card_transactions.employee_id", "to": "employees.employee_id"}
 
 
 @pytest.fixture(autouse=True)
@@ -75,13 +57,13 @@ def app_config() -> AppConfig:
 
 @pytest.fixture
 def sample_reference() -> Reference:
-    """The sample card-spend catalog (JSON) + its usage guide, loaded like a user's files."""
+    """The sample card-spend data_catalog + its usage instructions, loaded like a user's."""
     return load_reference(SAMPLE_REFERENCE, max_chars=MAX_CHARS, guide_path=SAMPLE_GUIDE)
 
 
 @pytest.fixture
 def policy_reference() -> Reference:
-    """A text (Markdown) reference: the sample travel policy + its usage guide."""
+    """A document_collection: the sample travel policy documents + usage instructions."""
     return load_reference(SAMPLE_POLICY, max_chars=MAX_CHARS, guide_path=SAMPLE_POLICY_GUIDE)
 
 
@@ -124,13 +106,22 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "capability_rationale": "Product supports 'ranking and top-N' and 'joins over "
             "documented relationships'",
             "reference_pack": {
-                "core_refs": [AMOUNT, CURRENCY, FULL_NAME],
-                "rules": [CURRENCY_RULE],
+                "tables": [
+                    {
+                        "table": "card_transactions",
+                        "columns": ["amount", "currency_code"],
+                        "why": "spend is the sum of amount, kept per currency",
+                    },
+                    {
+                        "table": "employees",
+                        "columns": ["full_name"],
+                        "why": "the ranking is by employee",
+                    },
+                ],
+                "joins": [EMPLOYEE_JOIN],
+                "rules": ["R1"],
             },
-            "question_guidance": {
-                "intent": "rank employees by total card spend",
-                "expected_ambiguity": "medium",
-            },
+            "question_intent": "rank employees by total card spend",
         },
         {
             "business_goal": "Track how monthly card spend per merchant category evolves "
@@ -145,21 +136,15 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "capability_rationale": "Product supports 'single-table aggregation' and "
             "'filtering by date range'",
             "reference_pack": {
-                "core_refs": [
-                    AMOUNT,
+                "tables": [
                     {
-                        "name": "card_transactions.transaction_date",
-                        "quote": "Date the transaction posted.",
-                        "why": "months come from the posting date",
-                    },
-                    {
-                        "name": "card_transactions.merchant_category",
-                        "quote": "Merchant category as reported on the transaction.",
-                        "why": "the trend is per category",
-                    },
+                        "table": "card_transactions",
+                        "columns": ["amount", "transaction_date", "merchant_category"],
+                        "why": "monthly spend per category comes from the transactions",
+                    }
                 ]
             },
-            "question_guidance": {"intent": "monthly spend trend by category"},
+            "question_intent": "monthly spend trend by category",
         },
         {
             "business_goal": "Forecast next quarter's card spend to plan the budget",
@@ -172,15 +157,11 @@ def scenario_drafts() -> list[dict[str, Any]]:
             "capability": "unsupported",
             "capability_rationale": "Product lists 'forecasting' under not_supported_yet",
             "reference_pack": {
-                "core_refs": [
-                    {
-                        "name": "card_transactions",
-                        "quote": "Corporate card spend, one row per transaction",
-                        "why": "history a forecast would start from",
-                    }
+                "tables": [
+                    {"table": "card_transactions", "why": "history a forecast would start from"}
                 ]
             },
-            "question_guidance": {"intent": "forecast spend"},
+            "question_intent": "forecast spend",
         },
     ]
 
@@ -193,7 +174,7 @@ def sample_packs(
     packs = []
     for i, draft in enumerate(scenario_drafts, start=1):
         pack, _ = build_pack(
-            ReferencePackDraft.model_validate(draft["reference_pack"]),
+            CatalogPackDraft.model_validate(draft["reference_pack"]),
             sample_reference,
             f"SCN_{i:03d}",
         )
@@ -233,7 +214,7 @@ def scripted_judge(fail_on: str | None = None) -> Judge:
     def judge(system: str, user: str) -> dict[str, Any]:
         block = user.split("What was asked and what is expected:\n", 1)[1]
         criteria = json.loads(block.split("\n\nProduct description", 1)[0])["success_criteria"]
-        grounded = "Reference pack (AUTHORITATIVE" in user
+        grounded = "Cheat sheet of this scenario (AUTHORITATIVE" in user
         bad = fail_on is not None and fail_on in user.split("Product answer:", 1)[1]
         metric = "correctness" if grounded else "relevancy"
         failed = {"score": 0, "rationale": "wrong", "evidence": fail_on}

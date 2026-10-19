@@ -1,0 +1,35 @@
+# Reference format 1: data catalog (tables, columns, relationships, rules).
+# Fields marked (optional) can be left out. Names: no dots or spaces.
+kind: data_catalog
+name: My product's data                       # what this catalog covers
+description: Tables the product answers from   # (optional)
+
+tables:
+  - name: card_transactions
+    description: One row per posted card transaction.          # (optional, recommended)
+    rules:                                                       # (optional) apply whenever this table is used
+      - Amounts are in the transaction currency; never sum across currencies.
+    columns:                                                     # (optional, recommended)
+      - name: amount
+        type: NUMERIC                                            # (optional)
+        description: Transaction amount in the transaction currency.   # (optional, recommended)
+      - name: currency_code
+        description: ISO currency of amount.
+        values: [USD, EUR, GBP]                                  # (optional) allowed values / examples
+      - name: employee_id
+        description: Cardholder employee.
+  - name: employees
+    description: Employee directory, one row per employee.
+    columns:
+      - name: employee_id
+        description: Unique employee identifier.
+      - name: full_name
+        description: Employee full name.
+
+relationships:            # (optional) the ONLY valid joins, written table.column
+  - from: card_transactions.employee_id
+    to: employees.employee_id
+    verified: true        # (optional, default false) false = the link is uncertain
+
+rules:                    # (optional) catalog-wide rules; referred to as R1, R2, ... in order
+  - Amounts in different currencies must not be summed directly.

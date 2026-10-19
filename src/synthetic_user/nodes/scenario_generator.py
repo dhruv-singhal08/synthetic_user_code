@@ -1,8 +1,9 @@
 """Node 2: generate scenarios (one LLM call per round), in two modes.
 
-grounded (reference given): each scenario comes with a reference_pack built in the same call;
-code keeps only core_refs / rules whose quote is in the reference (the others are recorded in
-the pack's rejected_items) and rejects the scenario when no core_ref survives.
+grounded (reference given): each scenario comes with its cheat sheet (reference_pack) picked
+in the same call; code keeps only the picks the reference has, copies the reference's text in
+(the others are recorded in the pack's rejected_items) and rejects the scenario when no table /
+document survives (D203).
 ungrounded (no reference): a pack must be absent (rejected otherwise), unsupported filter.
 Per-scenario checks decide accept / reject / duplicate. Short results are topped up at most
 ``max_topup_rounds`` times and never padded.
@@ -20,6 +21,7 @@ from pydantic import Field, ValidationError
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import format_validation_error
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
+from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import StrictModel
@@ -36,7 +38,7 @@ from synthetic_user.models.scenario import (
     TaskType,
 )
 from synthetic_user.prompts.scenario import ScenarioPromptOptions, build_scenario_prompt
-from synthetic_user.references.pack import NO_VALID_CORE_REF, build_pack
+from synthetic_user.references.pack import NO_VALID_ITEM, build_pack
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
@@ -44,6 +46,7 @@ FILTERED_BY_CONFIG = "filtered_by_config"
 SURPLUS = "surplus: more scenarios returned than requested"
 MISSING_PACK = "mode grounded requires a reference_pack"
 UNEXPECTED_PACK = "mode ungrounded must not have a reference_pack"
+UNKNOWN_TYPICAL_TASK = "typical_task is not one of the persona's typical_tasks"
 
 _STOPWORDS = frozenset(
     {
@@ -119,12 +122,12 @@ def scenario_signature(
     capability: CapabilityClassification,
     pack: ReferencePack,
 ) -> str:
-    """Grounded: task_type | goal keywords | capability | core_ref names."""
+    """Grounded: task_type | goal keywords | capability | cheat-sheet item names."""
     parts = [
         task_type.value,
         _goal_keywords(business_goal),
         capability.value,
-        ",".join(sorted({r.name.strip().lower() for r in pack.core_refs})),
+        ",".join(sorted({name.strip().lower() for name in pack.item_names()})),
     ]
     return "|".join(p.replace("|", "/") for p in parts)
 
@@ -188,13 +191,14 @@ class ScenarioGenerator:
             system, user = build_scenario_prompt(
                 persona, product, reference, options, avoid_signatures=state.signatures()
             )
-            batch = await generate_structured(
-                self._llm,
-                system,
-                user,
-                _RawScenarioBatch,
-                max_retries=self._settings.llm.max_validation_retries,
-            )
+            with trace_subject(f"round {round_no + 1}"):
+                batch = await generate_structured(
+                    self._llm,
+                    system,
+                    user,
+                    _RawScenarioBatch,
+                    max_retries=self._settings.llm.max_validation_retries,
+                )
             for raw in batch.scenarios:
                 if len(result.accepted) >= requested:
                     result.rejected.append(RejectedScenario(payload=raw, reasons=[SURPLUS]))
@@ -237,6 +241,9 @@ class ScenarioGenerator:
         reasons: list[str] = []
         pack: ReferencePack | None = None
         scenario_id = self._ids.peek(IdKind.SCENARIO)
+        typical_task = persona_task(persona, draft.typical_task)
+        if draft.typical_task is not None and typical_task is None:
+            reasons.append(f"{UNKNOWN_TYPICAL_TASK}: {draft.typical_task!r}")
         if reference is None:
             if draft.reference_pack is not None:
                 reasons.append(UNEXPECTED_PACK)
@@ -245,10 +252,8 @@ class ScenarioGenerator:
         else:
             pack, dropped = build_pack(draft.reference_pack, reference, scenario_id)
             if pack is None:
-                reasons.append(NO_VALID_CORE_REF)
-                reasons.extend(
-                    f"{d.reason} ({d.item.get('name') or d.item.get('rule')})" for d in dropped
-                )
+                reasons.append(NO_VALID_ITEM)
+                reasons.extend(d.reason for d in dropped)
         if (
             not cfg.include_unsupported_scenarios
             and draft.capability is CapabilityClassification.UNSUPPORTED
@@ -280,11 +285,12 @@ class ScenarioGenerator:
             reference_pack_id=pack_id_for(scenario_id) if pack is not None else None,
             business_goal=draft.business_goal,
             title=draft.title,
+            typical_task=typical_task,
             task_type=draft.task_type,
             capability=draft.capability,
             capability_rationale=draft.capability_rationale,
             success_criteria=draft.success_criteria,
-            question_guidance=draft.question_guidance,
+            question_intent=draft.question_intent,
             signature=signature,
         )
         assert scenario.id == scenario_id
@@ -292,6 +298,19 @@ class ScenarioGenerator:
         result.accepted.append(scenario)
         if pack is not None:
             result.packs.append(pack)
+
+
+def persona_task(persona: Persona, text: str | None) -> str | None:
+    """The persona's typical task ``text`` names (case / spacing / end punctuation ignored),
+    returned in the persona's own wording; None if ``text`` is None or names none of them."""
+    if text is None:
+        return None
+    wanted = _task_key(text)
+    return next((t for t in persona.typical_tasks if _task_key(t) == wanted), None)
+
+
+def _task_key(text: str) -> str:
+    return " ".join(text.casefold().split()).rstrip(".")
 
 
 class _DedupState:

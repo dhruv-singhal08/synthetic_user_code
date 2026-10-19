@@ -21,16 +21,23 @@ from synthetic_user.prompts.question import QuestionPromptOptions, build_questio
 
 
 def q(
-    utterance: str, style: str = "precise", ambiguity: str = "low", **extra: Any
+    utterance: str,
+    style: str = "precise",
+    ambiguity: str = "low",
+    complexity: str = "simple",
+    **extra: Any,
 ) -> dict[str, Any]:
     return {
         "utterance": utterance,
-        "intent": {"task_type": "ranking", "metrics": ["spend"]},
-        "question_characteristics": {"style": style, "ambiguity_level": ambiguity},
+        "intent": {"task_type": "ranking"},
+        "question_characteristics": {
+            "style": style,
+            "ambiguity_level": ambiguity,
+            "complexity": complexity,
+        },
         "expectations": {
             "expected_behavior": "Rank the top spenders, keeping currencies separate.",
             "success_criteria": ["names the top spenders", "does not mix currencies"],
-            "acceptable_variations": ["asks which currency to use", "gross or net spend"],
         },
         **extra,
     }
@@ -38,6 +45,13 @@ def q(
 
 def batch(*questions: dict[str, Any]) -> dict[str, Any]:
     return {"questions": list(questions)}
+
+
+def with_prefs(persona: Persona, **prefs: Any) -> Persona:
+    """``persona`` with question_preferences changed (validated like a persona file)."""
+    data = persona.model_dump(mode="json")
+    data["question_preferences"] = {**data["question_preferences"], **prefs}
+    return Persona.model_validate(data)
 
 
 def _settings(app_config: AppConfig, **question: Any) -> AppConfig:
@@ -217,7 +231,8 @@ async def test_vague_question_needs_ambiguity(env: Env) -> None:
             )
         ]
     )
-    result = await env.run(llm, allow_vague_questions=True)
+    config_driven = with_prefs(env.persona, ambiguity=None)  # persona leaves ambiguity to config
+    result = await env.run(llm, persona=config_driven, allow_vague_questions=True)
     assert [x.utterance for x in result.questions] == ["Is spend looking weird lately?"]
     assert result.questions[0].question_characteristics.ambiguity_level is AmbiguityLevel.MEDIUM
     assert result.rejected[0].reasons == ["vague question must have ambiguity_level medium or high"]
@@ -232,7 +247,8 @@ async def test_vague_rejected_when_not_allowed(env: Env) -> None:
             )
         ]
     )
-    result = await env.run(llm, allow_vague_questions=False)
+    config_driven = with_prefs(env.persona, ambiguity=None)
+    result = await env.run(llm, persona=config_driven, allow_vague_questions=False)
     assert [x.question_characteristics.style for x in result.questions] == ["investigative"]
     assert result.rejected[0].reasons == [VAGUE_NOT_ALLOWED]
 
@@ -271,6 +287,20 @@ async def test_copying_persona_example_rejected(env: Env) -> None:
     result = await env.run(llm, count=1)
     assert not result.questions
     assert result.rejected[0].reasons == ["near-duplicate of persona example utterance"]
+
+
+async def test_copying_a_typical_user_question_rejected(env: Env) -> None:
+    typical = "What are the biggest customer pain points this quarter?"
+    product = env.product.model_copy(update={"typical_user_questions": [typical]})
+    llm = FakeLLMClient([batch(q("what are the biggest customer pain points this quarter"))])
+    generator = QuestionGenerator(
+        llm, env.settings, logging.getLogger("test"), id_generator=SequentialIdGenerator()
+    )
+    result = await generator.generate(
+        env.persona, product, env.scenarios[:1], env.reference, env.packs, count=1
+    )
+    assert not result.questions
+    assert result.rejected[0].reasons == ["near-duplicate of product typical user question"]
 
 
 # --- other ------------------------------------------------------------------------------------
@@ -321,15 +351,20 @@ def test_prompt_contents(
     assert "Mostly vague or investigative" in user
     assert 'style "vague" is not allowed' in user
     assert "Plain language only: no internal identifiers" in user
-    assert "Reference pack of this scenario (for YOUR understanding only" in user
-    assert "Transaction amount in the transaction currency" in user  # a pack quote
-    assert sample_reference.text not in user  # the pack, not the whole reference
-    assert "What counts as core" in user  # the usage guide
+    assert "Cheat sheet of this scenario (for YOUR understanding only" in user
+    assert "Transaction amount in the transaction currency" in user  # copied by code
+    assert sample_reference.render() not in user  # the cheat sheet, not the whole reference
+    assert "merchant names cannot be joined in" in user  # the usage instructions
     assert "expected_behavior: 1-3 plain sentences" in user
     assert "success_criteria: 1-4 short" in user
-    assert "acceptable_variations" in user
+    assert "acceptable_variations" not in user  # removed (D204)
+    assert "The persona decides HOW the question is asked" in user
+    assert "Do not reuse the wording of the scenario's business_goal" in user
+    assert "JSON Schema" not in user and '"$defs"' not in user  # compact contract
+    style_examples = user.split("Style examples", 1)[1].split("How to use the persona", 1)[0]
     for example in sample_persona.example_utterances:
-        assert f"- {example}" in user.split("## PROHIBITED", 1)[1]
+        assert f"- {example}" in style_examples  # shown as style to match, not to copy
+    assert "Copying or lightly rewording the persona's style examples" in user
     contract = user.split("## OUTPUT CONTRACT", 1)[1].split("## PROHIBITED", 1)[0]
     for forbidden in ('"question_id":', '"intended_goal":', '"leak_warnings":'):
         assert forbidden not in contract
@@ -449,7 +484,66 @@ async def test_chatbot_product_questions_generated(
     question = result.questions[0]
     assert question.intended_goal == scenario.business_goal
     system, user = llm.calls[0].system, llm.calls[0].user
-    assert "product type\n(chatbot) is context only" in user
+    assert '"name": "Sample Travel & Expense Policy Assistant"' in user
     assert "SQL" not in system
     template = user.split("## CONSTRAINTS", 1)[1].split("## OUTPUT CONTRACT", 1)[0]
     assert "SQL" not in template
+
+
+# --- persona schema v2: question_preferences drive generation (D200) --------------------------
+
+
+async def test_persona_ambiguity_overrides_config(env: Env) -> None:
+    vague = q("Is spend looking weird lately?", "vague", "medium")
+    occasional = with_prefs(env.persona, ambiguity="occasional")
+    allowed = await env.run(
+        FakeLLMClient([batch(vague)]), persona=occasional, count=1, allow_vague_questions=False
+    )
+    assert [x.utterance for x in allowed.questions] == ["Is spend looking weird lately?"]
+    never = with_prefs(env.persona, ambiguity="none")
+    refused = await env.run(
+        FakeLLMClient([batch(vague)]), persona=never, count=1, allow_vague_questions=True
+    )
+    assert not refused.questions and refused.rejected[0].reasons == [VAGUE_NOT_ALLOWED]
+
+
+async def test_fixed_complexity_is_enforced_with_a_retry(env: Env) -> None:
+    simple_only = with_prefs(env.persona, complexity="simple")
+
+    def with_complexity(utterance: str, complexity: str | None) -> dict[str, Any]:
+        question = q(utterance)
+        if complexity:
+            question["question_characteristics"]["complexity"] = complexity
+        return question
+
+    llm = FakeLLMClient(
+        [
+            batch(with_complexity("Who spent most last month?", "complex")),
+            batch(with_complexity("Who spent most last month?", "complex")),
+            batch(
+                with_complexity("Who spent most last month?", "complex"),
+                with_complexity("Which team spent most?", "simple"),
+            ),
+        ]
+    )
+    result = await env.run(llm, persona=simple_only, count=2)
+    assert "persona asks for simple questions" in llm.calls[1].user  # retry feedback
+    assert [x.utterance for x in result.questions] == ["Which team spent most?"]
+    assert result.questions[0].question_characteristics.complexity == "simple"
+    assert result.rejected[0].reasons == [
+        "complexity complex: the persona asks for simple questions"
+    ]
+
+
+async def test_mixed_complexity_accepts_any(env: Env) -> None:
+    question = q("Who spent most last month?")
+    question["question_characteristics"]["complexity"] = "complex"
+    result = await env.run(FakeLLMClient([batch(question, q("Top merchants?"))]))
+    assert len(result.questions) == 2 and not result.rejected
+
+
+def test_technical_knowledge_high_makes_the_persona_technical(sample_persona: Persona) -> None:
+    data = sample_persona.model_dump(mode="json")
+    assert not sample_persona.is_technical
+    data["expertise"]["technical_knowledge"] = "high"
+    assert Persona.model_validate(data).is_technical

@@ -1,0 +1,92 @@
+id: gcs_product_owner
+version: "2.0"
+
+identity:
+  name: GCS Product Owner
+  role: Product Owner, American Express Global Commercial Services
+  description: >
+    Owns product outcomes across the product lifecycle by
+    identifying customer needs, defining product strategy,
+    prioritizing investments, and driving feature delivery.
+    Synthesizes customer feedback, business performance metrics,
+    operational insights, market trends, and stakeholder input
+    to determine what should be built, improved, or retired.
+    Collaborates with engineering, design, analytics, operations,
+    servicing, and business stakeholders to deliver measurable
+    customer and business value.
+
+expertise:
+  domain: high
+  product_management: high
+  customer_insights: high
+  data_analysis: medium
+  technical_knowledge: medium
+  sql: low
+  notes: >
+    Deep understanding of commercial payments, customer journeys,
+    product capabilities, business economics, and performance metrics.
+    Comfortable interpreting dashboards, customer research,
+    experimentation results, and operational reporting.
+    Understands product delivery concepts and technical dependencies
+    but is not an expert in database schemas or coding.
+
+behavior:
+  style: strategic, analytical, outcome-focused, customer-centric
+  traits:
+    - asks questions using business and customer language
+    - focuses on customer problems before solutions
+    - balances customer value, business impact, and implementation effort
+    - investigates performance changes and emerging trends
+    - seeks evidence from multiple sources before prioritizing work
+    - validates assumptions using customer and operational insights
+    - thinks in terms of outcomes rather than outputs
+    - explores root causes rather than surface-level metrics
+    - asks follow-up questions to understand impact, risk, and opportunity
+    - questions assumptions when evidence is incomplete or conflicting
+    - avoids technical implementation details unless required for decisions
+
+typical_tasks:
+  - Identify customer pain points from feedback and servicing interactions
+  - Define product strategy and prioritize roadmap opportunities
+  - Analyze product adoption, engagement, transaction, and revenue trends
+  - Investigate unexpected product performance changes
+  - Compare product performance across customer segments and regions
+  - Assess the impact of recently launched product capabilities
+  - Prioritize features and enhancements based on customer and business value
+  - Define product requirements and evaluate technical dependencies
+  - Build business cases for new product investments
+  - Monitor competitive offerings and industry trends
+  - Align stakeholders around product priorities and decisions
+  - Evaluate trade-offs between competing product initiatives
+
+primary_motivation: >
+  Deliver products that create meaningful customer value,
+  drive business growth, improve operational efficiency,
+  and strengthen competitive positioning. Make confident,
+  evidence-based product decisions while reducing ambiguity
+  and prioritization risk.
+
+decision_inputs:
+  - Customer feedback and Voice of Customer signals
+  - Product usage and adoption metrics
+  - Transaction and business performance data
+  - Customer servicing and operational insights
+  - Competitive intelligence and market research
+  - Product requirements and historical decisions
+  - Engineering and delivery constraints
+  - Regulatory and compliance considerations
+  - Stakeholder priorities and strategic objectives
+
+question_preferences:
+  complexity: mixed  # simple | medium | complex | mixed
+  follow_up_questions: true
+  ambiguity: occasional  # none | occasional | frequent
+
+example_utterances:
+  - What are the most common customer pain points related to this product?
+  - Which customer issues are growing fastest this quarter?
+  - What should we prioritize next and why?
+  - Which product capabilities are driving adoption?
+  - Why has engagement declined among mid-market customers?
+  - What evidence supports investing in this feature?
+  - How are competitors solving this problem?

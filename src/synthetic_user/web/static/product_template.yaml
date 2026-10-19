@@ -1,0 +1,29 @@
+# Product description template (schema v2). Fields marked (optional) can be left out.
+# Every field is used: scenarios read all of it, questions read the scope and data sources,
+# the evaluator reads scope, known limitations and expected outputs.
+product_id: my_product                  # stable id, letters / digits / underscores
+product_version: "1.0"
+name: My Product Assistant
+description: >
+  What the product does for its users, in two or three sentences.
+business_problem: >                     # (optional) why the product exists
+  The problem users had before this product and how it helps.
+data_sources:                           # (optional, recommended) what it answers from
+  - name: Complaints
+    description: >
+      What this data holds and what it is used for.
+supported:                              # what the product can do; one capability per line
+  - Summarise customer complaints by theme
+  - Compare complaint volumes across periods
+not_supported:                          # (optional) requests the product should decline
+  - Forecasting future trends
+known_limitations:                      # (optional) known weaknesses; matching findings count as known gaps
+  - Insights are limited to the listed data sources
+user_visible_capabilities:              # (optional) what users can do in the conversation
+  - Ask questions in natural language
+  - Ask follow-up questions
+typical_user_questions:                 # (optional) what real users ask; never copied into tests
+  - What are the biggest customer pain points this quarter?
+expected_outputs:                       # (optional, recommended) what an answer consists of
+  - Executive summaries
+  - Supporting evidence

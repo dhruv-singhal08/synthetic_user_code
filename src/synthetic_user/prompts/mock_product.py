@@ -31,15 +31,17 @@ def build_mock_product_prompt(
         include={
             "name",
             "description",
-            "product_type",
+            "data_sources",
             "supported",
-            "not_supported_yet",
-            "response_artifacts_expected",
+            "not_supported",
+            "known_limitations",
+            "user_visible_capabilities",
+            "expected_outputs",
         },
     )
     reference_block = (
-        f"Reference the product works from ({reference.format.value}):\n"
-        f"<<<REFERENCE\n{reference.text}\nREFERENCE>>>\n\n"
+        f"Reference the product works from ({reference.kind.value}):\n"
+        f"<<<REFERENCE\n{reference.render()}\nREFERENCE>>>\n\n"
         if reference is not None
         else "No reference data: answer only what the product description makes plausible.\n\n"
     )

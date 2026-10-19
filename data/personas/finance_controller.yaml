@@ -1,26 +1,43 @@
-# PROVISIONAL: SPEC section 5 not yet transcribed; replace with the spec's persona verbatim.
+# Persona schema v2 (see README "Persona"). Every field is used by the scenario and/or
+# question prompt; id and version are metadata only.
 id: finance_controller
-version: "1.0"
+version: "2.0"
+
 identity:
   name: Finance Controller
   role: Finance controller responsible for corporate card spend oversight
   description: Reviews employee card spending by department, merchant and currency.
-expertise:
+
+expertise:                       # domain (required) + any named areas: low | medium | high
   domain: high
   sql: low
   notes: Knows finance terms (spend, cost center, merchant category); does not know table names.
+
 behavior:
   style: concise, business-focused
   traits:
     - asks in business language, never in table or column names
     - expects totals and rankings to be in a single reporting currency
     - follows up when numbers look unusual
+
 typical_tasks:
   - Review total card spend by department for a period
   - Identify top merchants or merchant categories by spend
   - Spot unusual spending patterns
   - Compare spend across currencies or periods
+
 primary_motivation: Keep corporate card spend within budget and catch anomalies early.
+
+decision_inputs:
+  - Corporate card transaction data
+  - Department and cost center budgets
+  - Merchant and merchant category information
+
+question_preferences:
+  complexity: mixed              # simple | medium | complex | mixed
+  follow_up_questions: false
+  ambiguity: none                # none | occasional | frequent
+
 example_utterances:
   - Which departments spent the most on cards last quarter?
   - Show me our top 10 merchants by spend this year.

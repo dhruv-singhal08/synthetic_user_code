@@ -35,16 +35,17 @@ from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
-from synthetic_user.models.reference import Reference, ReferencePack
+from synthetic_user.models.reference import DataCatalog, Reference, ReferenceKind, ReferencePack
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.pipeline import RunInputs, Step, steps_from
-from synthetic_user.references.loader import parse_reference, reference_format
+from synthetic_user.references.loader import GUIDE_SUFFIXES, parse_reference
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import RUNS_DIR, run_artifact
 from synthetic_user.web.results_csv import build_rows, to_csv
 
-REFERENCE = "reference"  # optional input kind (.json/.txt/.md); absent -> ungrounded
-GUIDE = "reference_guide"  # optional usage guide (.md/.txt) for the reference
+REFERENCE = "reference"  # data_catalog / document_collection (.yaml/.json); absent -> ungrounded
+GUIDE = "reference_guide"  # optional usage instructions (.md/.txt upload, or typed in the UI)
+TYPED_INSTRUCTIONS = "instructions.md"  # file name used for instructions typed in the UI
 YAML_KINDS: dict[str, tuple[type[BaseModel], str]] = {
     "persona": (Persona, "Persona file"),
     "product": (ProductDescription, "Product file"),
@@ -94,19 +95,54 @@ class GuidePreview(StrictModel):
     chars: int
 
 
+class ReferencePreview(StrictModel):
+    reference_id: NonEmptyStr
+    source_name: NonEmptyStr
+    kind: ReferenceKind
+    name: NonEmptyStr
+    chars: int  # as rendered for prompts
+    tables: int | None = None
+    relationships: int | None = None
+    rules: int | None = None
+    documents: int | None = None
+
+
+def reference_preview(reference: Reference) -> ReferencePreview:
+    content = reference.content
+    counts: dict[str, int] = (
+        {
+            "tables": len(content.tables),
+            "relationships": len(content.relationships),
+            "rules": len(content.rules),
+        }
+        if isinstance(content, DataCatalog)
+        else {"documents": len(content.documents)}
+    )
+    return ReferencePreview(
+        reference_id=reference.reference_id,
+        source_name=reference.source_name,
+        kind=reference.kind,
+        name=content.name,
+        chars=len(reference.render()),
+        **counts,
+    )
+
+
 def parse_upload(kind: str, upload: Upload, *, max_chars: int) -> BaseModel:
-    """Validate an uploaded file: persona / product (YAML), reference (.json/.txt/.md) or
-    usage guide (.md/.txt)."""
+    """Validate an uploaded file: persona / product (YAML), reference (data_catalog or
+    document_collection, .yaml/.json) or usage instructions (.md/.txt)."""
     if kind not in INPUT_KINDS:
         raise InputAssetError(f"Unknown input kind {kind!r}")
     if len(upload.content) > MAX_UPLOAD_BYTES:
         raise InputAssetError(f"{upload.filename}: larger than {MAX_UPLOAD_BYTES:,} bytes")
     if kind == REFERENCE:
-        return parse_reference(upload.content, source_name=upload.filename, max_chars=max_chars)
+        return reference_preview(
+            parse_reference(upload.content, source_name=upload.filename, max_chars=max_chars)
+        )
     text = _decode(upload)
     if kind == GUIDE:
-        if Path(upload.filename).suffix.lower() not in {".md", ".markdown", ".txt"}:
-            raise InputAssetError(f"Usage guide {upload.filename}: use a .md or .txt file")
+        if Path(upload.filename).suffix.lower() not in GUIDE_SUFFIXES:
+            raise InputAssetError(f"Usage instructions {upload.filename}: use a .md or .txt file")
         return GuidePreview(name=upload.filename, chars=len(text))
     model, label = YAML_KINDS[kind]
     return parse_asset(text, model, kind=label, source=upload.filename)
@@ -180,12 +216,14 @@ class Workspace:
         persona_queries: str,
         *,
         use_reference: bool = False,
+        reference_instructions: str = "",
     ) -> UiRunState:
         """Validate every input, then save them into a new run.
 
         Persona: upload or the configured sample. Product description: upload only (no
-        sample). Reference: only when switched on, and then an upload is required (the usage
-        guide is optional); switched off -> ungrounded run.
+        sample). Reference: only when switched on, and then an upload is required; usage
+        instructions are optional, as a file OR typed text (not both); switched off ->
+        ungrounded run.
         """
         max_chars = self._settings.reference.max_chars
         texts: dict[str, str] = {}
@@ -202,13 +240,20 @@ class Workspace:
             else:
                 raise InputAssetError("Upload a product description (YAML); no sample is used")
         reference_upload, guide_upload = uploads.get(REFERENCE), uploads.get(GUIDE)
+        typed = reference_instructions.strip()
         files: dict[str, Upload] = {}
+        if use_reference and typed:
+            if guide_upload is not None:
+                raise InputAssetError(
+                    "Give the usage instructions as a file or as typed text, not both"
+                )
+            guide_upload = Upload(TYPED_INSTRUCTIONS, typed.encode("utf-8"))
         if not use_reference:
             sources[REFERENCE] = sources[GUIDE] = "off"
         elif reference_upload is None:
             raise InputAssetError(
-                "Reference is switched on: upload the reference file (.json / .txt / .md), or "
-                "switch it off for an ungrounded run"
+                "Reference is switched on: upload the reference (a data_catalog or "
+                "document_collection, .yaml / .json), or switch it off for an ungrounded run"
             )
         else:
             _reference_of(reference_upload, guide_upload, max_chars)  # validates both
@@ -216,7 +261,9 @@ class Workspace:
             sources[REFERENCE] = f"uploaded: {reference_upload.filename}"
             if guide_upload is not None:
                 files[GUIDE] = guide_upload
-                sources[GUIDE] = f"uploaded: {guide_upload.filename}"
+                sources[GUIDE] = (
+                    "typed in the UI" if typed else f"uploaded: {guide_upload.filename}"
+                )
             else:
                 sources[GUIDE] = "default"
         queries = clean_queries(persona_queries)
@@ -403,7 +450,6 @@ class Workspace:
 
 
 def _reference_of(upload: Upload, guide: Upload | None, max_chars: int) -> Reference:
-    reference_format(upload.filename)  # clear error for an unsupported type first
     return parse_reference(
         upload.content,
         source_name=upload.filename,

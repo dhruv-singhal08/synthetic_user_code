@@ -16,8 +16,10 @@ from synthetic_user.models.scenario import ScenarioDraft, ScenarioGenerationResu
 from synthetic_user.nodes.scenario_generator import (
     FILTERED_BY_CONFIG,
     MISSING_PACK,
+    NO_VALID_ITEM,
     SURPLUS,
     UNEXPECTED_PACK,
+    UNKNOWN_TYPICAL_TASK,
     ScenarioGenerator,
     scenario_signature,
     ungrounded_signature,
@@ -97,7 +99,8 @@ async def test_accepts_valid_scenarios_with_code_assigned_ids(
         assert scenario.signature == scenario_signature(
             scenario.task_type, scenario.business_goal, scenario.capability, pack
         )
-    assert result.packs[0].rules[0].rule == "never sum amounts across currencies"
+    assert result.packs[0].rules[0].rule.startswith("Amounts in different currency_code values")
+    assert result.packs[0].joins[0].verified is True
     assert len(llm.calls) == 1
 
 
@@ -118,50 +121,53 @@ async def test_llm_supplied_ids_rejected(env: Env, scenario_drafts: list[dict[st
     assert "Extra inputs are not permitted" in result.rejected[0].reasons[0]
 
 
-# --- (a) quotes are checked against the reference -----------------------------------------
+# --- (a) cheat-sheet picks are checked against the reference ------------------------------
 
 
-INVENTED = {"name": "employees.salary", "quote": "Annual salary in USD.", "why": "invented"}
+INVENTED = {"table": "payroll", "columns": ["salary"], "why": "invented"}
 
 
-async def test_core_ref_with_unknown_quote_is_dropped_and_recorded(
+async def test_unknown_picks_are_dropped_and_recorded(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
-    scenario_drafts[0]["reference_pack"]["core_refs"].append(INVENTED)
-    scenario_drafts[0]["reference_pack"]["rules"].append(
-        {"rule": "convert to USD", "quote": "Amounts are converted to USD first."}
+    pack_draft = scenario_drafts[0]["reference_pack"]
+    pack_draft["tables"].append(INVENTED)
+    pack_draft["tables"][1]["columns"].append("salary")
+    pack_draft["joins"].append(
+        {"from": "card_transactions.merchant_id", "to": "merchants.merchant_id"}
     )
+    pack_draft["rules"].append("R7")
     result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1)
     pack = result.packs[0]
-    assert [r.name for r in pack.core_refs] == [
+    assert pack.item_names() == [
+        "card_transactions",
         "card_transactions.amount",
         "card_transactions.currency_code",
+        "employees",
         "employees.full_name",
     ]
-    assert [r.rule for r in pack.rules] == ["never sum amounts across currencies"]
-    assert [
-        d.item["name"] if "name" in d.item else d.item["rule"] for d in pack.rejected_items
-    ] == [
-        "employees.salary",
-        "convert to USD",
+    assert [r.id for r in pack.rules] == ["R1"]
+    assert [d.reason for d in pack.rejected_items] == [
+        "column 'salary' is not in table employees",
+        "unknown table 'payroll'",
+        "card_transactions.merchant_id -> merchants.merchant_id is not a listed relationship",
+        "unknown catalog rule id 'R7'",
     ]
 
 
-async def test_pack_without_valid_core_ref_rejects_the_scenario(
+async def test_pack_without_a_valid_table_rejects_the_scenario(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
-    scenario_drafts[1]["reference_pack"] = {"core_refs": [INVENTED]}
+    scenario_drafts[1]["reference_pack"] = {"tables": [INVENTED]}
     result = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1, max_topup_rounds=0)
     assert not result.accepted and not result.packs
-    reasons = result.rejected[0].reasons
-    assert reasons[0] == "reference pack has no core_ref whose quote is in the reference"
-    assert "quote not found" in reasons[1] and "employees.salary" in reasons[1]
+    assert result.rejected[0].reasons == [NO_VALID_ITEM, "unknown table 'payroll'"]
 
 
 async def test_one_bad_scenario_does_not_sink_the_batch(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
-    scenario_drafts[0]["reference_pack"] = {"core_refs": [INVENTED]}
+    scenario_drafts[0]["reference_pack"] = {"tables": [INVENTED]}
     result = await env.run(FakeLLMClient([_batch(*scenario_drafts)]), count=2, max_topup_rounds=0)
     assert [s.title for s in result.accepted] == [
         "Monthly spend trend by merchant category",
@@ -173,31 +179,29 @@ async def test_one_bad_scenario_does_not_sink_the_batch(
     assert len(result.rejected) == 1
 
 
-async def test_text_reference_grounds_a_chatbot(
+async def test_document_reference_grounds_a_chatbot(
     env: Env, sample_chatbot: ProductDescription, policy_reference: Reference
 ) -> None:
     draft = {
         **copy.deepcopy(CHATBOT_DRAFTS[0]),
-        "reference_pack": {
-            "core_refs": [
-                {
-                    "name": "1. Hotels",
-                    "quote": "The nightly hotel limit is USD 250 in Tier 1 cities",
-                    "why": "Paris is a Tier 1 city",
-                }
-            ],
-            "rules": [{"rule": "taxes included", "quote": "taxes included"}],
-        },
+        "reference_pack": {"documents": [{"name": "Hotel policy", "why": "Paris is Tier 1"}]},
+    }
+    wrong_kind = {
+        **copy.deepcopy(CHATBOT_DRAFTS[1]),
+        "reference_pack": {"tables": [{"table": "card_transactions", "why": "x"}]},
     }
     generator = ScenarioGenerator(
-        FakeLLMClient([_batch(draft)]),
-        env.settings,
+        FakeLLMClient([_batch(draft, wrong_kind)]),
+        _settings(env.settings, max_topup_rounds=0),
         logging.getLogger("t"),
         id_generator=SequentialIdGenerator(),
     )
-    result = await generator.generate(env.persona, sample_chatbot, policy_reference, count=1)
+    result = await generator.generate(env.persona, sample_chatbot, policy_reference, count=2)
     assert result.accepted[0].mode == "grounded"
-    assert result.packs[0].core_refs[0].name == "1. Hotels"
+    (pack,) = result.packs
+    assert pack.kind == "document_collection" and pack.documents[0].name == "Hotel policy"
+    assert "USD 250 in Tier 1" in pack.documents[0].summary  # the user's text, copied by code
+    assert "does not fit a document_collection reference" in result.rejected[0].reasons[1]
 
 
 # --- (b) unsupported ------------------------------------------------------------------------
@@ -245,7 +249,7 @@ async def test_same_shape_different_goal_is_duplicate(
 ) -> None:
     reworded = copy.deepcopy(scenario_drafts[0])
     reworded["business_goal"] = "Find the biggest card spenders among staff for audit"
-    reworded["reference_pack"]["core_refs"].reverse()
+    reworded["reference_pack"]["tables"].reverse()
     result = await env.run(
         FakeLLMClient([_batch(scenario_drafts[0], reworded)]), count=2, max_topup_rounds=0
     )
@@ -326,16 +330,19 @@ def test_prompt_contents(
     ):
         assert section in user
     assert "business goal FIRST" in user
-    assert "copied EXACTLY from the" in user and "checked by code" in user
+    assert "Pick\n  from the catalog by exact name" in user and "drops any" in user
     assert "Writing the user's question" in user
     assert "- sig-1" in user
-    for item in sample_product.not_supported_yet + sample_product.known_gaps:
+    for item in sample_product.not_supported + sample_product.known_limitations:
         assert item in user
-    assert sample_reference.text in user  # the whole reference
-    assert "Usage guide" in user and "What counts as core" in user  # the user's guide
+    assert sample_reference.render() in user  # the whole reference, as rendered by code
+    assert "Usage instructions for the reference" in user
+    assert "merchant names cannot be joined in" in user  # the user's instructions
     contract = user.split("## OUTPUT CONTRACT", 1)[1].split("## PROHIBITED", 1)[0]
-    for forbidden in ('"id":', '"persona_id":', '"signature":', '"reference_id":'):
+    for forbidden in ('"id":', '"persona_id":', '"signature":', '"reference_id":', "$defs"):
         assert forbidden not in contract
+    assert '"joins"' in contract and '"documents"' not in contract  # the catalog's pack
+    assert "question_guidance" not in user and "phrasing" not in contract
     assert next(iter(ScenarioDraft.model_json_schema()["properties"])) == "business_goal"
 
 
@@ -379,7 +386,7 @@ CHATBOT_DRAFTS: list[dict[str, Any]] = [
             "says whether the limit includes taxes",
             "points to the policy section the answer relies on",
         ],
-        "question_guidance": {"intent": "learn the hotel cap for Paris"},
+        "question_intent": "learn the hotel cap for Paris",
     },
     {
         "business_goal": "Get an expense report approved by the manager directly in the chat",
@@ -387,12 +394,12 @@ CHATBOT_DRAFTS: list[dict[str, Any]] = [
         "task_type": "how_to",
         "capability": "unsupported",
         "capability_rationale": "Product lists 'submitting or approving expense reports' under "
-        "not_supported_yet",
+        "not_supported",
         "success_criteria": [
             "clearly says the assistant cannot approve reports",
             "explains where approval is done instead",
         ],
-        "question_guidance": {"intent": "approve a report via chat"},
+        "question_intent": "approve a report via chat",
     },
 ]
 
@@ -426,7 +433,7 @@ async def test_ungrounded_accepts_goal_and_criteria_without_pack(
     assert not result.packs
     system, user = llm.calls[0].system, llm.calls[0].user
     assert "never invent tables" in system
-    assert "reference_pack (leave it out)" in user
+    assert "there is no reference_pack" in user and '"reference_pack"' not in user
     assert "card_transactions" not in user and "<<<REFERENCE" not in user
 
 
@@ -461,7 +468,7 @@ async def test_non_sql_product_sample_chatbot_works(
         ("sample_policy_chatbot", TaskType.HOW_TO, "unsupported"),
     ]
     user = llm.calls[0].user
-    assert "product type: chatbot" in user
+    assert 'PRODUCT ("Sample Travel & Expense Policy Assistant")' in user
     assert "submitting or approving expense reports" in user
     assert "SQL" not in llm.calls[0].system
 
@@ -500,5 +507,24 @@ def test_both_prompts_share_the_common_core(
         assert "success_criteria: 2-5 short, checkable statements" in text
         assert "capability_rationale must cite" in text
         assert "Writing the user's question" in text
-    assert "AUTHORITATIVE" in grounded and "reference_pack:" in grounded
+    assert "AUTHORITATIVE" in grounded and '"reference_pack"' in grounded
     assert "REFIDX" not in ungrounded and "Do not invent data structures" in ungrounded
+
+
+# --- persona schema v2: typical_task links a scenario to the persona (D200) -------------------
+
+
+async def test_typical_task_is_matched_to_the_persona_wording(
+    env: Env, scenario_drafts: list[dict[str, Any]]
+) -> None:
+    named, unknown, none = (copy.deepcopy(d) for d in scenario_drafts)
+    named["typical_task"] = "identify top merchants or merchant categories by spend."
+    unknown["typical_task"] = "Plan the office party"
+    result = await env.run(
+        FakeLLMClient([_batch(named, unknown, none)]), count=3, max_topup_rounds=0
+    )
+    assert [s.typical_task for s in result.accepted] == [
+        "Identify top merchants or merchant categories by spend",  # the persona's own text
+        None,
+    ]
+    assert result.rejected[0].reasons == [f"{UNKNOWN_TYPICAL_TASK}: 'Plan the office party'"]

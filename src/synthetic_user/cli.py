@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Annotated, Literal, NoReturn, TypeVar
 
 import typer
+import yaml
 from dotenv import find_dotenv, load_dotenv
 from pydantic import TypeAdapter
 
@@ -30,14 +31,13 @@ from synthetic_user.benchmark import load_cases, load_scenarios, run_benchmark
 from synthetic_user.core.config import (
     AppConfig,
     LLMProvider,
-    WebSettings,
-    WebUi,
     load_adapter_file,
     load_config,
 )
 from synthetic_user.core.exceptions import (
     ArtifactIntegrityError,
     ConfigError,
+    InputAssetError,
     SyntheticUserError,
 )
 from synthetic_user.core.identifiers import RUN_ID_PATTERN, SequentialIdGenerator, new_run_id
@@ -53,13 +53,18 @@ from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
 from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import Reference, ReferencePack
+from synthetic_user.models.reference import DataCatalog, Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.pipeline import RunInputs, RunSummary, Step, SyntheticUserPipeline
 from synthetic_user.prompts.smoke import SMOKE_SYSTEM, SMOKE_USER
-from synthetic_user.references.loader import load_optional_reference, load_reference
+from synthetic_user.references.convert import refidx_to_catalog
+from synthetic_user.references.loader import (
+    load_optional_reference,
+    load_reference,
+    parse_reference,
+)
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact
 
@@ -80,15 +85,16 @@ ReferenceOption = Annotated[
     Path | None,
     typer.Option(
         "--reference",
-        help="Reference file (.json / .txt / .md) -> grounded. Default: inputs.reference_file; "
-        "none -> ungrounded.",
+        help="Reference (data_catalog or document_collection, .yaml / .json) -> grounded. "
+        "Default: inputs.reference_file; none -> ungrounded.",
     ),
 ]
 GuideOption = Annotated[
     Path | None,
     typer.Option(
         "--reference-guide",
-        help="Usage guide (.md / .txt) for the reference. Default: inputs.reference_guide_file.",
+        help="Usage instructions (.md / .txt) for the reference (optional; a default per "
+        "format is used). Default: inputs.reference_guide_file.",
     ),
 ]
 
@@ -184,13 +190,13 @@ def _smoke_client(settings: AppConfig) -> LLMClient:
 def check_reference_command(
     ctx: typer.Context,
     reference: Annotated[
-        Path, typer.Option("--reference", help="Reference file (.json / .txt / .md) to check.")
+        Path, typer.Option("--reference", help="Reference file (.yaml / .json) to check.")
     ],
     guide: GuideOption = None,
     config: CommandConfigOption = None,
     log_level: CommandLogLevelOption = None,
 ) -> None:
-    """Load a reference (+ usage guide) and print its id and size (exit 1 on load errors)."""
+    """Load a reference (+ instructions) and print its id, format and size (exit 1 on errors)."""
     state = _state(ctx, config, log_level)
     _guard(lambda: _check_reference(state, reference, guide))
 
@@ -198,11 +204,55 @@ def check_reference_command(
 def _check_reference(state: CliState, path: Path, guide: Path | None) -> None:
     settings = load_config(state.config_path)
     reference = load_reference(path, max_chars=settings.reference.max_chars, guide_path=guide)
-    typer.echo(
-        f"reference_id={reference.reference_id} format={reference.format} "
-        f"chars={len(reference.text)} max_chars={settings.reference.max_chars} "
-        f"guide={reference.guide_name or 'default'}"
+    content = reference.content
+    items = (
+        f"tables={len(content.tables)} relationships={len(content.relationships)} "
+        f"rules={len(content.rules)}"
+        if isinstance(content, DataCatalog)
+        else f"documents={len(content.documents)}"
     )
+    typer.echo(
+        f"reference_id={reference.reference_id} kind={reference.kind.value} {items} "
+        f"chars={len(reference.render())} max_chars={settings.reference.max_chars} "
+        f"instructions={reference.instructions_name or 'default'}"
+    )
+
+
+@app.command("convert-reference")
+def convert_reference_command(
+    ctx: typer.Context,
+    source: Annotated[
+        Path, typer.Option("--input", help="Existing reference index (REFIDX JSON).")
+    ],
+    out: Annotated[Path, typer.Option("--out", help="data_catalog YAML to write.")],
+    config: CommandConfigOption = None,
+    log_level: CommandLogLevelOption = None,
+) -> None:
+    """Convert a REFIDX reference index (tables, columns, relationships, rules) into the
+    data_catalog format; the result is validated like an upload before it is written."""
+    state = _state(ctx, config, log_level)
+
+    def convert() -> None:
+        settings = load_config(state.config_path)
+        try:
+            index = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise InputAssetError(f"Cannot read reference index {source}: {exc}") from exc
+        text = yaml.safe_dump(
+            refidx_to_catalog(index), sort_keys=False, allow_unicode=True, width=100
+        )
+        reference = parse_reference(
+            text, source_name=out.name, max_chars=settings.reference.max_chars
+        )
+        out.write_text(text, encoding="utf-8")
+        content = reference.content
+        assert isinstance(content, DataCatalog)
+        typer.echo(
+            f"wrote {out} kind=data_catalog tables={len(content.tables)} "
+            f"relationships={len(content.relationships)} rules={len(content.rules)}"
+        )
+
+    _guard(convert)
 
 
 @app.command("generate-scenarios")
@@ -609,12 +659,6 @@ def serve(
         "127.0.0.1"
     ),
     port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8000,
-    ui: Annotated[
-        WebUi | None,
-        typer.Option(
-            "--ui", help="UI served at / (default: web.ui). Both stay at /modern, /classic."
-        ),
-    ] = None,
 ) -> None:
     """Start the web UI + API (FastAPI) at http://HOST:PORT."""
     state = _state(ctx, config, log_level)
@@ -625,11 +669,7 @@ def serve(
         from synthetic_user.web.server import create_app
 
         settings = load_config(state.config_path)
-        if ui is not None:
-            settings = settings.model_copy(update={"web": WebSettings(ui=ui)})
-        typer.echo(
-            f"Synthetic User UI ({settings.web.ui.value}) on http://{host}:{port}  (Ctrl+C to stop)"
-        )
+        typer.echo(f"Synthetic User UI on http://{host}:{port}  (Ctrl+C to stop)")
         uvicorn.run(create_app(settings), host=host, port=port, log_level="warning")
 
     _guard(start)

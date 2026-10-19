@@ -1,0 +1,81 @@
+# Sample data catalog (format: data_catalog, D203). Illustrative; not real data.
+# Converted from the earlier sample index with `synthetic-user convert-reference`, then tidied.
+kind: data_catalog
+name: Corporate card spend warehouse
+description: Card transactions, employees and departments for corporate card spend reporting.
+
+tables:
+  - name: card_transactions
+    description: Corporate card spend, one row per posted card transaction.
+    rules:
+      - Amounts are in the transaction currency; amounts in different currencies must not be summed directly.
+    columns:
+      - name: transaction_id
+        type: STRING
+        description: Unique transaction identifier.
+      - name: employee_id
+        type: STRING
+        description: Cardholder employee.
+      - name: merchant_id
+        type: STRING
+        description: Merchant where the transaction occurred.
+      - name: transaction_date
+        type: DATE
+        description: Date the transaction posted.
+      - name: amount
+        type: NUMERIC
+        description: Transaction amount in the transaction currency (see currency_code).
+      - name: currency_code
+        type: STRING
+        description: ISO 4217 currency of amount.
+        values: [USD, EUR, GBP, INR]
+      - name: merchant_category
+        type: STRING
+        description: Merchant category as reported on the transaction.
+        values: [travel, dining, software, office_supplies, other]
+
+  - name: employees
+    description: Employee directory used to attribute card spend to people, one row per employee.
+    columns:
+      - name: employee_id
+        type: STRING
+        description: Unique employee identifier.
+      - name: full_name
+        type: STRING
+        description: Employee full name.
+      - name: department_id
+        type: STRING
+        description: Department the employee belongs to.
+
+  - name: departments
+    description: Department reference data with finance cost centers, one row per department.
+    columns:
+      - name: department_id
+        type: STRING
+        description: Unique department identifier.
+      - name: department_name
+        type: STRING
+        description: Department display name.
+      - name: cost_center
+        type: STRING
+        description: Finance cost center code.
+
+  - name: merchants
+    columns:
+      - name: merchant_id
+        type: STRING
+      - name: merchant_name
+        type: STRING
+      - name: country_code
+        type: STRING
+
+relationships:
+  - from: card_transactions.employee_id
+    to: employees.employee_id
+    verified: true
+  - from: employees.department_id
+    to: departments.department_id
+    verified: false
+
+rules:
+  - Amounts in different currency_code values must not be summed directly.

@@ -26,10 +26,19 @@ class LLMProviderError(SyntheticUserError):
 class LLMOutputValidationError(SyntheticUserError):
     """LLM output failed schema validation after all bounded retries."""
 
-    def __init__(self, message: str, *, attempts: int, errors: Sequence[str]) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int,
+        errors: Sequence[str],
+        raw_output: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.attempts = attempts
         self.errors: tuple[str, ...] = tuple(errors)
+        # The text that could not be parsed (for the run trace; never shown in the message).
+        self.raw_output = raw_output
 
     def __str__(self) -> str:
         return f"{self.args[0]} (attempts={self.attempts}, errors={len(self.errors)})"

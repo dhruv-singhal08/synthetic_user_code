@@ -90,7 +90,7 @@ Generic (all products, both modes):
 3. `expected_behavior`
 4. `success_criteria` (the ONLY input that can fail goal_completeness)
 5. `acceptable_variations` (can only relax the judgement)
-6. `product`: supported, not_supported_yet, known_gaps, response_artifacts_expected
+6. `product`: description, data_sources, supported, not_supported, known_limitations, expected_outputs (schema v2, D205)
 7. `persona`: expertise level only
 8. `response`: text + every artifact (e.g. SQL) in full, up to a size cap
 
@@ -197,3 +197,21 @@ inconclusive rate. Breakdowns by task type and capability in kpis.json.
 
 Not included (can be added later): product-specific custom metrics, targets / colours,
 run-to-run comparison.
+
+## 12. Design v4: two reference formats and the cheat sheet (2026-10-19, D203 / D204)
+
+Supersedes sections 2-3 (any-file reference, verbatim quotes) and the acceptable_variations
+parts of sections 5-7.
+
+- Reference = `data_catalog` (tables / columns / relationships / rules) or
+  `document_collection` (documents with summaries), YAML or JSON; free format is refused.
+  Optional usage instructions (file or typed); default per format.
+- Cheat sheet (Reference Pack) per grounded scenario = picks by exact name / id, checked by
+  code, filled with the reference's own text. Question generation and evaluation see the
+  cheat sheet only.
+- Evaluation per format: catalog - tables / columns / listed joins / rules (extras fine,
+  NOT verified joins flagged); documents - statements vs summaries (not covered is not
+  wrong; no source citations expected).
+- Prompts: compact JSON-example output contracts; scenario `question_intent` replaces
+  question_guidance; the persona alone decides how questions are phrased;
+  `acceptable_variations` removed (valid readings live in expected_behavior / criteria).

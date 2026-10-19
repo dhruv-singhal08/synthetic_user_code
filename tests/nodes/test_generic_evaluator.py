@@ -21,12 +21,18 @@ from synthetic_user.models.evaluation import (
 from synthetic_user.models.execution import AnsweredResponse, ExecutionRecord
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import CoreRef, Reference, ReferencePack, ReferenceRule
+from synthetic_user.models.reference import (
+    DocumentPackDraft,
+    DocumentPick,
+    Reference,
+    ReferencePack,
+)
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluators.generic import compute_metrics, failing_metrics
 from synthetic_user.prompts.response_evaluation import build_response_evaluation_prompt
+from synthetic_user.references.pack import build_pack
 
 CRITERIA = ["states the nightly hotel limit that applies", "says whether taxes are included"]
 ANSWER = "For Paris the nightly hotel limit is USD 250, taxes included. Book via the travel tool."
@@ -111,12 +117,15 @@ def ungrounded(sample_scenarios: list[Scenario]) -> tuple[Scenario, QuestionCase
             "utterance": "How much can I spend per night on a hotel in Paris?",
             "intended_goal": scenario.business_goal,
             "intent": {"task_type": "explanation"},
-            "question_characteristics": {"ambiguity_level": "low"},
+            "question_characteristics": {
+                "style": "precise",
+                "ambiguity_level": "low",
+                "complexity": "simple",
+            },
             "expectations": {
                 "expected_behavior": "State the nightly hotel limit for Paris and whether "
                 "taxes are included.",
                 "success_criteria": CRITERIA,
-                "acceptable_variations": ["mentions the approval rule for higher rates"],
             },
         }
     )
@@ -127,15 +136,13 @@ def ungrounded(sample_scenarios: list[Scenario]) -> tuple[Scenario, QuestionCase
 def grounded(
     ungrounded: tuple[Scenario, QuestionCase], policy_reference: Reference
 ) -> tuple[Scenario, QuestionCase, ReferencePack]:
-    """The same hotel question, grounded in the sample travel policy (a Markdown file)."""
+    """The same hotel question, grounded in the sample travel policy documents."""
     scenario, question = ungrounded
-    pack = ReferencePack(
-        pack_id="RP_SCN_001",
-        scenario_id=scenario.id,
-        reference_id=policy_reference.reference_id,
-        core_refs=[CoreRef(name="1. Hotels", quote=POLICY_LIMIT, why="Paris is a Tier 1 city")],
-        rules=[ReferenceRule(rule="limits include taxes", quote=TAXES)],
+    draft = DocumentPackDraft(
+        documents=[DocumentPick(name="Hotel policy", why="Paris is a Tier 1 city")]
     )
+    pack, rejected = build_pack(draft, policy_reference, scenario.id)
+    assert pack is not None and not rejected
     scenario = scenario.model_copy(
         update={
             "mode": GenerationMode.GROUNDED,
@@ -322,7 +329,7 @@ async def test_grounded_answer_supported_by_pack_passes(
         "hallucination_rate": 0.0,
         "completeness": 1.0,
     }
-    assert "Reference pack (AUTHORITATIVE" in llm.calls[0].user
+    assert "Cheat sheet of this scenario (AUTHORITATIVE" in llm.calls[0].user
 
 
 async def test_extra_statements_lower_groundedness_but_do_not_fail(
@@ -416,7 +423,7 @@ async def test_invalid_drafts_are_retried_with_reasons(
         "correctness is required for a grounded question",
         "criteria must list each success criterion once",
         "is not copied from the response",
-        "reference_quote is not in the reference",
+        "reference_quote is not in the cheat sheet or the usage instructions",
         "status 'unverified' must be one of",
     ):
         assert reason in first
@@ -489,11 +496,11 @@ def test_prompt_shows_only_the_evaluation_contract(
         question.utterance,
         scenario.business_goal,
         question.expectations.expected_behavior,
-        "mentions the approval rule for higher rates",
         POLICY_LIMIT,
-        "Answers must state the limit or rule from the policy",  # usage guide
-        "Using MORE",
-        "labelled supported (the reference",
+        "Limits and amounts in the summaries are exact",  # usage instructions
+        "consistent with the summaries",  # document correctness rule
+        "labelled supported (a summary states it)",
+        "they are\n  partial, so this is NOT an error",
         "Framing sentences that state no fact",
     ):
         assert shown in user
@@ -504,6 +511,8 @@ def test_prompt_shows_only_the_evaluation_contract(
         "intended_goal",
         "Alcohol is never reimbursable",  # the full reference text is not sent
         "persona",
+        "acceptable_variations",
+        "$defs",  # compact contract, not the JSON Schema
     ):
         assert hidden not in user
 
@@ -554,3 +563,21 @@ async def test_findings_matching_known_gaps_are_flagged(
     reply = draft(criteria=criteria("not_met", "met"), findings=[gap])
     result, _ = await _evaluate(app_config, sample_chatbot, ungrounded, TEXT, reply)
     assert result.findings[0].matches_known_gap is True
+
+
+async def test_reference_quote_may_come_from_the_usage_instructions(
+    app_config: AppConfig,
+    sample_chatbot: ProductDescription,
+    grounded: tuple[Scenario, QuestionCase, ReferencePack],
+    policy_reference: Reference,
+) -> None:
+    from_instructions = "Limits and amounts in the summaries are exact"
+    result, llm = await _evaluate(
+        app_config,
+        sample_chatbot,
+        grounded,
+        TEXT,
+        grounded_draft(claims=[claim(LIMIT, "supported", from_instructions)]),
+        reference=policy_reference,
+    )
+    assert len(llm.calls) == 1 and result.verdict is Verdict.PASS

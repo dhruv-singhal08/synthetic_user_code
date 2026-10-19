@@ -12,7 +12,6 @@ from fastapi.testclient import TestClient
 
 from synthetic_user.adapters.http_json import HttpRequest, HttpResult
 from synthetic_user.core.config import load_config
-from synthetic_user.core.exceptions import ConfigError
 from synthetic_user.web.results_csv import COLUMNS
 from synthetic_user.web.server import create_app
 from synthetic_user.web.workspace import Workspace
@@ -22,9 +21,9 @@ PERSONA_YAML = (REPO_ROOT / "data" / "personas" / "finance_controller.yaml").rea
 PRODUCT_YAML = (REPO_ROOT / "data" / "products" / "sample_product.yaml").read_bytes()
 CHATBOT_YAML = (REPO_ROOT / "data" / "products" / "sample_chatbot.yaml").read_bytes()
 REFERENCES = REPO_ROOT / "data" / "references"
-REFERENCE_JSON = (REFERENCES / "sample_card_spend_index.json").read_bytes()
-GUIDE_MD = (REFERENCES / "sample_card_spend_guide.md").read_bytes()
-POLICY_MD = (REFERENCES / "sample_travel_policy.md").read_bytes()
+REFERENCE_YAML = (REFERENCES / "sample_card_spend_catalog.yaml").read_bytes()
+GUIDE_MD = (REFERENCES / "sample_card_spend_instructions.md").read_bytes()
+POLICY_DOCS = (REFERENCES / "sample_travel_policy_docs.yaml").read_bytes()
 CONTRACT_YAML = b"""
 method: POST
 headers: {Authorization: "Bearer ${PRODUCT_API_TOKEN}"}
@@ -68,7 +67,7 @@ def _run(client: TestClient, *, grounded: bool = True, product: bytes = PRODUCT_
     (grounded)."""
     files: dict[str, Any] = {"product": ("product.yaml", product)}
     if grounded:
-        files["reference"] = ("catalog.json", REFERENCE_JSON)
+        files["reference"] = ("catalog.yaml", REFERENCE_YAML)
         files["reference_guide"] = ("guide.md", GUIDE_MD)
     response = client.post(
         "/api/runs",
@@ -97,26 +96,13 @@ def test_index_page_and_static(client: TestClient) -> None:
     assert client.get("/static/app.js").status_code == 200
 
 
-def test_both_uis_are_served_and_web_ui_picks_the_default(config_path: Path) -> None:
-    client = TestClient(create_app(load_config(config_path, env={})))
-    modern, classic = client.get("/modern").text, client.get("/classic").text
-    assert "/static/modern/app.js" in modern and "/static/app.js" in classic
-    assert client.get("/").text == modern  # default web.ui: modern
-    assert client.get("/api/config").json()["ui"] == "modern"
-    for asset in ("/static/modern/app.js", "/static/modern/app.css", "/static/style.css"):
+def test_ui_assets_served_and_old_ui_routes_gone(client: TestClient) -> None:
+    page = client.get("/").text
+    assert "/static/app.js" in page and "/static/app.css" in page and "classic" not in page
+    for asset in ("/static/app.js", "/static/app.css", "/static/product_contract_template.yaml"):
         assert client.get(asset).status_code == 200, asset
-
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    data["web"] = {"ui": "classic"}
-    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    client = TestClient(create_app(load_config(config_path, env={})))
-    assert client.get("/").text == classic and client.get("/modern").text == modern
-    assert client.get("/api/config").json()["ui"] == "classic"
-
-    data["web"] = {"ui": "fancy"}
-    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(ConfigError):
-        load_config(config_path, env={})
+    for gone in ("/classic", "/modern", "/static/style.css", "/static/modern/app.js"):
+        assert client.get(gone).status_code == 404, gone
 
 
 def test_recent_runs_newest_first_with_kpis(client: TestClient) -> None:
@@ -156,18 +142,24 @@ def test_preview_valid_and_invalid_upload(client: TestClient) -> None:
     assert wrong_kind.status_code == 400
 
 
-def test_preview_any_reference_format_and_guide(client: TestClient) -> None:
-    for name, content, fmt in (
-        ("catalog.json", REFERENCE_JSON, "json"),
-        ("policy.md", POLICY_MD, "markdown"),
-        ("voc_tables.txt", b"complaints: one row per complaint", "text"),
-    ):
-        ok = client.post("/api/preview/reference", files={"file": (name, content)})
-        assert ok.status_code == 200, ok.text
-        parsed = ok.json()["parsed"]
-        assert parsed["format"] == fmt and "text" not in parsed  # summary only
-    pdf = client.post("/api/preview/reference", files={"file": ("r.pdf", b"%PDF")})
-    assert pdf.status_code == 400 and "unsupported file type" in pdf.json()["detail"]
+def test_preview_both_reference_formats_and_instructions(client: TestClient) -> None:
+    catalog = client.post("/api/preview/reference", files={"file": ("c.yaml", REFERENCE_YAML)})
+    assert catalog.status_code == 200, catalog.text
+    parsed = catalog.json()["parsed"]
+    assert parsed["kind"] == "data_catalog"
+    assert (parsed["tables"], parsed["relationships"], parsed["rules"]) == (4, 2, 1)
+    docs = client.post("/api/preview/reference", files={"file": ("d.yaml", POLICY_DOCS)})
+    assert docs.status_code == 200 and docs.json()["parsed"]["documents"] == 4
+    free_text = client.post("/api/preview/reference", files={"file": ("r.md", b"# notes")})
+    assert free_text.status_code == 400 and "YAML or JSON" in free_text.json()["detail"]
+    no_kind = client.post("/api/preview/reference", files={"file": ("r.yaml", b"name: x")})
+    assert no_kind.status_code == 400 and "'kind' must be one of" in no_kind.json()["detail"]
+    for kind in ("data_catalog", "document_collection"):
+        template = client.get(f"/api/reference-template/{kind}")
+        assert template.status_code == 200 and f"kind: {kind}" in template.text
+        again = client.post("/api/preview/reference", files={"file": ("t.yaml", template.content)})
+        assert again.status_code == 200, again.text  # templates are valid references
+    assert client.get("/api/reference-template/pdf").status_code == 422
     guide = client.post("/api/preview/reference_guide", files={"file": ("g.md", GUIDE_MD)})
     assert guide.status_code == 200 and guide.json()["parsed"]["name"] == "g.md"
 
@@ -182,7 +174,7 @@ def test_create_run_with_upload_and_queries(client: TestClient, config_path: Pat
         files={
             "persona": ("my_persona.yaml", PERSONA_YAML),
             "product": ("my_product.yaml", PRODUCT_YAML),
-            "reference": ("ignored.json", REFERENCE_JSON),
+            "reference": ("ignored.yaml", REFERENCE_YAML),
         },
         data={"persona_queries": queries},  # use_reference defaults to off
     )
@@ -216,7 +208,7 @@ def test_create_run_rejects_bad_upload_and_too_many_queries(client: TestClient) 
         files={**product, "reference": ("i.json", b"{oops")},
         data={"use_reference": "true"},
     )
-    assert bad.status_code == 400 and "not valid JSON" in bad.json()["detail"]
+    assert bad.status_code == 400 and "not valid json" in bad.json()["detail"]
     many = client.post(
         "/api/runs",
         files=product,
@@ -239,26 +231,41 @@ def test_create_run_needs_uploaded_product_and_reference_when_switched_on(
     assert no_index.status_code == 400 and "switch it off" in no_index.json()["detail"]
 
 
-def test_text_reference_with_default_guide_is_grounded(
+def test_document_reference_with_default_or_typed_instructions(
     client: TestClient, config_path: Path
 ) -> None:
-    response = client.post(
-        "/api/runs",
-        files={"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.md", POLICY_MD)},
-        data={"use_reference": "true"},
-    )
+    files = {"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.yaml", POLICY_DOCS)}
+    response = client.post("/api/runs", files=files, data={"use_reference": "true"})
     assert response.status_code == 200, response.text
     state = response.json()["state"]
-    assert state["sources"]["reference"] == "uploaded: policy.md"
+    assert state["sources"]["reference"] == "uploaded: policy.yaml"
     assert state["sources"]["reference_guide"] == "default"
     settings = load_config(config_path, env={})
     from synthetic_user.storage.json_store import JsonArtifactStore
 
-    inputs = Workspace(settings, JsonArtifactStore(settings.paths.artifacts_dir)).load_inputs(
-        state["run_id"]
+    workspace = Workspace(settings, JsonArtifactStore(settings.paths.artifacts_dir))
+    inputs = workspace.load_inputs(state["run_id"])
+    assert inputs.reference is not None and inputs.reference.kind == "document_collection"
+    assert inputs.reference.instructions is None
+
+    typed = client.post(
+        "/api/runs",
+        files=files,
+        data={"use_reference": "true", "reference_instructions": "  Amounts are exact.  "},
     )
-    assert inputs.reference is not None and inputs.reference.format == "markdown"
-    assert inputs.reference.guide is None
+    assert typed.status_code == 200, typed.text
+    typed_state = typed.json()["state"]
+    assert typed_state["sources"]["reference_guide"] == "typed in the UI"
+    typed_inputs = workspace.load_inputs(typed_state["run_id"])
+    assert typed_inputs.reference is not None
+    assert typed_inputs.reference.instructions_text() == "Amounts are exact."
+    assert typed_inputs.reference.reference_id != inputs.reference.reference_id
+    both = client.post(
+        "/api/runs",
+        files={**files, "reference_guide": ("g.md", GUIDE_MD)},
+        data={"use_reference": "true", "reference_instructions": "typed"},
+    )
+    assert both.status_code == 400 and "not both" in both.json()["detail"]
 
 
 # --- contract ---------------------------------------------------------------------------------
@@ -287,6 +294,14 @@ def _connect(client: TestClient, run_id: str, contract: bytes, url: str) -> Any:
         files={"contract": ("contract.yaml", contract)},
         data={"url": url},
     )
+
+
+def test_product_template_is_a_valid_product(client: TestClient) -> None:
+    template = client.get("/api/product-template")
+    assert template.status_code == 200 and "typical_user_questions" in template.text
+    preview = client.post("/api/preview/product", files={"file": ("p.yaml", template.content)})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["parsed"]["data_sources"][0]["name"] == "Complaints"
 
 
 def test_contract_template_is_a_valid_contract(client: TestClient) -> None:
@@ -347,6 +362,16 @@ def test_execute_through_connected_product(config_path: Path) -> None:
     assert all(r["artifacts"] == "sql:\nSELECT 1" for r in rows)
     assert TOKEN not in json.dumps(body)
 
+    # run log (D202): the exact request body + reply per question, never header values
+    artifacts_dir = load_config(config_path, env={}).paths.artifacts_dir
+    log = (artifacts_dir / "runs" / run_id / "run.log").read_text(encoding="utf-8")
+    assert TOKEN not in log
+    assert log.count("PRODUCT HTTP") == len(rows)
+    assert "POST https://p.example.com/ask · headers: Accept, Authorization, Content-Type" in log
+    assert ">>> RESPONSE (HTTP 200)" in log and "Travel spend was 1.2M USD." in log
+    for row in rows:
+        assert f'"question": "{row["question"]}"' in log  # the request body as sent
+
 
 # --- pipeline through the API -------------------------------------------------------------------
 
@@ -358,7 +383,7 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     after_scenarios = _steps(client, run_id, "reference", "scenarios")
     assert len(after_scenarios["rows"]) == 3
     assert all(r["scenario_id"] and not r["question_id"] for r in after_scenarios["rows"])
-    assert "employees.full_name" in after_scenarios["rows"][0]["core_refs"]
+    assert "employees (full_name)" in after_scenarios["rows"][0]["cheat_sheet"]
     assert after_scenarios["detail"]["reference_packs"] == 3
     assert [p["pack_id"] for p in after_scenarios["reference_packs"]] == [
         "RP_SCN_001",
@@ -428,7 +453,7 @@ def test_ungrounded_run_has_no_reference_pack(client: TestClient) -> None:
     assert state["sources"]["reference"] == "off"
     body = _steps(client, run_id, "scenarios", "questions")
     assert body["rows"] and all(r["mode"] == "ungrounded" for r in body["rows"])
-    assert all(not r["core_refs"] for r in body["rows"]) and body["reference_packs"] == []
+    assert all(not r["cheat_sheet"] for r in body["rows"]) and body["reference_packs"] == []
     assert all(r["question"] for r in body["rows"])
 
 
@@ -447,22 +472,17 @@ def test_step_order_and_bad_ids(client: TestClient) -> None:
 def test_edit_reference_pack(client: TestClient) -> None:
     run_id = _run(client)
     url = f"/api/runs/{run_id}/reference_packs/RP_SCN_001"
-    draft = {
-        "core_refs": [
-            {"name": "employees.full_name", "quote": "Employee full name.", "why": "ranking"}
-        ],
-        "rules": [],
-    }
+    draft = {"tables": [{"table": "employees", "columns": ["full_name"], "why": "ranking"}]}
     early = client.put(url, json=draft)
     assert early.status_code == 400 and "before editing" in early.json()["detail"]
 
     _steps(client, run_id, "reference", "scenarios", "questions")
-    bad = client.put(
-        url, json={"core_refs": [{"name": "x", "quote": "Not in the reference.", "why": "y"}]}
-    )
-    assert bad.status_code == 400 and "quote not found" in bad.json()["detail"]
-    empty = client.put(url, json={"core_refs": []})
+    bad = client.put(url, json={"tables": [{"table": "ghost", "why": "y"}]})
+    assert bad.status_code == 400 and "unknown table 'ghost'" in bad.json()["detail"]
+    empty = client.put(url, json={"tables": []})
     assert empty.status_code == 422
+    wrong_kind = client.put(url, json={"documents": [{"name": "Hotel policy", "why": "y"}]})
+    assert wrong_kind.status_code == 400 and "does not fit" in wrong_kind.json()["detail"]
 
     ok = client.put(url, json=draft)
     assert ok.status_code == 200, ok.text
@@ -470,6 +490,6 @@ def test_edit_reference_pack(client: TestClient) -> None:
     assert body["pack"]["edited"] is True
     assert body["state"]["steps_done"] == ["reference", "scenarios"]  # questions are stale
     assert all(not r["question_id"] for r in body["rows"])
-    assert body["rows"][0]["core_refs"] == "employees.full_name"
+    assert body["rows"][0]["cheat_sheet"] == "employees (full_name)"
     missing = client.put(f"/api/runs/{run_id}/reference_packs/RP_SCN_009", json=draft)
     assert missing.status_code == 404

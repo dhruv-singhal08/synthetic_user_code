@@ -25,7 +25,7 @@ from synthetic_user.models.execution import (
     ResponseArtifact,
 )
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import ReferencePack
+from synthetic_user.models.reference import ReferencePack, render_join
 from synthetic_user.models.scenario import Scenario
 
 BULLET = "• "
@@ -36,9 +36,9 @@ QUESTION_COLUMNS = [
     "question",
     "expected_behavior",
     "success_criteria",
-    "acceptable_variations",
 ]
-REFERENCE_COLUMNS = ["core_refs", "reference_rules"]
+# The scenario's cheat sheet: tables (with columns) or documents; joins and rules.
+REFERENCE_COLUMNS = ["cheat_sheet", "cheat_sheet_rules"]
 EXECUTION_COLUMNS = [
     "product_outcome",
     "answer_text",
@@ -128,10 +128,16 @@ def _scenario_cells(s: Scenario) -> dict[str, str]:
 def _pack_cells(pack: ReferencePack | None) -> dict[str, str]:
     if pack is None:
         return {}
-    return {
-        "core_refs": bullets([r.name for r in pack.core_refs]),
-        "reference_rules": bullets([r.rule for r in pack.rules]),
-    }
+    items = [
+        f"{t.name} ({', '.join(c.name for c in t.columns)})" if t.columns else t.name
+        for t in pack.tables
+    ] + [d.name for d in pack.documents]
+    rules = [
+        *(f"join {render_join(j, j.verified)}" for j in pack.joins),
+        *(f"{t.name}: {rule}" for t in pack.tables for rule in t.rules),
+        *(f"{r.id}: {r.rule}" for r in pack.rules),
+    ]
+    return {"cheat_sheet": bullets(items), "cheat_sheet_rules": bullets(rules)}
 
 
 def _question_cells(q: QuestionCase) -> dict[str, str]:
@@ -141,7 +147,6 @@ def _question_cells(q: QuestionCase) -> dict[str, str]:
         "question": q.utterance,
         "expected_behavior": e.expected_behavior,
         "success_criteria": bullets(e.success_criteria),
-        "acceptable_variations": bullets(e.acceptable_variations),
     }
 
 

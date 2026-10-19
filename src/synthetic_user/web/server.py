@@ -26,7 +26,7 @@ from synthetic_user.adapters.http_json import (
 )
 from synthetic_user.adapters.mock_llm import MockLLMAdapter
 from synthetic_user.adapters.registry import create_adapter
-from synthetic_user.core.config import AppConfig, WebUi
+from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import (
     ArtifactNotFoundError,
     ConfigError,
@@ -36,7 +36,12 @@ from synthetic_user.core.identifiers import RUN_ID_PATTERN
 from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
-from synthetic_user.models.reference import ReferencePackDraft
+from synthetic_user.llm.tracing import TracingLLMClient
+from synthetic_user.models.reference import (
+    DEFAULT_INSTRUCTIONS,
+    ReferenceKind,
+    ReferencePackDraft,
+)
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.web.workspace import (
@@ -50,11 +55,6 @@ from synthetic_user.web.workspace import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
-# Two UIs over the same API (D199): web.ui picks which one "/" serves.
-UI_PAGES = {
-    WebUi.MODERN: STATIC_DIR / "modern" / "index.html",
-    WebUi.CLASSIC: STATIC_DIR / "index.html",
-}
 CONTRACT_TEMPLATE = STATIC_DIR / "product_contract_template.yaml"
 # UI steps run in order (D115); scenarios runs the reference check itself.
 _PREREQUISITE = {
@@ -100,15 +100,7 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
-        return FileResponse(UI_PAGES[settings.web.ui])
-
-    @app.get("/modern", include_in_schema=False)
-    async def modern_ui() -> FileResponse:
-        return FileResponse(UI_PAGES[WebUi.MODERN])
-
-    @app.get("/classic", include_in_schema=False)
-    async def classic_ui() -> FileResponse:
-        return FileResponse(UI_PAGES[WebUi.CLASSIC])
+        return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/api/config")
     async def config() -> dict[str, Any]:
@@ -120,7 +112,8 @@ def create_app(
             "scenario_count": settings.generation.scenario.scenario_count,
             "question_count": settings.generation.question.question_count,
             "steps": [s.value for s in Step],
-            "ui": settings.web.ui.value,
+            # Used when no usage instructions are given (shown as the UI's placeholder).
+            "default_instructions": {k.value: text for k, text in DEFAULT_INSTRUCTIONS.items()},
         }
 
     @app.get("/api/samples")
@@ -137,7 +130,7 @@ def create_app(
     async def preview(kind: str, file: Annotated[UploadFile, File()]) -> dict[str, Any]:
         upload = Upload(file.filename or kind, await file.read())
         model = parse_upload(kind, upload, max_chars=settings.reference.max_chars)
-        parsed = model.model_dump(mode="json", exclude={"text"} if kind == REFERENCE else None)
+        parsed = model.model_dump(mode="json")
         return {"raw": upload.content.decode("utf-8-sig"), "parsed": parsed}
 
     @app.get("/api/contract-template", response_class=PlainTextResponse)
@@ -150,12 +143,30 @@ def create_app(
 
     # --- runs ----------------------------------------------------------------------------
 
+    @app.get("/api/product-template", response_class=PlainTextResponse)
+    async def product_template() -> PlainTextResponse:
+        return PlainTextResponse(
+            (STATIC_DIR / "product_template.yaml").read_text(encoding="utf-8"),
+            media_type="application/x-yaml",
+            headers={"Content-Disposition": 'attachment; filename="product_description.yaml"'},
+        )
+
+    @app.get("/api/reference-template/{kind}", response_class=PlainTextResponse)
+    async def reference_template(kind: ReferenceKind) -> PlainTextResponse:
+        path = STATIC_DIR / f"reference_template_{kind.value}.yaml"
+        return PlainTextResponse(
+            path.read_text(encoding="utf-8"),
+            media_type="application/x-yaml",
+            headers={"Content-Disposition": f'attachment; filename="{kind.value}.yaml"'},
+        )
+
     @app.post("/api/runs")
     async def create_run(
         persona: Annotated[UploadFile | None, File()] = None,
         product: Annotated[UploadFile | None, File()] = None,
         reference: Annotated[UploadFile | None, File()] = None,
         reference_guide: Annotated[UploadFile | None, File()] = None,
+        reference_instructions: Annotated[str, Form(max_length=50_000)] = "",
         persona_queries: Annotated[str, Form()] = "",
         use_reference: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
@@ -167,7 +178,12 @@ def create_app(
             (GUIDE, reference_guide),
         ):
             uploads[kind] = Upload(file.filename or kind, await file.read()) if file else None
-        state = workspace.create_run(uploads, persona_queries, use_reference=use_reference)
+        state = workspace.create_run(
+            uploads,
+            persona_queries,
+            use_reference=use_reference,
+            reference_instructions=reference_instructions,
+        )
         return {"state": state.model_dump(mode="json"), **workspace.results(state.run_id)}
 
     @app.get("/api/runs")
@@ -219,7 +235,7 @@ def create_app(
             raise ConfigError(f"Run the '{needed.value}' step before '{step.value}'")
         inputs = workspace.load_inputs(run_id)
         count = body.count if body else None
-        llm = create_llm_client(settings)
+        llm = TracingLLMClient.wrap(create_llm_client(settings))  # mock product calls traced too
         product = (
             _product_adapter(
                 settings,
@@ -248,7 +264,7 @@ def create_app(
             detail = {
                 "mode": reference_step.mode.value,
                 "reference_id": inputs.reference_id,
-                "reference_chars": len(reference.text) if reference else 0,
+                "reference_chars": len(reference.render()) if reference else 0,
                 "warnings": reference_step.warnings,
             }
         if step is Step.SCENARIOS:

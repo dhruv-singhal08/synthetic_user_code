@@ -15,8 +15,8 @@ from synthetic_user.models.reference import Reference
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
-SAMPLE_REFERENCE = REPO_ROOT / "data" / "references" / "sample_card_spend_index.json"
-POLICY = REPO_ROOT / "data" / "references" / "sample_travel_policy.md"
+SAMPLE_REFERENCE = REPO_ROOT / "data" / "references" / "sample_card_spend_catalog.yaml"
+POLICY = REPO_ROOT / "data" / "references" / "sample_travel_policy_docs.yaml"
 CHATBOT = REPO_ROOT / "data" / "products" / "sample_chatbot.yaml"
 
 
@@ -84,9 +84,7 @@ def test_writes_scenarios_rejected_and_manifest(
     scenario_drafts: list[dict[str, Any]],
 ) -> None:
     bad = json.loads(json.dumps(scenario_drafts[1]))
-    bad["reference_pack"] = {
-        "core_refs": [{"name": "budgets", "quote": "Monthly budget per team.", "why": "x"}]
-    }
+    bad["reference_pack"] = {"tables": [{"table": "budgets", "why": "x"}]}
     _script(
         monkeypatch, {"scenarios": [scenario_drafts[0], bad, scenario_drafts[2]]}, {"scenarios": []}
     )
@@ -109,7 +107,7 @@ def test_writes_scenarios_rejected_and_manifest(
     assert [s["id"] for s in scenarios] == ["SCN_001", "SCN_002"]
     rejected = json.loads((run_dir / "scenarios_rejected.json").read_text(encoding="utf-8"))
     assert rejected[0]["reasons"][0] == (
-        "reference pack has no core_ref whose quote is in the reference"
+        "reference pack names no table / document that is in the reference"
     )
     packs = json.loads((run_dir / "reference_packs.json").read_text(encoding="utf-8"))
     assert [p["pack_id"] for p in packs] == ["RP_SCN_001", "RP_SCN_002"]
@@ -154,7 +152,7 @@ def test_explicit_inputs_reference_and_new_run_id(
     fields = _fields(result.output)
     assert fields["run_id"].startswith("RUN_") and fields["mode"] == "grounded"
     assert (tmp_path / "artifacts" / "runs" / fields["run_id"] / "scenarios.json").is_file()
-    assert "guide: default" in result.output  # no --reference-guide, none in the config
+    assert "instructions: default" in result.output  # none given, none in the config
 
 
 def test_no_index_is_ungrounded_with_chatbot_product(
@@ -216,14 +214,15 @@ def test_check_reference_prints_id_and_size(config_path: Path) -> None:
             "--reference",
             str(POLICY),
             "--reference-guide",
-            str(POLICY.with_name("sample_travel_policy_guide.md")),
+            str(POLICY.with_name("sample_travel_policy_instructions.md")),
         ],
     )
     assert result.exit_code == 0, result.output
     fields = _fields(result.output)
-    assert fields["format"] == "markdown" and fields["max_chars"] == "200000"
-    assert fields["reference_id"].startswith("sample_travel_policy-")
-    assert fields["guide"] == "sample_travel_policy_guide.md"
+    assert fields["kind"] == "document_collection" and fields["documents"] == "4"
+    assert fields["max_chars"] == "200000"
+    assert fields["reference_id"].startswith("sample_travel_policy_docs-")
+    assert fields["instructions"] == "sample_travel_policy_instructions.md"
 
 
 def test_bad_run_id(config_path: Path) -> None:
@@ -232,3 +231,31 @@ def test_bad_run_id(config_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "--run-id must look like" in result.output
+
+
+def test_convert_reference_writes_a_valid_catalog(config_path: Path, tmp_path: Path) -> None:
+    out = tmp_path / "catalog.yaml"
+    source = REPO_ROOT / "tests" / "fixtures" / "references" / "refidx_sample.json"
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(config_path),
+            "convert-reference",
+            "--input",
+            str(source),
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "tables=4 relationships=2 rules=1" in result.output
+    check = CliRunner().invoke(
+        app, ["--config", str(config_path), "check-reference", "--reference", str(out)]
+    )
+    assert check.exit_code == 0 and "kind=data_catalog" in check.output
+    bad = CliRunner().invoke(
+        app,
+        ["--config", str(config_path), "convert-reference", "--input", str(out), "--out", str(out)],
+    )
+    assert bad.exit_code == 1 and "Cannot read reference index" in bad.output

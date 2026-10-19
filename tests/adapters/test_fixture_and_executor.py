@@ -44,7 +44,11 @@ def _questions(scenario: Scenario, *texts: str) -> list[QuestionCase]:
                 "utterance": text,
                 "intended_goal": scenario.business_goal,
                 "intent": {"task_type": "ranking"},
-                "question_characteristics": {"ambiguity_level": "low"},
+                "question_characteristics": {
+                    "style": "precise",
+                    "ambiguity_level": "low",
+                    "complexity": "simple",
+                },
                 "expectations": {
                     "expected_behavior": "answers the question",
                     "success_criteria": ["answers the question"],

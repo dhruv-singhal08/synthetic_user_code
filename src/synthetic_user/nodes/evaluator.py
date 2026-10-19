@@ -28,6 +28,7 @@ from typing import Any
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import ArtifactIntegrityError
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
+from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.models.evaluation import (
     BugCandidate,
@@ -120,9 +121,10 @@ class Evaluator:
             else None
         )
         async with semaphore:
-            return await self._generic.judge(
-                product, case.scenario, case.question, response, grounding
-            )
+            with trace_subject(case.question.question_id):
+                return await self._generic.judge(
+                    product, case.scenario, case.question, response, grounding
+                )
 
     # --- phase 2: assembly (sequential, assigns ids) --------------------------------------
 
@@ -160,7 +162,7 @@ class Evaluator:
                         "matches_known_gap": f.matches_known_gap
                         or matches_known_gap(
                             f"{f.category} {f.description} {f.observed_behavior}",
-                            product.known_gaps,
+                            product.known_limitations,
                         ),
                     },
                 )

@@ -31,11 +31,14 @@ def _question(scenario: Scenario) -> QuestionCase:
             "utterance": "Top spenders?",
             "intended_goal": scenario.business_goal,
             "intent": {"task_type": "ranking"},
-            "question_characteristics": {"ambiguity_level": "low"},
+            "question_characteristics": {
+                "style": "precise",
+                "ambiguity_level": "low",
+                "complexity": "simple",
+            },
             "expectations": {
                 "expected_behavior": "Rank the top spenders.",
                 "success_criteria": ["names the top spenders"],
-                "acceptable_variations": ["a", "b"],
             },
         }
     )
@@ -70,19 +73,23 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
         "12",
     )
     assert rows[0]["expected_behavior"] == "Rank the top spenders."
-    assert rows[0]["acceptable_variations"] == "• a\n• b"  # several items -> bullets
     assert rows[0]["success_criteria"] == "names the top spenders"  # one item -> as is
-    assert rows[0]["core_refs"] == (
-        "• card_transactions.amount\n• card_transactions.currency_code\n• employees.full_name"
+    assert rows[0]["cheat_sheet"] == (  # several items -> bullets
+        "• card_transactions (amount, currency_code)\n• employees (full_name)"
     )
-    assert rows[0]["reference_rules"] == "never sum amounts across currencies"
+    assert rows[0]["cheat_sheet_rules"].split("\n") == [
+        "• join card_transactions.employee_id -> employees.employee_id (verified)",
+        "• card_transactions: Amounts are in the transaction currency; amounts in different "
+        "currencies must not be summed directly.",
+        "• R1: Amounts in different currency_code values must not be summed directly.",
+    ]
     assert rows[0]["answer_text"] == "Here are the top spenders."
     assert rows[1]["question_id"] == "" and rows[1]["scenario_id"] == "SCN_002"
     assert rows[0]["final_verdict"] == ""
 
 
 def test_columns_are_the_evaluation_view() -> None:
-    assert len(COLUMNS) == 27
+    assert len(COLUMNS) == 26
     assert COLUMNS[-10:-5] == [
         "relevancy",
         "correctness",

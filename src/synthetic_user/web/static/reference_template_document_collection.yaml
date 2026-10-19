@@ -1,0 +1,14 @@
+# Reference format 2: document collection (documents with their summaries).
+# The product answers from the documents' content; answers are checked against the summaries.
+kind: document_collection
+name: My knowledge base                        # what this collection covers
+description: Documents the product answers from   # (optional)
+
+documents:
+  - name: Hotel policy                         # unique name
+    summary: >                                 # free text: what the document says (key facts, limits, rules...)
+      Employees may book standard rooms only. The nightly hotel limit is USD 250 in Tier 1
+      cities and USD 180 everywhere else, taxes included.
+  - name: Meals and per diem
+    summary: >
+      The daily meal per diem is USD 75 in Tier 1 cities and USD 55 everywhere else.

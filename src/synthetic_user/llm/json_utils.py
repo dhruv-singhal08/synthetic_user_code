@@ -19,15 +19,18 @@ def extract_json_object(text: str) -> dict[str, Any]:
     cleaned = _FENCE.sub("", text).strip()
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start == -1 or end < start:
-        raise _invalid("no JSON object found in LLM output")
+        raise _invalid("no JSON object found in LLM output", text)
     try:
         data = json.loads(cleaned[start : end + 1])
     except json.JSONDecodeError as exc:
-        raise _invalid(f"invalid JSON: {exc.msg} at line {exc.lineno} column {exc.colno}") from exc
+        error = f"invalid JSON: {exc.msg} at line {exc.lineno} column {exc.colno}"
+        raise _invalid(error, text) from exc
     if not isinstance(data, dict):
-        raise _invalid(f"expected a JSON object, got {type(data).__name__}")
+        raise _invalid(f"expected a JSON object, got {type(data).__name__}", text)
     return data
 
 
-def _invalid(error: str) -> LLMOutputValidationError:
-    return LLMOutputValidationError("LLM output is not a JSON object", attempts=1, errors=[error])
+def _invalid(error: str, text: str) -> LLMOutputValidationError:
+    return LLMOutputValidationError(
+        "LLM output is not a JSON object", attempts=1, errors=[error], raw_output=text
+    )

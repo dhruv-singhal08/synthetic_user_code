@@ -1,0 +1,82 @@
+product_id: voice_of_customer_agent
+product_version: "1.0"
+name: Voice of Customer Agent
+description: >
+  Voice of Customer (VoC) Agent helps product teams understand
+  customer feedback, complaints, and satisfaction signals through
+  a conversational experience. The agent consolidates available
+  Voice of Customer data and enables users to identify customer
+  pain points, investigate trends, understand recurring themes,
+  and explore supporting evidence using natural language.
+business_problem: >
+  Product teams frequently need to understand what customers are
+  experiencing, which issues are creating friction, and where
+  product improvements should be considered. Customer signals are
+  often distributed across complaints and satisfaction datasets,
+  requiring significant manual effort to analyse, connect, and
+  interpret. VoC Agent simplifies this process by providing a
+  single interface for customer insight discovery.
+data_sources:
+  - name: Complaints
+    description: >
+      Customer complaint data used to understand customer issues,
+      recurring concerns, complaint volumes, complaint trends,
+      and supporting customer narratives.
+  - name: CSATResult
+    description: >
+      Customer satisfaction survey data used to understand
+      satisfaction trends, customer sentiment, and feedback
+      associated with customer experience outcomes.
+supported:
+  - Discover top customer pain points and recurring issues
+  - Analyse complaint volumes, patterns, and trends across supported time periods
+  - Analyse customer satisfaction trends and changes over time
+  - Identify recurring themes appearing in customer feedback
+  - Compare customer signals across available periods, products, or supported dimensions
+  - Surface supporting evidence from complaints and satisfaction feedback
+  - Summarise customer concerns, themes, and findings for business stakeholders
+  - Investigate potential drivers associated with customer dissatisfaction or complaint growth
+  - Combine insights from Complaints and CSATResult to provide a broader view of customer experience
+  - Support product discovery, prioritisation discussions, and customer-focused decision making
+not_supported:
+  - Forecasting future customer behaviour or future complaint trends
+  - Product usage analytics or feature adoption analysis
+  - Revenue, spend, transaction, or financial performance analysis
+  - Competitive intelligence or market research
+  - Customer journey reconstruction across multiple channels
+  - Operational diagnostics or servicing performance analysis
+  - Automated product prioritisation decisions
+  - Root-cause confirmation without supporting evidence
+  - Workflow execution, remediation, or operational actions
+known_limitations:
+  - Insights are limited to Complaints and CSATResult data currently available to the agent
+  - Customer feedback may not represent the full customer population
+  - Correlation between customer signals should not be interpreted as confirmed causation
+  - The agent can identify patterns and themes but cannot independently validate operational, technical, or process root causes
+  - Findings depend on available data quality, coverage, and historical availability
+user_visible_capabilities:
+  - Ask questions using natural language
+  - Receive business-friendly summaries and explanations
+  - Explore customer concerns through follow-up questions
+  - Request comparisons across periods and supported dimensions
+  - Review supporting customer evidence and feedback themes
+  - Receive recommendations for areas that may warrant further investigation
+  - Drill deeper into specific complaints, trends, or satisfaction signals
+typical_user_questions:
+  - What are the biggest customer pain points this quarter?
+  - Which complaint categories are increasing most rapidly?
+  - Why has customer satisfaction declined recently?
+  - What themes appear most frequently in customer complaints?
+  - What concerns are appearing in both complaints and CSAT feedback?
+  - Are there any emerging customer issues we should investigate?
+  - What customer feedback should influence our next product priorities?
+  - Summarise the most important customer experience trends.
+expected_outputs:
+  - Executive summaries
+  - Customer insights
+  - Trend analyses
+  - Theme summaries
+  - Supporting evidence
+  - Comparative analyses
+  - Business explanations
+  - Recommendations for further investigation

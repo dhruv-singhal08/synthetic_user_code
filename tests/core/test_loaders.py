@@ -22,7 +22,7 @@ def test_persona_yaml_loads() -> None:
 def test_product_yaml_loads() -> None:
     product = load_product(DATA / "products" / "sample_product.yaml")
     assert product.product_id == "sample_nl2sql"
-    assert not set(product.supported) & set(product.not_supported_yet)
+    assert not set(product.supported) & set(product.not_supported)
 
 
 def test_repo_config_input_paths_resolve_to_loadable_assets(
@@ -62,7 +62,7 @@ def test_non_mapping_asset(tmp_path: Path) -> None:
 def test_validation_error_details_name_the_field(tmp_path: Path) -> None:
     path = tmp_path / "product.yaml"
     path.write_text(
-        "product_id: p\nproduct_version: '1'\nname: n\ndescription: d\nproduct_type: chatbot\n"
+        "product_id: p\nproduct_version: '1'\nname: n\ndescription: d\n"
         "supported: [a]\ncolour: blue\n",
         encoding="utf-8",
     )

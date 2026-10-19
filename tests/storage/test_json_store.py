@@ -13,7 +13,7 @@ from synthetic_user.models.execution import (
     ExecutionRecord,
     TimeoutResponse,
 )
-from synthetic_user.models.reference import CoreRef, ReferencePack
+from synthetic_user.models.reference import PackTable, ReferenceKind, ReferencePack
 from synthetic_user.storage import json_store
 from synthetic_user.storage.json_store import JsonArtifactStore
 
@@ -24,7 +24,8 @@ def _index(index_id: str = "IDX_001") -> ReferencePack:
         pack_id="RP_SCN_001",
         scenario_id="SCN_001",
         reference_id=index_id,
-        core_refs=[CoreRef(name="amount", quote="Transaction amount", why="spend")],
+        kind=ReferenceKind.DATA_CATALOG,
+        tables=[PackTable(name="card_transactions", why="spend")],
     )
 
 

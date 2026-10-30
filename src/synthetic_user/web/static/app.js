@@ -1,35 +1,39 @@
 "use strict";
-// Synthetic User web UI (D199, D201): workflow pages + test report over the JSON API.
+// Synthetic User web UI (D199, D201, D207): workflow pages + test report over the JSON API.
 // All data is inserted with textContent / DOM nodes (never innerHTML): inputs are untrusted.
 
 const STEPS = ["scenarios", "questions", "execute", "evaluate"];
-const VIEWS = ["setup", "connect", "run", "report"];
-// Reported metrics (D206): groundedness is computed but not shown for now.
-const METRICS = ["relevancy", "correctness", "hallucination_rate", "completeness"];
-const METRIC_LABELS = {
-  relevancy: "Answer relevancy", correctness: "Correctness", groundedness: "Groundedness",
-  hallucination_rate: "Hallucination rate", completeness: "Completeness",
+const VIEWS = ["setup", "evaluation", "connect", "run", "report"];
+const NL2SQL_METRICS = ["semantic_correctness", "rules_adherence", "schema_faithfulness"];
+const AGENT_METRICS = ["relevance", "completion", "tool_selection", "faithfulness", "context_precision", "context_recall"];
+const REQUIRED_AGENT_METRICS = ["relevance", "completion"];
+const METRIC_ORDER = [...NL2SQL_METRICS, ...AGENT_METRICS];
+const METRIC_INFO = {
+  semantic_correctness: { label: "Semantic Correctness", short: "Semantic", inputs: "Question, clarified request, expected behaviour, and behavioural success criteria", help: "Does the SQL produce the requested result and meet the behavioural criteria?" },
+  rules_adherence: { label: "Rules Adherence", short: "Rules", inputs: "Applicable table/business rules, selected rules, and documented joins", help: "Does the SQL follow applicable business/table rules and documented joins?" },
+  schema_faithfulness: { label: "Schema Faithfulness", short: "Schema", inputs: "Explicit table and column names vs the allowed reference schema only", help: "Does the SQL use only allowed table and column names?" },
+  relevance: { label: "Relevance", short: "Relevant", inputs: "Question and expected behaviour vs final answer", help: "Does the final answer directly address the user's request or appropriately explain why it cannot?" },
+  completion: { label: "Completion", short: "Complete", inputs: "Expected behaviour, success criteria and prohibited behaviour vs response/actions", help: "Does the response complete every requested output and action?" },
+  tool_selection: { label: "Tool Selection", short: "Tools", inputs: "Expected tools and data sources vs exposed tool calls", help: "Were the right tools, operations, sources, arguments, filters, and boundaries selected?" },
+  faithfulness: { label: "Faithfulness", short: "Faithful", inputs: "Final claims vs expected and exposed context/tool results", help: "Are material answer claims supported by exposed retrieved context or tool results?" },
+  context_precision: { label: "Context Precision", short: "Precision", inputs: "Exposed context vs question, expected sources and expected evidence", help: "Is the exposed retrieved context focused and relevant to the request?" },
+  context_recall: { label: "Context Recall", short: "Recall", inputs: "Exposed context vs expected sources, evidence and success criteria", help: "Does the exposed retrieved context cover the necessary expected information?" },
 };
-const METRIC_SHORT = {
-  relevancy: "Relevancy", correctness: "Correctness", groundedness: "Groundedness",
-  hallucination_rate: "Hallucination", completeness: "Completeness",
-};
-const METRIC_HELP = {
-  relevancy: "Does the answer address the question that was asked?",
-  correctness: "Are the key facts right according to the reference data?",
-  groundedness: "Share of the answer's statements backed by the reference data.",
-  hallucination_rate: "Share of statements that contradict the reference or are invented.",
-  completeness: "Share of the question's success criteria the answer meets.",
-};
-const NEEDS_REFERENCE = new Set(["correctness"]);
+const PROFILE_OPTIONS = [
+  { id: "auto", label: "Auto-select" },
+  { id: "nl2sql", label: "NL2SQL", desc: "Manually use the SQL evaluation parameters for this run." },
+  { id: "agent", label: "Agent", desc: "Judge response quality and, when exposed, tools, grounding, and retrieved context." },
+];
 const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
 const OUTCOME_LABELS = { answered: "answered", clarification: "asked to clarify", denied: "declined", error: "error", timeout: "timed out" };
-const SOURCE_LABELS = { persona: "Persona", product: "Product description", reference: "Reference", reference_guide: "Usage instructions" };
+const SOURCE_LABELS = { persona: "Persona", product: "Product description", golden_set: "Golden set", reference: "Reference data", reference_guide: "Usage instructions" };
+const SQL_PATTERN = /\bsql\b|structured query language/i;
 
 const state = {
-  config: null, samplePersona: null, personaSource: "sample", useReference: false, instructionsSource: "none", uploads: {},
-  runId: null, run: null, rows: [], scenarios: [], packs: [], evaluations: [], kpis: null,
-  filter: "all", search: "", allColumns: false, breakdownBy: "by_task_type", busy: false,
+  config: null, samples: {}, personaSource: "sample", useReference: false, instructionsSource: "none", uploads: {},
+  questionComplexity: "", profileSelection: "auto", agentMetrics: new Set(REQUIRED_AGENT_METRICS),
+  runId: null, run: null, rows: [], scenarios: [], packs: [], evaluations: [], executions: [], kpis: null, issues: null,
+  filter: "all", filterIds: null, filterLabel: "", search: "", allColumns: false, breakdownBy: "by_task_type", busy: false,
   contractSource: "upload", contractFile: null, recent: [],
 };
 
@@ -62,7 +66,9 @@ const pct = (v) => (v == null ? "—" : `${Math.round(v * 100)}%`);
 const ms = (v) => (v == null ? "—" : v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`);
 const when = (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); } catch (err) { return iso; } };
 const fileName = (source) => (source || "").replace(/^uploaded: /, "");
-const list = (items) => (items && items.length ? el("ul", {}, items.map((i) => el("li", { text: i }))) : el("span", { class: "muted", text: "—" }));
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const metricLabel = (m) => (METRIC_INFO[m] ? METRIC_INFO[m].label : human(m));
+const list = (items) => (items && items.length ? el("ul", {}, items.map((i) => el("li", {}, i))) : el("span", { class: "muted", text: "—" }));
 // CSV cells list several items as "• item" lines (items may span lines, e.g. SQL).
 const split = (value) => {
   const text = (value || "").trim();
@@ -106,7 +112,7 @@ async function withBusy(label, fn) {
   $("#busy-line").classList.add("on");
   updateUi();
   try { await fn(); } catch (err) { log(`${label} failed: ${err.message}`, true); toast(`${label} failed: ${err.message}`, "error"); }
-  finally { state.busy = false; $("#busy-line").classList.remove("on"); updateUi(); }
+  finally { state.busy = false; $("#busy-line").classList.remove("on"); renderProfile(); updateUi(); }
 }
 
 // --- views ------------------------------------------------------------------------------------
@@ -122,7 +128,7 @@ function showView(name, { scroll = true } = {}) {
 }
 
 // --- inputs -----------------------------------------------------------------------------------
-function previewOf(kind, d, raw) {
+function previewOf(kind, d) {
   if (kind === "persona") {
     const expertise = Object.entries(d.expertise || {}).filter(([k]) => k !== "notes").map(([k, v]) => `${human(k)}: ${v}`);
     const prefs = d.question_preferences || {};
@@ -138,41 +144,78 @@ function previewOf(kind, d, raw) {
   }
   if (kind === "reference") {
     const counts = d.kind === "data_catalog"
-      ? `${d.tables} table(s), ${d.relationships} relationship(s), ${d.rules} rule(s)`
-      : `${d.documents} document(s)`;
-    return kvList([["Format", human(d.kind)], ["Name", d.name], ["Contents", counts], ["Reference id", d.reference_id], ["Size", `${d.chars.toLocaleString()} characters`]]);
+      ? `${plural(d.tables, "table")}, ${plural(d.relationships, "relationship")}, ${plural(d.rules, "rule")}`
+      : plural(d.documents, "document");
+    const agent = d.agent_tools == null ? "none · NL2SQL only"
+      : `${plural(d.agent_tools, "tool")}, ${plural(d.agent_data_sources, "data source")}, ${plural(d.agent_workflow_stages, "workflow stage")}`;
+    return kvList([["Format", human(d.kind)], ["Name", d.name], ["Contents", counts], ["Agent context", agent], ["Reference id", d.reference_id], ["Size", `${d.chars.toLocaleString()} characters`]]);
+  }
+  if (kind === "golden_set") {
+    const ids = d.case_ids.length > 8 ? `${d.case_ids.slice(0, 8).join(", ")} … (+${d.case_ids.length - 8})` : d.case_ids.join(", ");
+    return kvList([["Source", d.source_name], ["Cases", String(d.cases)], ["Case ids", ids], ["Fields used", d.fields_used.map(human)],
+      ["Uploaded criteria", d.uploaded_criteria_fields], ["Expected tools", `${d.cases_with_expected_tools} of ${d.cases} case(s)`],
+      ["Expected sources", `${d.cases_with_expected_data_sources} of ${d.cases} case(s)`]]);
   }
   return kvList([["Instructions", d.name], ["Size", `${d.chars.toLocaleString()} characters`]]);
 }
 
 function panel(kind) { return $(`.input[data-kind="${kind}"]`); }
+function sample(kind) { return state.samples[kind] || null; }
+
 function currentInput(kind) {
-  if (kind === "persona" && state.personaSource === "sample") return state.samplePersona ? { preview: state.samplePersona, label: "Sample persona" } : null;
+  if (kind === "persona") {
+    if (state.personaSource === "sample") return sample("persona") ? { preview: sample("persona"), label: "Default persona", isDefault: true } : null;
+  }
   if ((kind === "reference" || kind === "reference_guide") && !state.useReference) return null;
   if (kind === "reference_guide" && state.instructionsSource !== "upload") return null;
   const upload = state.uploads[kind];
-  return upload ? { preview: upload.preview, label: upload.file.name } : null;
+  if (upload) return { preview: upload.preview, label: upload.file.name, isDefault: false };
+  if ((kind === "product" || kind === "reference") && sample(kind)) {
+    return { preview: sample(kind), label: kind === "product" ? "Default product description" : "Default reference", isDefault: true };
+  }
+  return null;
 }
 
 function renderInput(kind) {
   const root = panel(kind);
   const input = currentInput(kind);
-  const box = $(".preview", root);
+  const box = $(`[data-preview-for="${kind}"]`) || $(".preview", root);
   const source = $(".source", root);
-  box.replaceChildren();
   source.className = input ? "source ok" : "source";
   source.replaceChildren(...(input ? [icon("check"), input.label] : []));
-  if (input) {
-    const rawLabel = kind === "persona" || kind === "product" ? "View YAML" : "View file";
-    box.append(previewOf(kind, input.preview.parsed, input.preview.raw), el("details", { class: "raw" }, el("summary", { text: rawLabel }), el("pre", { text: input.preview.raw })));
+  if (kind === "golden_set") {
+    if (input) box.replaceChildren(previewOf(kind, input.preview.parsed));
+    else box.replaceChildren(el("p", { class: "help golden-help", text: GOLDEN_HELP }));
+  } else if (input) {
+    const children = [previewOf(kind, input.preview.parsed)];
+    if (input.preview.raw) children.push(el("details", { class: "raw" }, el("summary", { text: kind === "persona" || kind === "product" ? "View YAML" : "View file" }), el("pre", { text: input.preview.raw })));
+    box.replaceChildren(...children);
+  } else if (box.dataset.empty) {
+    box.replaceChildren(el("div", { class: "preview-empty", text: box.dataset.empty }));
+  } else {
+    box.replaceChildren();
   }
+  const num = $(`[data-num-for="${kind}"]`);
+  if (num) num.classList.toggle("ok", Boolean(input));
   if (kind === "product") {
     const status = $("[data-status-for=product]");
     status.className = `pill ${input ? "pill-ok" : "pill-req"}`;
-    status.textContent = input ? "Ready" : "Required";
+    status.textContent = input ? (input.isDefault ? "Default" : "Uploaded") : "Required";
+    $("#product-clear").classList.toggle("hidden", !(state.uploads.product && sample("product")));
+    renderComplexityOptions();
   }
+  if (kind === "reference") $("#reference-clear").classList.toggle("hidden", !(state.uploads.reference && sample("reference")));
+  if (kind === "golden_set") {
+    const status = $("[data-status-for=golden_set]");
+    status.className = `pill ${input ? "pill-ok" : "pill-neutral"}`;
+    status.textContent = input ? `${input.preview.parsed.cases} case(s)` : "Optional";
+    $("#golden-clear").classList.toggle("hidden", !state.uploads.golden_set);
+  }
+  if (kind === "persona") renderComplexityOptions();
+  renderProfile();
   updateReadiness();
 }
+const GOLDEN_HELP = "When uploaded, the golden set teaches realistic intent, expected-behaviour and success-criteria patterns for both NL2SQL and Agent runs. It is combined with Persona, Product and authoritative Reference data to generate new scenarios and questions; it never replaces Reference data and its questions are not replayed. Without a golden set, the pipeline generates normally from Persona, Product and Reference.";
 
 async function onFile(kind, file) {
   if (!file) return;
@@ -185,8 +228,15 @@ async function onFile(kind, file) {
     state.uploads[kind] = { file, preview };
   } catch (err) {
     delete state.uploads[kind];
-    $(".preview", root).before(el("div", { class: "callout callout-error" }, icon("warn"), el("div", { text: `${file.name} was not accepted: ${err.message}` })));
+    root.append(el("div", { class: "callout callout-error" }, icon("warn"), el("div", { text: `${file.name} was not accepted: ${err.message}` })));
   }
+  renderInput(kind);
+  if (kind === "reference") updateInstructionsPlaceholder();
+}
+
+function clearUpload(kind) {
+  delete state.uploads[kind];
+  $$(".callout-error", panel(kind)).forEach((n) => n.remove());
   renderInput(kind);
   if (kind === "reference") updateInstructionsPlaceholder();
 }
@@ -228,48 +278,172 @@ function setInstructionsSource(source) {
 
 function updateInstructionsPlaceholder() {
   const defaults = (state.config && state.config.default_instructions) || {};
-  const ref = state.uploads.reference;
+  const ref = currentInput("reference");
   const kind = ref ? ref.preview.parsed.kind : "data_catalog";
   $("#instructions-text").placeholder = defaults[kind] || "";
 }
 
+function renderComplexityOptions() {
+  const select = $("#question-complexity");
+  const persona = currentInput("persona");
+  const prefs = persona ? persona.preview.parsed.question_preferences || {} : {};
+  const options = (state.config && state.config.question_complexities) || ["simple", "medium", "complex", "mixed"];
+  select.replaceChildren(el("option", { value: "", text: `Persona preference (${prefs.complexity || "mixed"})` }),
+    ...options.map((c) => el("option", { value: c, text: c.charAt(0).toUpperCase() + c.slice(1) })));
+  select.value = state.questionComplexity;
+}
+
+// --- evaluation profile -----------------------------------------------------------------------
+function autoProfile() {
+  const product = currentInput("product");
+  if (!product) return { profile: null, reason: "Chosen from the product description when the run starts." };
+  const d = product.preview.parsed;
+  if (SQL_PATTERN.test((d.expected_outputs || []).join(" "))) return { profile: "nl2sql", reason: "NL2SQL is auto-selected because the product's expected outputs explicitly require SQL." };
+  if (SQL_PATTERN.test([d.description, ...(d.supported || []), ...(d.user_visible_capabilities || [])].join(" "))) return { profile: "nl2sql", reason: "NL2SQL is auto-selected because the product description and capabilities mention SQL." };
+  return { profile: "agent", reason: "Agent is auto-selected because the product does not explicitly require SQL output." };
+}
+function selectedProfile() { return state.profileSelection === "auto" ? autoProfile().profile : state.profileSelection; }
+function profileEnabled(id) {
+  if (id === "auto") return true;
+  const profiles = (state.config && state.config.evaluation_profiles) || [];
+  const entry = profiles.find((p) => p.id === id);
+  return !entry || entry.enabled;
+}
+function selectedMetrics() { return AGENT_METRICS.filter((m) => state.agentMetrics.has(m)); }
+function runMetrics(run) { return run.evaluation_profile === "agent" ? run.agent_metrics : NL2SQL_METRICS; }
+function profileDiffers() {
+  if (!state.run) return false;
+  if (state.run.evaluation_profile_selection !== state.profileSelection) return true;
+  const profile = state.profileSelection === "auto" ? state.run.evaluation_profile : state.profileSelection;
+  return profile === "agent" && selectedMetrics().join() !== state.run.agent_metrics.join();
+}
+function paramCount(profile) { return profile === "agent" ? selectedMetrics().length : NL2SQL_METRICS.length; }
+
+function renderProfile() {
+  if (!state.config) return;
+  const auto = autoProfile();
+  const box = $("#profile-options");
+  box.replaceChildren(...PROFILE_OPTIONS.map((opt) => {
+    const enabled = profileEnabled(opt.id);
+    const radio = el("input", { type: "radio", name: "profile", value: opt.id, disabled: !enabled || state.busy ? "" : null });
+    radio.checked = state.profileSelection === opt.id;
+    radio.addEventListener("change", () => { state.profileSelection = opt.id; renderProfile(); updateUi(); });
+    const desc = opt.id === "auto" ? auto.reason : opt.desc;
+    const badge = opt.id === "auto" ? pill("Recommended", "blue") : pill(enabled ? "Enabled" : "Disabled", enabled ? "ok" : "neutral");
+    return el("label", { class: `profile-option${state.profileSelection === opt.id ? " on" : ""}${enabled ? "" : " disabled"}` },
+      radio, el("div", { class: "profile-text" }, el("b", { text: opt.label }), el("small", { text: desc })), badge);
+  }));
+  const profile = selectedProfile();
+  const pillNode = $("#profile-pill");
+  pillNode.replaceChildren(...(profile ? [icon("check"), `${profile.toUpperCase()} ${state.profileSelection === "auto" ? "auto-selected" : "selected"}`] : ["Profile chosen at start"]));
+  pillNode.className = `pill ${profile ? "pill-ok" : "pill-neutral"}`;
+
+  // callout: active run vs next run
+  const name = (p) => (p ? p.toUpperCase() : "AUTO");
+  const reason = state.profileSelection === "auto" ? auto.reason : `${name(profile)} was selected by the user.`;
+  let node;
+  if (state.run && !profileDiffers()) {
+    node = callout("info", `Active run profile: ${name(state.run.evaluation_profile)}.`, `${state.run.evaluation_profile_reason} The final pass/fail verdict combines all applicable parameters below.`);
+  } else if (state.run) {
+    const apply = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Apply to this run" });
+    apply.disabled = state.busy;
+    apply.addEventListener("click", applyProfileToRun);
+    node = callout("warn", `Profile for next run: ${name(profile)}.`, `${reason} The current run uses ${name(state.run.evaluation_profile)}; applying a different profile to it regenerates scenarios and later steps.`, apply);
+  } else {
+    node = callout("info", `Profile for next run: ${name(profile)}.`, `${reason} The final pass/fail verdict combines all applicable parameters below.`);
+  }
+  $("#profile-callout").replaceChildren(node);
+
+  // parameter cards
+  const shown = profile === "agent" ? AGENT_METRICS : profile === "nl2sql" ? NL2SQL_METRICS : [];
+  const grounded = state.run ? state.run.sources.reference !== "off" : state.useReference;
+  $("#param-grid").replaceChildren(...shown.map((m) => {
+    const info = METRIC_INFO[m];
+    let status;
+    if (profile === "nl2sql") {
+      const na = !grounded && m !== "semantic_correctness";
+      status = el("div", { class: `param-status ${na ? "na" : "on"}`, text: na ? "N/A without reference data" : "Applicable" });
+    } else if (REQUIRED_AGENT_METRICS.includes(m)) {
+      status = el("div", { class: "param-status on", text: "Always on" });
+    } else {
+      const box = el("input", { type: "checkbox", disabled: state.busy ? "" : null });
+      box.checked = state.agentMetrics.has(m);
+      box.addEventListener("change", () => { if (box.checked) state.agentMetrics.add(m); else state.agentMetrics.delete(m); renderProfile(); updateUi(); });
+      status = el("label", { class: "param-toggle" }, box, el("span", { text: box.checked ? "On · N/A when telemetry is not exposed" : "Off" }));
+    }
+    return el("div", { class: `param${status.classList.contains("on") || (status.querySelector && status.querySelector("input:checked")) ? " active" : ""}` },
+      el("div", { class: "param-name", text: info.label }), el("div", { class: "param-inputs", text: info.inputs }),
+      el("div", { class: "param-help", text: info.help }), status);
+  }));
+}
+
+async function applyProfileToRun() {
+  await withBusy("Applying evaluation profile", async () => {
+    const body = await postJson(`/api/runs/${state.runId}/steps/reference`, {
+      evaluation_profile: state.profileSelection, agent_metrics: [...REQUIRED_AGENT_METRICS, ...selectedMetrics().filter((m) => !REQUIRED_AGENT_METRICS.includes(m))],
+    });
+    applyRun(body);
+    log(`Evaluation profile set to ${state.run.evaluation_profile} (${state.run.evaluation_profile_selection})`);
+    toast(`Profile ${state.run.evaluation_profile.toUpperCase()} applied`);
+  });
+}
+
+// --- readiness / run creation -----------------------------------------------------------------
 function readiness() {
   const persona = Boolean(currentInput("persona"));
   const product = Boolean(currentInput("product"));
-  const reference = !state.useReference || Boolean(currentInput("reference"));
-  return { persona, product, reference, ok: persona && product && reference };
+  const reference = currentInput("reference");
+  const golden = Boolean(state.uploads.golden_set);
+  const profile = selectedProfile();
+  const problems = [];
+  if (state.useReference && !reference) problems.push("Upload reference data or switch it off.");
+  if (golden && !state.useReference) problems.push("A golden set needs Reference data: switch Reference on.");
+  if (profile === "agent" && !state.useReference) problems.push("Agent runs need Reference data with agent_context.");
+  else if (profile === "agent" && reference && reference.preview.parsed.agent_tools == null) problems.push("Agent runs need a reference with agent_context.");
+  const referenceOk = (!state.useReference || Boolean(reference)) && !(golden && !state.useReference);
+  const profileOk = !(profile === "agent" && (!state.useReference || (reference && reference.preview.parsed.agent_tools == null)));
+  return { persona, product, reference: referenceOk, golden: true, profile: profileOk, problems, ok: persona && product && referenceOk && profileOk };
 }
 
 function updateReadiness() {
   const r = readiness();
   $("#chk-persona").className = r.persona ? "ok" : "";
   $("#chk-product").className = r.product ? "ok" : "";
+  $("#chk-golden").className = r.golden ? "ok" : "";
   $("#chk-reference").className = r.reference ? "ok" : "";
-  $("#chk-reference").textContent = state.useReference ? "Reference" : "Reference (off)";
-  $("#start-hint").textContent = r.ok
-    ? (state.runId ? "Starting again creates a new run." : "Ready to start.")
-    : state.runId ? "To start a new run, complete the inputs above." : "Complete the required inputs to start.";
+  $("#chk-profile").className = r.profile ? "ok" : "";
+  $("#chk-reference").textContent = state.useReference ? "Operational reference" : "Operational reference (off)";
+  const profile = selectedProfile();
+  $("#chk-profile").textContent = profile ? `Evaluation profile · ${profile.toUpperCase()}` : "Evaluation profile";
+  $("#start-hint").textContent = r.problems.length ? r.problems[0]
+    : r.ok ? (state.runId ? "Starting again creates a new run." : "Ready to start.")
+      : "Complete the required inputs to start.";
+  $("#start-hint").classList.toggle("hint-warn", r.problems.length > 0);
   $("#create-run").disabled = !r.ok || state.busy;
 }
 
 async function createRun() {
   const form = new FormData();
   if (state.personaSource === "upload" && state.uploads.persona) form.append("persona", state.uploads.persona.file);
-  form.append("product", state.uploads.product.file);
+  if (state.uploads.product) form.append("product", state.uploads.product.file);
   if (state.useReference) {
-    form.append("reference", state.uploads.reference.file);
+    if (state.uploads.reference) form.append("reference", state.uploads.reference.file);
     if (state.instructionsSource === "upload" && state.uploads.reference_guide) form.append("reference_guide", state.uploads.reference_guide.file);
     if (state.instructionsSource === "write") form.append("reference_instructions", $("#instructions-text").value);
   }
+  if (state.uploads.golden_set) form.append("golden_set", state.uploads.golden_set.file);
   form.append("use_reference", state.useReference ? "true" : "false");
   form.append("persona_queries", $("#persona-queries").value);
+  if (state.questionComplexity) form.append("question_complexity", state.questionComplexity);
+  form.append("evaluation_profile", state.profileSelection);
+  for (const m of [...REQUIRED_AGENT_METRICS, ...selectedMetrics().filter((x) => !REQUIRED_AGENT_METRICS.includes(x))]) form.append("agent_metrics", m);
   await withBusy("Starting run", async () => {
     const body = await api("/api/runs", { method: "POST", body: form });
     state.runId = body.state.run_id;
     history.replaceState(null, "", `${location.pathname}?run=${encodeURIComponent(state.runId)}#connect`);
     for (const node of $$(".step")) { node.classList.remove("done", "error", "running"); $(".step-result", node).textContent = ""; }
     applyRun(body);
-    log(`Run ${state.runId} started (${state.useReference ? "grounded" : "ungrounded"})`);
+    log(`Run ${state.runId} started (${state.run.evaluation_profile.toUpperCase()}, ${state.useReference ? "grounded" : "ungrounded"})`);
     toast(`Run ${state.runId} started`);
     showView("connect");
     loadRecent();
@@ -347,13 +521,14 @@ function renderConnection() {
     if (!$("#product-url").value) $("#product-url").value = c.product_url;
     const mapping = c.response_mapping;
     const outcomes = ["answered", mapping.clarification_when && "clarification", mapping.denied_when && "denied", "error"].filter(Boolean);
+    const adapter = c.adapter_type === "http_sse" ? "streaming (SSE) · " : "";
     box.append(
       el("div", { class: "facts" },
-        fact("Endpoint", `${c.method} ${c.product_url}`), fact("Contract", c.contract_file),
+        fact("Endpoint", `${adapter}${c.method} ${c.product_url}`), fact("Contract", c.contract_file),
         fact("Headers", c.header_names.length ? `${c.header_names.join(", ")} (values hidden)` : "none"),
         fact("Recognised outcomes", outcomes.join(", "))),
       el("details", { class: "raw" }, el("summary", { text: "View request template and response mapping" }),
-        el("pre", { text: JSON.stringify({ timeout: c.timeout, request_template: c.request_template, response_mapping: mapping }, null, 2) })),
+        el("pre", { text: JSON.stringify({ timeout: c.timeout, request_template: c.request_template, response_mapping: mapping, stream: c.stream || undefined }, null, 2) })),
     );
     return;
   }
@@ -415,8 +590,11 @@ function updateUi() {
     : "Start a run in Test setup first.";
   const grounded = state.run ? state.run.sources.reference !== "off" : state.useReference;
   $("#scenarios-desc").textContent = grounded
-    ? "Business goals plus a reference pack per scenario, quoted from your reference data."
+    ? "Creates business scenarios from Persona, Product and the operational capabilities in Reference data."
     : "Business goals this persona would pursue with the product.";
+  const goldenLimit = state.config && state.config.agent_golden_max_questions_per_scenario;
+  const golden = state.run && state.run.sources.golden_set && state.run.sources.golden_set !== "none";
+  $("#question-count").max = golden && goldenLimit ? String(goldenLimit) : String(maxStep());
   renderRunCallout(connection, mock, d);
 
   const csv = $("#download-csv");
@@ -434,32 +612,36 @@ function updateUi() {
   const sources = $("#run-sources");
   sources.replaceChildren();
   if (state.run) {
-    for (const [kind, label] of Object.entries(SOURCE_LABELS)) {
-      const value = state.run.sources[kind];
-      sources.append(el("dt", { text: label }), el("dd", { text: value === "sample" ? "Sample" : value === "off" ? "Off" : fileName(value) || "—" }));
-    }
+    const show = (value) => (value === "sample" ? "Sample" : value === "off" ? "Off" : value === "none" ? "none" : fileName(value) || "—");
+    for (const [kind, label] of Object.entries(SOURCE_LABELS)) sources.append(el("dt", { text: label }), el("dd", { text: show(state.run.sources[kind]) }));
+    sources.append(el("dt", { text: "Question complexity" }), el("dd", { text: state.run.question_complexity || "persona preference" }));
+    sources.append(el("dt", { text: "Evaluation profile" }), el("dd", { text: `${state.run.evaluation_profile.toUpperCase()} · ${state.run.evaluation_profile_selection === "auto" ? "auto-selected" : "selected"}` }));
     sources.append(el("dt", { text: "Answers from" }), el("dd", { text: connection ? connection.product_url : mock ? "Mock product" : `Configured adapter (${adapter})` }));
   }
   $("#crumb").replaceChildren(...(state.runId ? [el("span", { class: "sep", text: "/" }), el("code", { text: state.runId })] : []));
 
   // navigation status
   const k = state.kpis;
+  const profile = state.run ? state.run.evaluation_profile : selectedProfile();
+  const params = state.run ? runMetrics(state.run).length : paramCount(profile);
   const navStatus = {
     setup: state.runId ? "Run created" : readiness().ok ? "Ready to start" : "Persona, product, reference",
+    evaluation: profile ? `${profile.toUpperCase()} · ${plural(params, "parameter")}` : "Auto-select",
     connect: connection ? "Connected" : mock ? "Mock product" : "Not connected",
     run: `${completed} of ${STEPS.length} steps`,
-    report: k ? `Task success ${pct(k.task_success_rate)}` : "Not available yet",
+    report: k ? `Accuracy ${pct(k.accuracy)}` : "Not available yet",
   };
-  const navDone = { setup: Boolean(state.runId), connect: Boolean(connection || mock), run: completed === STEPS.length, report: Boolean(k) };
+  const navDone = { setup: Boolean(state.runId), evaluation: Boolean(state.run), connect: Boolean(connection || mock), run: completed === STEPS.length, report: Boolean(k) };
   for (const node of $$("[data-nav]")) {
     $("[data-nav-status]", node).textContent = navStatus[node.dataset.nav];
     node.classList.toggle("done", navDone[node.dataset.nav]);
   }
 }
+function maxStep() { return (state.config && state.config.web && state.config.web.max_step_count) || 100; }
 
 function renderRunCallout(connection, mock, d) {
   const box = $("#run-callout");
-  const go = (view, text) => { const a = el("a", { class: "btn btn-sm", href: `#${view}`, text }); return a; };
+  const go = (view, text) => el("a", { class: "btn btn-sm", href: `#${view}`, text });
   let node;
   if (!state.runId) node = callout("info", "No run yet.", "Complete the test setup and start a run first.", go("setup", "Go to test setup"));
   else if (connection) node = callout("info", "Connected.", `Questions go to ${connection.product_url}.`);
@@ -472,8 +654,16 @@ function renderRunCallout(connection, mock, d) {
 function describe(step, detail) {
   if (step === "scenarios") return `${detail.accepted} accepted, ${detail.rejected} rejected${detail.reference_packs ? ` · ${detail.reference_packs} reference pack(s)` : ""}`;
   if (step === "questions") return `${detail.accepted} questions, ${detail.rejected} rejected`;
-  if (step === "execute") return `${detail.executions} answers via ${detail.product}`;
-  return `${detail.evaluations} evaluated · ${detail.bug_candidates} bug candidate(s)${detail.task_success_rate != null ? ` · task success ${pct(detail.task_success_rate)}` : ""}`;
+  if (step === "execute") return `${detail.executions} answers via ${detail.product}${detail.resumed_from_question ? ` · resumed from question ${detail.resumed_from_question}` : ""}`;
+  return `${detail.evaluations} evaluated · ${detail.bug_candidates} bug candidate(s)${detail.accuracy != null ? ` · accuracy ${pct(detail.accuracy)}` : ""}`;
+}
+
+function stepBody(step) {
+  const body = {};
+  const count = step === "scenarios" ? $("#scenario-count").value : step === "questions" ? $("#question-count").value : "";
+  if (count) body.count = Number(count);
+  if (step === "execute" && $("#start-from").value) body.start_from_question = Number($("#start-from").value);
+  return body;
 }
 
 async function runStep(step) {
@@ -481,13 +671,13 @@ async function runStep(step) {
   node.classList.remove("done", "error", "ready"); node.classList.add("running");
   $(".step-status", node).replaceChildren(el("span", { class: "spinner" }), "Running");
   $(".step-result", node).textContent = "";
-  const count = step === "scenarios" ? $("#scenario-count").value : step === "questions" ? $("#question-count").value : "";
   const started = performance.now();
   try {
-    const body = await postJson(`/api/runs/${state.runId}/steps/${step}`, count ? { count: Number(count) } : {});
+    const body = await postJson(`/api/runs/${state.runId}/steps/${step}`, stepBody(step));
     node.classList.remove("running");
     const secs = ((performance.now() - started) / 1000).toFixed(1);
     $(".step-result", node).textContent = `${describe(step, body.detail)} · ${secs}s`;
+    if (step === "execute") $("#start-from").value = "";
     for (const later of STEPS.slice(STEPS.indexOf(step) + 1)) {
       const laterNode = $(`.step[data-step="${later}"]`);
       laterNode.classList.remove("error");
@@ -518,6 +708,22 @@ async function runAll() {
   if (ok && done().has("evaluate")) { toast("Evaluation complete"); showView("report"); }
 }
 
+function renderContracts() {
+  const rows = questionRows();
+  $("#contracts-card").classList.toggle("hidden", !rows.length);
+  $("#contracts-table thead").replaceChildren(el("tr", {}, ["Question", "Journey / scope", "Duration", "Sources", "Expected tools", "Expected behavior contract"].map((h) => el("th", { text: h }))));
+  $("#contracts-table tbody").replaceChildren(...rows.map((row) => {
+    const tr = el("tr", { tabindex: "0" },
+      el("td", { class: "q" }, el("b", { text: row.question }), el("small", { text: row.question_id })),
+      el("td", { text: row.expected_journey || "—" }), el("td", { text: row.expected_time_period || "—" }),
+      el("td", {}, list(split(row.expected_data_sources))), el("td", {}, list(split(row.expected_tools))),
+      el("td", { class: "wide" }, el("div", { class: "clamp", text: row.expected_behavior_contract || row.expected_behavior })));
+    tr.addEventListener("click", () => openDrawer(row));
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(row); } });
+    return tr;
+  }));
+}
+
 // --- report -----------------------------------------------------------------------------------
 function applyRun(body) {
   state.run = body.state;
@@ -526,8 +732,16 @@ function applyRun(body) {
   state.packs = body.reference_packs || [];
   state.kpis = body.kpis || null;
   state.evaluations = body.evaluations || [];
+  state.executions = body.executions || [];
+  state.issues = body.issue_summary || null;
+  if (state.run) {
+    state.profileSelection = state.run.evaluation_profile_selection;
+    state.agentMetrics = new Set([...REQUIRED_AGENT_METRICS, ...state.run.agent_metrics]);
+  }
   renderConnection();
   renderReport(body);
+  renderContracts();
+  renderProfile();
   updateUi();
 }
 
@@ -537,12 +751,18 @@ function verdictCounts() {
   const by = (v) => rows.filter((r) => r.final_verdict === v).length;
   return { pass: by("pass"), fail: by("fail"), inconclusive: by("inconclusive"), recorded: by("recorded_only") };
 }
+function activeMetrics() {
+  if (state.kpis && state.kpis.metrics.length) return METRIC_ORDER.filter((m) => state.kpis.metrics.some((x) => x.metric === m));
+  if (state.run) return runMetrics(state.run);
+  return NL2SQL_METRICS;
+}
 
 function renderReport(body) {
   renderMeta();
   renderNotice();
   renderSummary();
   renderMetrics();
+  renderIssues();
   renderBugs();
   renderBreakdown();
   renderTable();
@@ -558,8 +778,8 @@ function renderMeta() {
   const k = state.kpis;
   const run = state.run;
   const parts = [];
-  if (k) parts.push(k.product_id, k.mode === "grounded" ? "Grounded (with reference data)" : "Ungrounded (no reference data)", `${k.questions_asked} questions`, `Evaluated ${when(k.computed_at)}`);
-  else if (run) parts.push(fileName(run.sources.product), `Started ${when(run.created_at)}`, "Results fill in as the steps complete.");
+  if (k) parts.push(k.product_id, k.mode === "grounded" ? "Grounded (with reference data)" : "Ungrounded (no reference data)", `${run ? run.evaluation_profile.toUpperCase() : ""} profile`, `${k.questions_asked} questions`, `Evaluated ${when(k.computed_at)}`);
+  else if (run) parts.push(fileName(run.sources.product) || run.sources.product, `Started ${when(run.created_at)}`, "Results fill in as the steps complete.");
   $("#report-meta").textContent = parts.length ? parts.join("  ·  ") : "Run the tests to produce a report.";
 }
 
@@ -572,10 +792,10 @@ function renderNotice() {
   else if (!k) node = callout("info", "Evaluation has not run yet.", "Scenarios, questions and answers appear below as each step completes.", go("run", "Go to run tests"));
   else if (k.questions_asked && k.judged === 0) {
     const outcomes = Object.entries(k.outcomes).filter(([, n]) => n).map(([o, n]) => `${n} ${OUTCOME_LABELS[o] || o}`).join(", ");
-    const sample = questionRows().find((r) => r.product_outcome === "error" && r.product_message);
+    const example = questionRows().find((r) => r.product_outcome === "error" && r.product_message);
     node = callout("warn", "No answers could be judged.",
       el("div", {}, `Of ${k.questions_asked} question(s): ${outcomes}. Only answered questions are scored; clarifications, refusals, errors and timeouts are recorded only.`,
-        sample ? el("div", { class: "quote", text: `Product message: ${sample.product_message}` }) : null),
+        example ? el("div", { class: "quote", text: `Product message: ${example.product_message}` }) : null),
       go("connect", "Check connection"));
   } else {
     const failed = (k.outcomes.error || 0) + (k.outcomes.timeout || 0);
@@ -591,11 +811,12 @@ function renderSummary() {
   const c = verdictCounts();
   const total = c.pass + c.fail + c.inconclusive + c.recorded;
   const judged = c.pass + c.fail + c.inconclusive;
-  const rate = k ? k.task_success_rate : null;
+  const rate = k ? (k.accuracy != null ? k.accuracy : k.task_success_rate) : null;
   const ring = el("div", { class: `ring${rate == null ? " empty" : ""}`, style: `--p:${rate == null ? 0 : Math.round(rate * 100)}` }, el("span", { text: pct(rate) }));
-  const success = tile("Task success", el("div", { class: "tile-row" }, ring,
-    el("div", {}, el("div", { class: "tile-value small", text: k ? `${c.pass} of ${judged}` : "—" }),
-      el("div", { class: "tile-sub", text: k ? "judged answers passed" : "available after evaluation" }))));
+  const accuracy = tile("Accuracy", el("div", { class: "tile-row" }, ring,
+    el("div", {}, el("div", { class: "tile-value small", text: k ? `${c.pass} passed` : "—" }),
+      el("div", { class: "tile-sub", text: k ? `${c.pass} of ${judged} evaluated answers` : "available after evaluation" }))),
+  el("div", { class: "tile-sub", text: "Passes only when every applicable evaluation driver fully passes" }));
 
   const stack = el("div", { class: "stack" }, ...[["pass", c.pass], ["fail", c.fail], ["inconclusive", c.inconclusive], ["recorded", c.recorded]]
     .filter(([, n]) => n && total).map(([cls, n]) => el("div", { class: `c-${cls}`, style: `width:${(n / total) * 100}%`, title: `${cls}: ${n}` })));
@@ -614,31 +835,71 @@ function renderSummary() {
   const bugs = tile("New bug candidates", el("div", { class: "tile-value", text: k ? String(k.new_bugs) : "—" }),
     severities.length ? el("div", { class: "sev-row" }, severities.map(([sev, n]) => pill(`${n} ${sev}`, sev))) : null,
     el("div", { class: "tile-sub", text: k ? `${k.known_gap_bugs} more explained by known gaps` : "available after evaluation" }));
-  $("#summary").replaceChildren(success, verdicts, health, bugs);
+  $("#summary").replaceChildren(accuracy, verdicts, health, bugs);
 }
 
 function renderMetrics() {
   const k = state.kpis;
-  $("#metric-cards").replaceChildren(...METRICS.map((name) => {
+  const metrics = activeMetrics();
+  $("#metric-cards").className = `metrics metrics-${Math.min(metrics.length, 4)}`;
+  $("#metric-cards").replaceChildren(...metrics.map((name) => {
+    const info = METRIC_INFO[name];
     const m = k && k.metrics.find((x) => x.metric === name);
-    const lower = name === "hallucination_rate";
-    const head = el("div", { class: "metric-name", text: METRIC_LABELS[name] });
-    const desc = el("div", { class: "metric-desc", text: lower ? `${METRIC_HELP[name]} Lower is better.` : METRIC_HELP[name] });
+    const head = el("div", { class: "metric-name", text: info.label });
+    const desc = el("div", { class: "metric-desc", text: info.help });
     if (!m || m.mean == null) {
       const why = !k ? "Available after evaluation"
-        : k.mode === "ungrounded" && NEEDS_REFERENCE.has(name) ? "Needs reference data (ungrounded run)"
+        : m && m.not_applicable && !m.n ? `N/A for ${m.not_applicable} answer(s)`
           : m && m.inconclusive ? `${m.inconclusive} inconclusive` : "No judged answers";
-      return el("div", { class: "metric na" }, head, desc, el("div", { class: "metric-value", text: "—" }), el("div", { class: "meter" }), el("div", { class: "metric-foot" }, el("span", { text: why })));
+      return el("div", { class: "metric na" }, head, desc, el("div", { class: "metric-value", text: m && m.not_applicable && !m.n ? "N/A" : "—" }), el("div", { class: "meter" }), el("div", { class: "metric-foot" }, el("span", { text: why })));
     }
-    const meterCls = lower ? (m.mean > 0 ? "bad" : "good") : "";
     const extras = [m.inconclusive ? `${m.inconclusive} inconclusive` : "", m.not_applicable ? `${m.not_applicable} n/a` : ""].filter(Boolean).join(" · ");
+    const meterCls = m.mean >= 1 ? "good" : m.mean <= 0 ? "bad" : "";
     return el("div", { class: "metric" }, head, desc,
       el("div", { class: "metric-value" }, pct(m.mean), el("small", { text: `mean ${m.mean.toFixed(2)}` })),
       el("div", { class: `meter ${meterCls}` }, el("div", { style: `width:${Math.max(m.mean * 100, m.mean > 0 ? 2 : 0)}%` })),
       el("div", { class: "metric-foot" },
-        el("span", { text: `${pct(m.pass_rate)} ${lower ? "hallucination-free" : "at full score"}` }),
+        el("span", { text: `${pct(m.pass_rate)} at full score` }),
         el("span", { text: `n = ${m.n}${extras ? ` · ${extras}` : ""}` })));
   }));
+}
+
+function renderIssues() {
+  const block = $("#issues-block");
+  const summary = state.issues;
+  block.classList.toggle("hidden", !state.kpis);
+  if (!summary || !summary.issues.length) {
+    $("#issues-sub").textContent = "";
+    $("#issues").replaceChildren(el("div", { class: "empty-card", text: state.kpis ? "No issues were found in this run." : "" }));
+    return;
+  }
+  const known = summary.issues.filter((i) => i.known_gap).length;
+  $("#issues-sub").replaceChildren(...[el("b", { text: plural(summary.issues.length, "consolidated issue") }),
+    el("span", { text: `${plural(summary.total_findings, "finding")} across ${plural(summary.affected_questions, "answer")}` }),
+    known ? el("span", { text: plural(known, "known limitation") }) : null].filter(Boolean));
+  $("#issues").replaceChildren(...summary.issues.map((issue) => {
+    const view = el("button", { class: "link-btn", type: "button", text: `View ${plural(issue.affected_question_ids.length, "failing question")}` });
+    view.addEventListener("click", () => filterToQuestions(issue.affected_question_ids, `${issue.issue_id} · ${issue.title}`));
+    return el("div", { class: `issue sev-${issue.severity}` },
+      el("div", { class: "issue-head" },
+        el("span", { class: "issue-id", text: `${issue.issue_id} · ${human(issue.theme)}` }),
+        el("span", { class: "issue-pills" }, ...issue.categories.map((cat) => pill(metricLabel(cat).toLowerCase(), "blue")),
+          issue.known_gap ? pill("known limitation", "neutral") : null, pill(issue.severity, issue.severity))),
+      el("div", { class: "issue-title", text: issue.title }),
+      el("div", { class: "issue-action" }, el("b", { text: "Recommended action: " }), issue.recommended_action),
+      issue.examples.length ? el("ul", { class: "issue-examples" }, issue.examples.map((x) => el("li", { text: x }))) : null,
+      el("div", { class: "issue-foot" }, el("span", { text: `${plural(issue.occurrences, "finding")} · ${plural(issue.affected_question_ids.length, "affected answer")}` })),
+      view);
+  }));
+}
+
+function filterToQuestions(ids, label) {
+  state.filterIds = new Set(ids);
+  state.filterLabel = label;
+  state.filter = "all";
+  for (const x of $$("#filter button")) x.classList.toggle("on", x.dataset.filter === "all");
+  renderTable();
+  $("#results-table").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function bugEntries() {
@@ -670,34 +931,37 @@ function renderBugs() {
   })));
 }
 
-function scoreChip(name, value, judged) {
+function scoreChip(value, judged) {
   if (!value) return el("span", { class: "score na", text: judged ? "n/a" : "" });
   if (value === "inconclusive") return el("span", { class: "score mid", title: "inconclusive", text: "?" });
   const v = Number(value);
-  const cls = name === "hallucination_rate" ? (v === 0 ? "good" : "bad") : v >= 1 ? "good" : v <= 0 ? "bad" : "mid";
+  if (Number.isNaN(v)) return el("span", { class: "score na", text: "n/a" });
+  const cls = v >= 1 ? "good" : v <= 0 ? "bad" : "mid";
   return el("span", { class: `score ${cls}`, text: Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/0$/, "") });
 }
 
 function renderBreakdown() {
   const k = state.kpis;
   const groups = k ? k[state.breakdownBy] || [] : [];
+  const metrics = activeMetrics();
   $("#breakdown-block").classList.toggle("hidden", !k || (!k.by_task_type.length && !k.by_capability.length));
   const head = el("tr", {}, el("th", { text: state.breakdownBy === "by_task_type" ? "Task type" : "Capability" }), el("th", { class: "num", text: "Questions" }),
-    el("th", { class: "num", text: "Judged" }), el("th", { class: "num", text: "Pass rate" }), METRICS.map((m) => el("th", { class: "num", text: METRIC_SHORT[m] })));
+    el("th", { class: "num", text: "Judged" }), el("th", { class: "num", text: "Pass rate" }), metrics.map((m) => el("th", { class: "num", text: METRIC_INFO[m].short })));
   $("#breakdown-table thead").replaceChildren(head);
   $("#breakdown-table tbody").replaceChildren(...(groups.length ? groups.map((g) => el("tr", {},
     el("td", { text: human(g.group) }), el("td", { class: "num", text: String(g.questions) }), el("td", { class: "num", text: String(g.judged) }),
     el("td", { class: "num", text: pct(g.pass_rate) }),
-    METRICS.map((m) => el("td", { class: "num" }, scoreChip(m, g.metric_means[m] == null ? "" : String(Math.round(g.metric_means[m] * 100) / 100), g.judged > 0)))))
-    : [el("tr", {}, el("td", { class: "empty", colspan: "9", text: "No data." }))]));
+    metrics.map((m) => el("td", { class: "num" }, scoreChip(g.metric_means[m] == null ? "" : String(Math.round(g.metric_means[m] * 100) / 100), g.judged > 0)))))
+    : [el("tr", {}, el("td", { class: "empty", colspan: String(4 + metrics.length), text: "No data." }))]));
 }
 
-const MAIN_COLUMNS = [
-  ["question_id", "ID"], ["question", "Question"], ["product_outcome", "Outcome"], ["final_verdict", "Verdict"],
-  ...METRICS.map((m) => [m, METRIC_SHORT[m]]), ["bug_ids", "Bug"],
-];
+function mainColumns() {
+  return [["question_id", "ID"], ["question", "Question"], ["expected_behavior_contract", "Expected behavior contract"], ["product_outcome", "Outcome"], ["final_verdict", "Verdict"],
+    ...activeMetrics().map((m) => [m, METRIC_INFO[m].short]), ["bug_ids", "Bug"]];
+}
 
 function matchesFilter(r) {
+  if (state.filterIds && !state.filterIds.has(r.question_id)) return false;
   if (state.filter === "bugs") return Boolean(r.bug_ids);
   if (state.filter !== "all") return r.final_verdict === state.filter;
   return true;
@@ -716,14 +980,24 @@ function renderFilterCounts() {
     b.dataset.label = b.dataset.label || b.textContent;
     b.replaceChildren(b.dataset.label, el("span", { class: "count", text: String(counts[b.dataset.filter]) }));
   }
+  const chip = $("#issue-filter");
+  if (state.filterIds) {
+    const clear = el("button", { class: "icon-btn small", type: "button", "aria-label": "Clear issue filter" }, icon("close"));
+    clear.addEventListener("click", () => { state.filterIds = null; state.filterLabel = ""; renderTable(); });
+    chip.replaceChildren(el("span", { text: `Showing ${state.filterLabel}` }), clear);
+    chip.classList.remove("hidden");
+  } else chip.classList.add("hidden");
 }
 
 function renderTable() {
   renderFilterCounts();
   const all = state.allColumns && state.rows.length;
-  const columns = all ? Object.keys(state.rows[0]).map((k) => [k, human(k)]) : MAIN_COLUMNS;
+  const columns = all
+    ? Object.keys(state.rows[0]).filter((key) => state.rows.some((r) => r[key])).map((k) => [k, human(k)])
+    : mainColumns();
+  const metrics = activeMetrics();
   const rows = filteredRows();
-  $("#results-table thead").replaceChildren(el("tr", {}, columns.map(([key, label]) => el("th", { class: METRICS.includes(key) && !all ? "num" : null, text: label }))));
+  $("#results-table thead").replaceChildren(el("tr", {}, columns.map(([key, label]) => el("th", { class: metrics.includes(key) && !all ? "num" : null, text: label }))));
   const body = $("#results-table tbody");
   if (!rows.length) {
     body.replaceChildren(el("tr", {}, el("td", { colspan: String(columns.length), class: "empty", text: state.rows.length ? "No rows match the filter." : "No results yet. Start a run and run the tests." })));
@@ -741,10 +1015,11 @@ function renderTable() {
       if (key === "question") {
         return el("td", { class: "q" }, el("b", { text: value || row.scenario_title }), el("small", { text: value ? row.scenario_title : "Scenario without a question yet" }));
       }
+      if (key === "expected_behavior_contract") return el("td", { class: "wide" }, el("div", { class: "clamp", text: value || row.expected_behavior || "" }));
       if (key === "final_verdict") return el("td", { class: "nowrap" }, value ? verdictPill(value) : "");
       if (key === "product_outcome") return el("td", { class: "nowrap" }, value ? el("span", { class: `outcome ${value}`, text: OUTCOME_LABELS[value] || value }) : "");
       if (key === "question_id" || key === "bug_ids") return el("td", { class: "id", text: split(value).join(", ") });
-      if (METRICS.includes(key)) return el("td", { class: "num" }, scoreChip(key, value, judged));
+      if (metrics.includes(key)) return el("td", { class: "num" }, scoreChip(value, judged));
       return el("td", { text: value });
     });
     const tr = el("tr", { tabindex: "0" }, cells);
@@ -762,39 +1037,53 @@ async function loadRecent() {
 
 function renderRecent() {
   $("#recent-card").classList.toggle("hidden", !state.recent.length);
-  $("#recent-table thead").replaceChildren(el("tr", {}, ["Run", "Started", "Product", "Mode", "Progress", "Task success", ""].map((h) => el("th", { text: h }))));
+  $("#recent-table thead").replaceChildren(el("tr", {}, ["Run", "Started", "Product", "Profile", "Complexity", "Mode", "Progress", "Accuracy", ""].map((h) => el("th", { text: h }))));
   $("#recent-table tbody").replaceChildren(...state.recent.map((r) => {
     const steps = r.steps_done.filter((s) => STEPS.includes(s)).length;
     const grounded = r.sources.reference && r.sources.reference !== "off";
     const href = `${location.pathname}?run=${encodeURIComponent(r.run_id)}#${r.steps_done.includes("evaluate") ? "report" : "run"}`;
+    const accuracy = r.accuracy != null ? r.accuracy : r.task_success_rate;
     return el("tr", {},
       el("td", { class: "id" }, r.run_id, r.run_id === state.runId ? el("span", { class: "muted", text: "  (open)" }) : null),
       el("td", { class: "nowrap", text: when(r.created_at) }),
-      el("td", { text: r.product_id || fileName(r.sources.product) }),
+      el("td", { text: r.product_id || (r.sources.product === "sample" ? "default" : fileName(r.sources.product)) }),
+      el("td", {}, r.evaluation_profile ? pill(r.evaluation_profile.toUpperCase(), "blue") : ""),
+      el("td", { text: r.question_complexity || "persona" }),
       el("td", {}, pill(grounded ? "grounded" : "ungrounded", grounded ? "blue" : "neutral")),
       el("td", {}, r.steps_done.includes("evaluate") ? pill("evaluated", "ok") : el("span", { class: "muted", text: `${steps} of ${STEPS.length} steps` })),
-      el("td", { class: "nowrap", text: r.task_success_rate == null ? "—" : `${pct(r.task_success_rate)} of ${r.judged}` }),
+      el("td", { class: "nowrap", text: accuracy == null ? "—" : `${pct(accuracy)} of ${r.judged}` }),
       el("td", {}, el("a", { class: "btn btn-sm", href, text: "Open" })));
   }));
 }
 
 // --- drawer -----------------------------------------------------------------------------------
 function section(title, ...content) { return el("div", { class: "dsec" }, el("h3", {}, ...[].concat(title)), ...content); }
+const tagChips = (tags) => (tags && tags.length ? el("span", { class: "tags" }, tags.map((t) => el("code", { class: "tag", text: t }))) : null);
 
 function openDrawer(row) {
   const scenario = state.scenarios.find((s) => s.id === row.scenario_id);
   const pack = scenario && state.packs.find((p) => p.pack_id === scenario.reference_pack_id);
   const evaluation = state.evaluations.find((e) => e.question_id === row.question_id);
-  $("#drawer-eyebrow").textContent = [row.question_id, row.scenario_id, row.mode].filter(Boolean).join("  ·  ");
+  const execution = state.executions.find((e) => e.question_id === row.question_id);
+  $("#drawer-eyebrow").textContent = [row.question_id, row.golden_case_id, row.scenario_id, row.mode, evaluation ? evaluation.evaluation_profile.toUpperCase() : ""].filter(Boolean).join("  ·  ");
   $("#drawer-title").textContent = row.question || row.scenario_title;
   $("#drawer-verdict").replaceChildren(...(row.final_verdict ? [verdictPill(row.final_verdict)] : []));
   const parts = [];
   if (evaluation) parts.push(...evaluationSections(evaluation));
   if (row.question_id) {
-    parts.push(section("Question and expectations", kvList([
-      ["Asked", row.question], ["Expected behaviour", row.expected_behavior],
-      ["Success criteria", split(row.success_criteria)],
+    const criteria = split(row.success_criteria).map((c, i) => el("span", {}, el("code", { class: "tag", text: `CRIT-${String(i + 1).padStart(2, "0")}` }), " ", c));
+    parts.push(section("Question and expected behaviour", kvList([
+      ["Asked", row.question], ["Golden case", row.golden_case_id], ["Expected behaviour", row.expected_behavior],
+      ["Success criteria", criteria], ["Expected tools", split(row.expected_tools)], ["Journey / scope", row.expected_journey],
+      ["Time period", row.expected_time_period], ["Data sources", split(row.expected_data_sources)], ["Expected context", split(row.expected_context)],
+      ["Must not", split(row.prohibited_behaviors)], ["Reference definitions", split(row.reference_context)], ["Golden-set criteria", split(row.golden_set_criteria)],
     ])));
+  }
+  if (execution && execution.turns && execution.turns.length > 2) {
+    parts.push(section(["Conversation", el("span", { class: "section-note", text: `session ${execution.session_id || "—"}` })],
+      el("div", { class: "turns" }, execution.turns.map((t) => el("div", { class: `turn ${t.role}` },
+        el("div", { class: "turn-meta", text: `${t.role} · ${human(t.kind)}${t.latency_ms != null ? ` · ${ms(t.latency_ms)}` : ""}` }),
+        el("div", { class: "turn-msg", text: t.message }))))));
   }
   if (row.product_outcome) {
     const content = [kvList([["Outcome", OUTCOME_LABELS[row.product_outcome] || row.product_outcome], ["Answer", row.answer_text], ["Message", row.product_message], ["Latency", row.latency_ms ? ms(Number(row.latency_ms)) : ""]])];
@@ -822,20 +1111,26 @@ function showDrawer(parts) {
 
 function evaluationSections(ev) {
   if (!ev.metrics) {
-    return [section(["Evaluation", verdictPill("recorded_only")],
-      callout("info", "Not judged.", `The product ${OUTCOME_LABELS[ev.product_outcome] || ev.product_outcome}. Clarifications, refusals, errors and timeouts are recorded but not scored.`),
+    return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")],
+      ev.verdict ? callout("warn", "No scores.", "The judge could not produce a valid evaluation; see the notes.")
+        : callout("info", "Not judged.", `The product ${OUTCOME_LABELS[ev.product_outcome] || ev.product_outcome}. Clarifications, refusals, errors and timeouts are recorded but not scored.`),
       ev.notes.length ? kvList([["Notes", ev.notes]]) : null)];
   }
-  const minis = el("div", { class: "mini-metrics" }, METRICS.map((name) => {
+  const names = METRIC_ORDER.filter((m) => ev.metrics[m]);
+  const minis = el("div", { class: "mini-metrics" }, names.map((name) => {
     const m = ev.metrics[name];
-    return el("div", { class: "mini" }, el("b", { text: METRIC_SHORT[name] }),
-      m.status === "scored" ? scoreChip(name, String(m.score), true) : el("span", { class: "na", text: human(m.status) }));
+    return el("div", { class: "mini" }, el("b", { text: METRIC_INFO[name].short }),
+      m.status === "scored" ? scoreChip(String(m.score), true) : el("span", { class: "na", text: human(m.status) }));
   }));
-  const why = el("table", { class: "dtable" });
-  for (const name of METRICS) {
+  const why = el("div", { class: "why" });
+  for (const name of names) {
     const m = ev.metrics[name];
-    why.append(el("tr", {}, el("td", { class: "fit" }, el("b", { text: METRIC_LABELS[name] })),
-      el("td", {}, m.rationale, m.evidence ? el("span", { class: "quote", text: m.evidence }) : null)));
+    why.append(el("div", { class: "why-row" },
+      el("div", { class: "why-head" }, el("b", { text: METRIC_INFO[name].label }),
+        m.status === "scored" ? scoreChip(String(m.score), true) : pill(m.status, "neutral")),
+      el("div", { text: m.rationale }), m.evidence ? el("span", { class: "quote", text: m.evidence }) : null,
+      (m.what_worked || []).length ? el("ul", { class: "worked" }, m.what_worked.map((x) => el("li", { text: x }))) : null,
+      (m.what_didnt || []).length ? el("ul", { class: "didnt" }, m.what_didnt.map((x) => el("li", { text: x }))) : null));
   }
   return [section(["Evaluation", verdictPill(ev.verdict)], minis,
     el("h4", { text: "Why these scores" }), why,
@@ -847,27 +1142,19 @@ function detailSections(ev) {
   if (ev.criteria_results.length) {
     const table = el("table", { class: "dtable" });
     for (const c of ev.criteria_results) {
-      table.append(el("tr", {}, el("td", { class: "fit" }, pill(c.status, c.status)),
+      table.append(el("tr", {}, el("td", { class: "fit" }, c.tag ? el("code", { class: "tag", text: c.tag }) : null, " ", pill(c.status, c.status)),
         el("td", {}, el("div", { text: c.criterion }), el("div", { class: "muted", text: c.rationale }), c.evidence ? el("span", { class: "quote", text: c.evidence }) : null)));
     }
-    out.push(section(["Success criteria", el("span", { class: "section-note", text: "completeness reason" })], table));
-  }
-  if (ev.claims.length) {
-    const table = el("table", { class: "dtable" });
-    for (const c of ev.claims) {
-      table.append(el("tr", {}, el("td", { class: "fit" }, pill(c.status, c.status)),
-        el("td", {}, el("span", { class: "quote", text: c.text }), el("div", { class: "muted", text: c.reason }),
-          c.reference_quote ? el("div", { class: "muted", text: `Reference: “${c.reference_quote}”` }) : null)));
-    }
-    out.push(section([`Statements checked (${ev.claims.length})`, el("span", { class: "section-note", text: "hallucination reason" })], table));
+    out.push(section(["Success criteria", el("span", { class: "section-note", text: "shown for traceability; each feeds its matching metric" })], table));
   }
   if (ev.findings.length) {
     out.push(section([`Findings (${ev.findings.length})`, el("span", { class: "section-note", text: "verdict reason" })], ...ev.findings.map((f) => el("div", { class: `finding sev-${f.severity}` },
-      el("div", { class: "finding-meta" }, pill(f.severity, f.severity), el("span", { text: `${f.finding_id} · ${METRIC_LABELS[f.category] || human(f.category)} · evidence ${f.evidence_status}` }), f.matches_known_gap ? pill("known gap", "neutral") : null),
+      el("div", { class: "finding-meta" }, pill(f.severity, f.severity), el("span", { text: `${f.finding_id} · ${metricLabel(f.category)} · evidence ${f.evidence_status}` }), f.matches_known_gap ? pill("known gap", "neutral") : null),
       el("div", { text: f.description }),
       el("div", { class: "exp" }, el("b", { text: "Expected: " }), f.expected_behavior),
       el("div", { class: "exp" }, el("b", { text: "Observed: " }), f.observed_behavior),
-      f.evidence ? el("span", { class: "quote", text: f.evidence }) : null))));
+      f.evidence ? el("span", { class: "quote", text: f.evidence }) : null,
+      tagChips(f.related_tags)))));
   }
   for (const bug of ev.bug_candidates) {
     out.push(section(["Bug candidate", pill(bug.status, "fail")], kvList([
@@ -896,12 +1183,13 @@ function packSection(pack) {
   if (pack.kind === "document_collection") {
     content.push(...pack.documents.map((d) => el("div", { class: "pack-item" }, el("div", { class: "name", text: d.name }), el("div", { class: "muted", text: `Why: ${d.why}` }), el("span", { class: "quote", text: d.summary }))));
   } else {
-    content.push(...pack.tables.map((t) => el("div", { class: "pack-item" },
-      el("div", { class: "name", text: t.name }), el("div", { text: t.description || "(no description)" }), el("div", { class: "muted", text: `Why: ${t.why}` }),
+    content.push(...pack.tables.map((t, i) => el("div", { class: "pack-item" },
+      el("div", { class: "name" }, el("code", { class: "tag", text: `TABLE-${String(i + 1).padStart(2, "0")}` }), " ", t.name),
+      el("div", { text: t.description || "(no description)" }), el("div", { class: "muted", text: `Why: ${t.why}` }),
       t.rules.length ? list(t.rules.map((r) => `Rule: ${r}`)) : null,
       t.columns.length ? el("span", { class: "quote", text: t.columns.map(columnLine).join("\n") }) : null)));
-    if (pack.joins.length) content.push(el("h4", { text: "Joins" }), list(pack.joins.map((j) => `${j.from} -> ${j.to} (${j.verified ? "verified" : "NOT verified"})`)));
-    if (pack.rules.length) content.push(el("h4", { text: "Rules" }), list(pack.rules.map((r) => `${r.id}: ${r.rule}`)));
+    if (pack.joins.length) content.push(el("h4", { text: "Joins" }), list(pack.joins.map((j, i) => `JOIN-${String(i + 1).padStart(2, "0")}  ${j.from} -> ${j.to} (${j.verified ? "verified" : "NOT verified"})`)));
+    if (pack.rules.length) content.push(el("h4", { text: "Rules" }), list(pack.rules.map((r) => `RULE-${r.id}: ${r.rule}`)));
   }
   if (pack.rejected_items.length) content.push(el("h4", { text: "Dropped (not in the reference)" }), list(pack.rejected_items.map((d) => d.reason)));
   const editor = el("textarea", { rows: "14", class: "hidden", spellcheck: "false", "aria-label": "Cheat sheet picks (JSON)" });
@@ -933,16 +1221,25 @@ async function boot() {
     $("#env").title = `Judge / generator LLM: ${state.config.llm_provider} ${state.config.llm_model}. Default product adapter: ${state.config.product_adapter}.`;
     $("#scenario-count").value = state.config.scenario_count;
     $("#question-count").value = state.config.question_count;
-    const samples = await api("/api/samples");
-    state.samplePersona = samples.persona;
+    $("#scenario-count").max = String(maxStep());
+    state.agentMetrics = new Set([...REQUIRED_AGENT_METRICS, ...(state.config.agent_metrics || [])]);
+    state.samples = await api("/api/samples");
   } catch (err) {
     log(`Could not load configuration: ${err.message}`, true);
     toast(`Could not load configuration: ${err.message}`, "error");
   }
-  for (const kind of ["persona", "product", "reference", "reference_guide"]) for (const zone of $$("[data-drop]", panel(kind))) wireDrop(zone, (file) => onFile(kind, file));
+  for (const box of $$("[data-preview-for]")) {
+    const empty = $(".preview-empty", box);
+    if (empty) box.dataset.empty = empty.textContent;
+  }
+  for (const kind of ["persona", "product", "reference", "reference_guide", "golden_set"]) for (const zone of $$("[data-drop]", panel(kind))) wireDrop(zone, (file) => onFile(kind, file));
   for (const b of $$("#persona-source button")) b.addEventListener("click", () => setPersonaSource(b.dataset.source));
   for (const b of $$("#instructions-source button")) b.addEventListener("click", () => setInstructionsSource(b.dataset.source));
   $("#use-reference").addEventListener("change", (e) => setUseReference(e.target.checked));
+  $("#product-clear").addEventListener("click", () => clearUpload("product"));
+  $("#reference-clear").addEventListener("click", () => clearUpload("reference"));
+  $("#golden-clear").addEventListener("click", () => clearUpload("golden_set"));
+  $("#question-complexity").addEventListener("change", (e) => { state.questionComplexity = e.target.value; });
   $("#create-run").addEventListener("click", createRun);
   wireDrop($("[data-contract-drop]"), setContractFile);
   for (const b of $$("#contract-source button")) b.addEventListener("click", () => setContractSource(b.dataset.source));
@@ -969,10 +1266,11 @@ async function boot() {
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
   window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
   $("#new-run").href = `${location.pathname}#setup`;
-  setPersonaSource(state.samplePersona ? "sample" : "upload");
-  setUseReference(false);
+  setPersonaSource(sample("persona") ? "sample" : "upload");
+  setUseReference(Boolean(sample("reference")));
   setInstructionsSource("none");
   renderInput("product");
+  renderInput("golden_set");
 
   const fromUrl = new URLSearchParams(location.search).get("run");
   let initial = location.hash.slice(1);
@@ -981,6 +1279,8 @@ async function boot() {
     try {
       applyRun(await api(`/api/runs/${encodeURIComponent(fromUrl)}`));
       $("#persona-queries").value = state.run.persona_queries.join(String.fromCharCode(10));
+      state.questionComplexity = state.run.question_complexity || "";
+      renderComplexityOptions();
       log(`Reopened run ${fromUrl}`);
       if (!VIEWS.includes(initial)) initial = done().has("evaluate") ? "report" : "run";
     } catch (err) {
@@ -990,6 +1290,7 @@ async function boot() {
     }
   }
   if (!state.run) renderReport({});
+  renderProfile();
   updateUi();
   showView(initial, { scroll: false });
   loadRecent();

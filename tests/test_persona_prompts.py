@@ -157,6 +157,18 @@ def test_ambiguity_rule_reaches_the_question_prompt(
     assert "Vague questions are allowed." in user
 
 
+def test_question_prompt_explains_how_complexity_is_computed(
+    sample_persona: Persona, sample_product: ProductDescription, sample_scenarios: list[Scenario]
+) -> None:
+    # Live: with only "allowed: complex", the model wrote 2-deliverable questions that code
+    # computed as medium, and every question of a complex run was rejected.
+    user = build_question_prompt(
+        sample_persona, sample_product, sample_scenarios[0], None, OPTIONS
+    )[1]
+    assert "complex = two or more distinct sources across the deliverables, or" in user
+    assert "three or more deliverables; anything else is medium" in user
+
+
 # --- schema ---------------------------------------------------------------------------------
 
 

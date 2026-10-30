@@ -374,14 +374,21 @@ def check_evaluation(
                 f"finding {i}: evidence {finding.evidence!r} is not in the response ({COPY_HINT})"
             )
     categories = {f.category for f in draft.findings}
-    required = {
-        name.value: (score := getattr(draft, name.value).score) is not None and score < 1
-        for name in NL2SQL_METRICS
-    }
-    for category, needed in required.items():
-        if needed and category not in categories:
-            errors.append(f"a finding with category {category!r} is required")
+    for name in NL2SQL_METRICS:
+        score = getattr(draft, name.value).score
+        if score is not None and score < 1 and name.value not in categories:
+            errors.append(missing_finding_message(name.value, score))
     return errors
+
+
+def missing_finding_message(metric: str, score: float) -> str:
+    """Retry feedback that allows BOTH fixes. Naming only "add a finding" made a live judge lower
+    a correct score to 0 just to satisfy the check."""
+    return (
+        f"{metric} is scored {score:g} (below 1) without a finding with category {metric!r}: "
+        f"if the response really falls short on {metric}, add that finding; if nothing is "
+        f"wrong, score {metric} 1. Never change a score only to satisfy this check"
+    )
 
 
 def ignore_sql_output_alias_penalties(draft: EvaluationDraft, response: str) -> None:

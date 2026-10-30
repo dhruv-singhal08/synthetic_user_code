@@ -26,6 +26,7 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.nodes.evaluators.generic import missing_finding_message
 from synthetic_user.prompts.agent_response_evaluation import build_agent_evaluation_prompt
 from synthetic_user.prompts.response_evaluation import response_text
 
@@ -180,7 +181,7 @@ def check_agent_evaluation(
             and judged.score < 1
             and metric.value not in categories
         ):
-            errors.append(f"a finding with category {metric.value!r} is required")
+            errors.append(missing_finding_message(metric.value, judged.score))
     return errors
 
 

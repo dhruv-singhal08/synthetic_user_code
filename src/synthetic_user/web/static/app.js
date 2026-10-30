@@ -213,7 +213,7 @@ function renderInput(kind) {
   }
   if (kind === "persona") renderComplexityOptions();
   renderProfile();
-  updateReadiness();
+  updateUi(); // also the sidebar: an uploaded product can change the auto-selected profile
 }
 const GOLDEN_HELP = "When uploaded, the golden set teaches realistic intent, expected-behaviour and success-criteria patterns for both NL2SQL and Agent runs. It is combined with Persona, Product and authoritative Reference data to generate new scenarios and questions; it never replaces Reference data and its questions are not replayed. Without a golden set, the pipeline generates normally from Persona, Product and Reference.";
 

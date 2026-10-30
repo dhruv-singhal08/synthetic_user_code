@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from synthetic_user.adapters.http_json import (
     HttpJsonAdapter,
     HttpRequest,
     HttpResult,
+    _urllib_send,
     lookup,
     render_template,
 )
@@ -26,6 +28,7 @@ from synthetic_user.models.execution import (
     ClarificationResponse,
     DeniedResponse,
     ErrorResponse,
+    TimeoutResponse,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -287,6 +290,34 @@ async def test_http_errors_and_bad_bodies_become_error_responses(
     assert isinstance(response, ErrorResponse)
     assert response.error_type == error_type
     assert response.message is not None and fragment in response.message
+
+
+async def test_contract_timeout_is_a_timeout_response() -> None:
+    class SlowTransport(StubTransport):
+        async def __call__(self, request: HttpRequest) -> HttpResult:
+            raise TimeoutError("timed out")
+
+    response = await _http(SlowTransport(), timeout=2).send(_req())
+    assert isinstance(response, TimeoutResponse) and response.timeout_seconds == 2
+
+
+def test_urllib_transport_timeout_and_refused_connection() -> None:
+    with socket.socket() as server:  # accepts the connection, never answers
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        request = HttpRequest(
+            method="POST",
+            url=f"http://127.0.0.1:{port}/ask",
+            headers={},
+            body=b"{}",
+            timeout=0.2,
+            tls_ca_bundle=None,
+        )
+        with pytest.raises(TimeoutError):
+            _urllib_send(request)
+    with pytest.raises(ProductAdapterError, match="failed"):  # nothing listens any more
+        _urllib_send(request)
 
 
 def test_lookup_dotted_paths() -> None:

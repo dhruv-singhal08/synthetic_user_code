@@ -52,7 +52,7 @@ from synthetic_user.adapters.http_common import (
 )
 from synthetic_user.core.exceptions import ConfigError, ProductAdapterError, format_validation_error
 from synthetic_user.core.trace import record_product_http
-from synthetic_user.models.execution import ErrorResponse, ProductResponse
+from synthetic_user.models.execution import ErrorResponse, ProductResponse, TimeoutResponse
 
 _log = logging.getLogger(__name__)
 
@@ -100,7 +100,15 @@ def _urllib_send(request: HttpRequest) -> HttpResult:
             return HttpResult(response.status, response.read())
     except urllib.error.HTTPError as exc:
         return HttpResult(exc.code, exc.read())
-    except (urllib.error.URLError, OSError) as exc:
+    except TimeoutError:
+        raise  # the contract timeout: a timeout outcome, not a product error
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):  # connect timeout, wrapped by urllib
+            raise TimeoutError(str(exc.reason)) from exc
+        raise ProductAdapterError(
+            f"request to {host(request.url)} failed: {type(exc).__name__}: {exc.reason}"
+        ) from exc
+    except OSError as exc:
         reason = getattr(exc, "reason", exc)
         raise ProductAdapterError(
             f"request to {host(request.url)} failed: {type(exc).__name__}: {reason}"
@@ -173,6 +181,10 @@ class HttpJsonAdapter:
         }
         try:
             result = await self._transport(request)
+        except TimeoutError:
+            message = f"HTTP request timed out after {options.timeout:g} seconds"
+            record_product_http(request=trace_request, response=None, error=message)
+            return TimeoutResponse(timeout_seconds=options.timeout)
         except ProductAdapterError as exc:
             message = scrub_text(str(exc), resolved.secrets)
             record_product_http(request=trace_request, response=None, error=message)

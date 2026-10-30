@@ -570,7 +570,13 @@ def question_policy_problems(
     allowed_complexities = {QuestionComplexity(item) for item in policy.allowed_complexities}
     if complexity not in allowed_complexities:
         allowed = ", ".join(item.value for item in sorted(allowed_complexities, key=str))
-        problems.append(f"computed complexity {complexity.value} is not allowed ({allowed})")
+        sources = {source.casefold() for item in plan.deliverables for source in item.sources}
+        problems.append(
+            f"computed complexity {complexity.value} is not allowed ({allowed}): the plan has "
+            f"{len(plan.deliverables)} deliverable(s) from {len(sources)} distinct source(s); "
+            "simple = 1 deliverable from at most 1 source, complex = 2+ distinct sources or "
+            "3+ deliverables, otherwise medium"
+        )
     return problems
 
 

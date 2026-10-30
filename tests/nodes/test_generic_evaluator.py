@@ -209,7 +209,10 @@ async def test_sub_perfect_score_without_finding_is_retried(
         app_config, sample_product, case, sample_reference, ANSWER, missing, fixed
     )
     assert len(llm.calls) == 2
-    assert "category 'schema_faithfulness' is required" in llm.calls[1].user
+    feedback = llm.calls[1].user
+    assert "without a finding with category 'schema_faithfulness'" in feedback
+    # Both fixes are offered, so the judge is never pushed to lower a correct score.
+    assert "if nothing is wrong, score schema_faithfulness 1" in feedback
     assert result.verdict is Verdict.FAIL
 
 
@@ -444,7 +447,7 @@ def test_agent_draft_must_match_applicable_metrics() -> None:
     )
     errors = check_agent_evaluation(reply, ["answers"], "the answer", applicable)
     assert any("tool_selection: must be omitted" in e for e in errors)
-    assert any("category 'completion' is required" in e for e in errors)
+    assert any("without a finding with category 'completion'" in e for e in errors)
     assert any("missing ['answers']" in e for e in errors)
 
 

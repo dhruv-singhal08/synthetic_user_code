@@ -320,6 +320,10 @@ Scenario (WHAT the user wants):
   {", ".join(c.value for c in options.allowed_complexities)}. Follow-ups are
   {"allowed" if options.allow_follow_ups else "not allowed"}; cross-source comparison is
   {"allowed" if options.allow_cross_source_comparison else "not allowed"}.
+- Code computes complexity from plan.deliverables: simple = exactly one deliverable using at
+  most one distinct source; complex = two or more distinct sources across the deliverables, or
+  three or more deliverables; anything else is medium. Shape the plan (and the utterance) so the
+  computed complexity is one of the allowed values.
 - plan.deliverables is the complete machine-checkable list of outputs requested by the utterance.
   Each item has exactly one action and one subject. Do not combine actions such as "rank and quote"
   in one item. Give each item only the source(s) it actually needs. Code counts this list.

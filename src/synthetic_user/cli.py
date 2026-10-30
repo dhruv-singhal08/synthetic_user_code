@@ -213,7 +213,7 @@ def _check_reference(state: CliState, path: Path, guide: Path | None) -> None:
     )
     typer.echo(
         f"reference_id={reference.reference_id} kind={reference.kind.value} {items} "
-        f"chars={len(reference.render())} max_chars={settings.reference.max_chars} "
+        f"chars={reference.rendered_chars()} max_chars={settings.reference.max_chars} "
         f"instructions={reference.instructions_name or 'default'}"
     )
 
@@ -639,7 +639,7 @@ def _print_kpis(kpis: RunKpis) -> None:
     def fmt(value: float | None) -> str:
         return "-" if value is None else f"{value:g}"
 
-    typer.echo(f"kpi task_success_rate={fmt(kpis.task_success_rate)} judged={kpis.judged}")
+    typer.echo(f"kpi accuracy={fmt(kpis.accuracy)} judged={kpis.judged}")
     for m in kpis.metrics:
         name = METRIC_LABELS[m.metric].lower().replace(" ", "_")
         typer.echo(f"kpi {name} mean={fmt(m.mean)} pass_rate={fmt(m.pass_rate)} n={m.n}")
@@ -655,10 +655,14 @@ def serve(
     ctx: typer.Context,
     config: CommandConfigOption = None,
     log_level: CommandLogLevelOption = None,
-    host: Annotated[str, typer.Option("--host", help="Bind address (local only by default).")] = (
-        "127.0.0.1"
-    ),
-    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8000,
+    host: Annotated[
+        str | None,
+        typer.Option("--host", help="Bind address (default: web.host from config)."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option("--port", min=1, max=65535, help="Port (default: web.port from config)."),
+    ] = None,
 ) -> None:
     """Start the web UI + API (FastAPI) at http://HOST:PORT."""
     state = _state(ctx, config, log_level)
@@ -669,8 +673,10 @@ def serve(
         from synthetic_user.web.server import create_app
 
         settings = load_config(state.config_path)
-        typer.echo(f"Synthetic User UI on http://{host}:{port}  (Ctrl+C to stop)")
-        uvicorn.run(create_app(settings), host=host, port=port, log_level="warning")
+        bind_host = host or settings.web.host
+        bind_port = port or settings.web.port
+        typer.echo(f"Synthetic User UI on http://{bind_host}:{bind_port}  (Ctrl+C to stop)")
+        uvicorn.run(create_app(settings), host=bind_host, port=bind_port, log_level="warning")
 
     _guard(start)
 

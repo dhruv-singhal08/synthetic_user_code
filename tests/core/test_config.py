@@ -245,3 +245,33 @@ def test_retries_must_be_non_negative(tmp_path: Path) -> None:
     data["llm"] = {"max_validation_retries": -1}
     with pytest.raises(ConfigError, match="max_validation_retries"):
         load_config(_write(tmp_path, data), env={})
+
+
+@pytest.mark.parametrize(
+    ("name", "env"),
+    [
+        ("app.yaml", {}),
+        ("app.fake.yaml", {}),
+        ("app.gemini.yaml", {"GOOGLE_API_KEY": "k", "GEMINI_MODEL": "gemini-test"}),
+        ("app.safechain.yaml", {}),
+    ],
+)
+def test_every_shipped_config_loads(name: str, env: dict[str, str]) -> None:
+    """The new evaluation / web / question-policy keys are accepted in every config."""
+    cfg = load_config(REPO_CONFIG.parent / name, env=env)
+    assert cfg.generation.question.max_success_criteria == 2
+    assert cfg.evaluation.agent_metrics[:2] == ["relevance", "completion"]
+    assert cfg.web.max_step_count == 100
+
+
+def test_safechain_config_keeps_its_run_policy() -> None:
+    cfg = load_config(REPO_CONFIG.parent / "app.safechain.yaml", env={})
+    assert cfg.product.clarification_policy == "ask"
+    assert cfg.evaluation.ignore_dummy_cg_id_filter is True
+
+
+def test_agent_metrics_in_config_cannot_drop_required_ones(tmp_path: Path) -> None:
+    data = _minimal()
+    data["evaluation"] = {"agent_metrics": ["tool_selection"]}
+    with pytest.raises(ConfigError, match="cannot disable required metrics"):
+        load_config(_write(tmp_path, data), env={})

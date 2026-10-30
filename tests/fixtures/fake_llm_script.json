@@ -172,19 +172,29 @@
         "questions": [
           {
             "utterance": "Who were our top 10 card spenders over the last three months?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "rank",
+                  "subject": "employees by total card spend",
+                  "sources": [],
+                  "limit": 10
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
             "intent": {
               "task_type": "ranking"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low",
-              "complexity": "medium"
+              "ambiguity_level": "low"
             },
             "expectations": {
-              "expected_behavior": "Return the top 10 employees by total card spend for the last three months, keeping amounts separate per currency. Asking which currency to use is reasonable; refusing is not.",
+              "expected_behavior": "Return the top 10 employees by total card spend for the last three months. If amounts use several currencies, keep them separate. Refusing is not acceptable.",
               "success_criteria": [
                 "names the employees ranked by total card spend",
-                "keeps amounts separate per currency or states which currency is used",
                 "covers the requested time period"
               ]
             }
@@ -201,16 +211,27 @@
         "questions": [
           {
             "utterance": "How has our monthly card spend per merchant category changed this year?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "trend",
+                  "subject": "monthly card spend per merchant category",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
             "intent": {
               "task_type": "trend"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low",
-              "complexity": "medium"
+              "ambiguity_level": "low"
             },
             "expectations": {
-              "expected_behavior": "Show card spend per merchant category for each month of this year, or ask which currency to report in.",
+              "expected_behavior": "Show card spend per merchant category for each month of this year, or ask a clarifying question when the request is ambiguous.",
               "success_criteria": [
                 "shows card spend per merchant category for each month",
                 "covers the requested period"
@@ -229,13 +250,24 @@
         "questions": [
           {
             "utterance": "Can you forecast our card spend for next quarter?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "explain",
+                  "subject": "next-quarter card spend forecast",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
             "intent": {
               "task_type": "other"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low",
-              "complexity": "medium"
+              "ambiguity_level": "low"
             },
             "expectations": {
               "expected_behavior": "Say that forecasting is not supported yet; do not invent future figures.",
@@ -257,13 +289,24 @@
         "questions": [
           {
             "utterance": "How much can I spend per night on a hotel in Paris?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "lookup",
+                  "subject": "nightly hotel limit for Paris",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
             "intent": {
               "task_type": "other"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low",
-              "complexity": "medium"
+              "ambiguity_level": "low"
             },
             "expectations": {
               "expected_behavior": "State the nightly hotel limit that applies in Paris and whether taxes are included.",
@@ -285,13 +328,24 @@
         "questions": [
           {
             "utterance": "Can you approve my expense report for me?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "explain",
+                  "subject": "expense report approval",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
             "intent": {
               "task_type": "other"
             },
             "question_characteristics": {
               "style": "precise",
-              "ambiguity_level": "low",
-              "complexity": "medium"
+              "ambiguity_level": "low"
             },
             "expectations": {
               "expected_behavior": "Decline: the assistant cannot approve reports; say where approval is done.",
@@ -306,18 +360,34 @@
     },
     {
       "contains": [
-        "You evaluate how well a conversational product",
+        "You perform three narrow NL2SQL comparisons",
         "top 10 card spenders"
       ],
       "response": {
-        "relevancy": {
+        "semantic_correctness": {
           "score": 1,
-          "rationale": "Ranks employees by spend as asked."
+          "rationale": "Ranks employees by total spend for the period.",
+          "what_worked": [
+            "ranks employees by SUM(amount)"
+          ],
+          "what_didnt": []
         },
-        "correctness": {
+        "rules_adherence": {
           "score": 0,
-          "rationale": "Joins employees on merchant_id instead of the employee_id key the reference defines.",
-          "evidence": "c.merchant_id = e.employee_id"
+          "rationale": "Uses an undocumented relationship to combine the tables.",
+          "evidence": "c.merchant_id = e.employee_id",
+          "what_worked": [],
+          "what_didnt": [
+            "uses merchant_id instead of employee_id"
+          ]
+        },
+        "schema_faithfulness": {
+          "score": 1,
+          "rationale": "Every identifier is allowed.",
+          "what_worked": [
+            "uses allowed identifiers"
+          ],
+          "what_didnt": []
         },
         "criteria": [
           {
@@ -326,53 +396,21 @@
             "rationale": "Selects full_name ordered by total spend."
           },
           {
-            "criterion": "keeps amounts separate per currency or states which currency is used",
-            "status": "met",
-            "rationale": "Groups by currency_code."
-          },
-          {
             "criterion": "covers the requested time period",
             "status": "met",
             "rationale": "Filters the last 3 months."
           }
         ],
-        "claims": [
-          {
-            "text": "SUM(c.amount) AS total_spend",
-            "status": "supported",
-            "reason": "Total spend is the sum of amount.",
-            "reference_quote": "Transaction amount in the transaction currency (see currency_code)."
-          },
-          {
-            "text": "GROUP BY e.full_name, c.currency_code",
-            "status": "supported",
-            "reason": "Keeps currencies separate.",
-            "reference_quote": "Amounts in different currency_code values must not be summed directly."
-          },
-          {
-            "text": "c.merchant_id = e.employee_id",
-            "status": "contradicted",
-            "reason": "The reference joins card_transactions to employees on employee_id."
-          }
-        ],
         "findings": [
           {
-            "category": "correctness",
-            "description": "Joins card_transactions to employees on merchant_id, so spend is attributed to the wrong people.",
+            "category": "rules_adherence",
+            "description": "Joins card_transactions to employees on merchant_id, attributing spend to the wrong people.",
             "expected_behavior": "join on card_transactions.employee_id = employees.employee_id",
             "observed_behavior": "JOIN ... ON c.merchant_id = e.employee_id",
             "evidence": "c.merchant_id = e.employee_id",
             "severity": "high",
-            "evidence_status": "supported"
-          },
-          {
-            "category": "hallucination_rate",
-            "description": "The join condition contradicts the documented relationship.",
-            "expected_behavior": "use the documented employee_id relationship",
-            "observed_behavior": "merchant_id joined to employee_id",
-            "evidence": "c.merchant_id = e.employee_id",
-            "severity": "medium",
-            "evidence_status": "supported"
+            "evidence_status": "supported",
+            "related_tags": []
           }
         ],
         "overall_verdict": "fail"
@@ -380,13 +418,25 @@
     },
     {
       "contains": [
-        "You evaluate how well a conversational product",
+        "You evaluate an Agent response",
         "hotel in Paris"
       ],
       "response": {
-        "relevancy": {
+        "relevance": {
           "score": 1,
-          "rationale": "Answers the hotel question."
+          "rationale": "Answers the hotel question.",
+          "what_worked": [
+            "answers the question"
+          ],
+          "what_didnt": []
+        },
+        "completion": {
+          "score": 1,
+          "rationale": "States the limit and the tax treatment.",
+          "what_worked": [
+            "limit and taxes stated"
+          ],
+          "what_didnt": []
         },
         "criteria": [
           {
@@ -400,7 +450,6 @@
             "rationale": "Mentions taxes."
           }
         ],
-        "claims": [],
         "findings": [],
         "overall_verdict": "pass"
       }

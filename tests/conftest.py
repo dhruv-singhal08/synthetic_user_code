@@ -207,32 +207,46 @@ Judge = Callable[[str, str], dict[str, Any]]
 
 
 def scripted_judge(fail_on: str | None = None) -> Judge:
-    """A FakeLLM responder for the evaluation prompt: every metric passes (criteria copied
-    from the prompt, no claims), except answers containing ``fail_on``, which get a
-    correctness 0 (grounded) or relevancy 0 (ungrounded) backed by a supported finding."""
+    """A FakeLLM responder for both evaluation prompts: every metric passes (criteria copied
+    from the prompt), except answers containing ``fail_on``, which get semantic_correctness 0
+    (NL2SQL) or completion 0 (Agent) backed by a supported finding."""
 
     def judge(system: str, user: str) -> dict[str, Any]:
-        block = user.split("What was asked and what is expected:\n", 1)[1]
-        criteria = json.loads(block.split("\n\nProduct description", 1)[0])["success_criteria"]
-        grounded = "Cheat sheet of this scenario (AUTHORITATIVE" in user
-        bad = fail_on is not None and fail_on in user.split("Product answer:", 1)[1]
-        metric = "correctness" if grounded else "relevancy"
-        failed = {"score": 0, "rationale": "wrong", "evidence": fail_on}
-        ok = {"score": 1, "rationale": "fine"}
+        agent = "Agent response" in system
+        marker = (
+            "Question and expected behaviour:\n"
+            if agent
+            else "What was asked and what is expected:\n"
+        )
+        block = user.split(marker, 1)[1].split("\n\n", 1)[0]
+        criteria = json.loads(block)["success_criteria"]
+        answer = user.split("Product answer" if not agent else "Product response", 1)[1]
+        bad = fail_on is not None and fail_on in answer
+        metrics = (
+            ("relevance", "completion")
+            if agent
+            else (
+                "semantic_correctness",
+                "rules_adherence",
+                "schema_faithfulness",
+            )
+        )
+        failing = "completion" if agent else "semantic_correctness"
+        failed = {"score": 0, "rationale": "wrong", "evidence": fail_on, "what_didnt": ["wrong"]}
+        ok = {"score": 1, "rationale": "fine", "what_worked": ["fine"]}
         return {
-            "relevancy": failed if bad and metric == "relevancy" else ok,
-            "correctness": (failed if bad else ok) if grounded else None,
+            **{m: failed if bad and m == failing else ok for m in metrics},
             "criteria": [{"criterion": c, "status": "met", "rationale": "fine"} for c in criteria],
-            "claims": [],
             "findings": [
                 {
-                    "category": metric,
+                    "category": failing,
                     "description": "the answer is wrong",
                     "expected_behavior": "a correct answer",
                     "observed_behavior": "a wrong answer",
                     "evidence": fail_on,
                     "severity": "high",
                     "evidence_status": "supported",
+                    "related_tags": [],
                 }
             ]
             if bad

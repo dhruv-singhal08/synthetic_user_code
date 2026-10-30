@@ -185,13 +185,14 @@ def test_evaluate_file_mode(
     assert [(b["bug_id"], b["question_id"], b["execution_id"]) for b in bugs] == [
         ("BUG_001", "Q_002", "EXE_002")
     ]
-    assert [x["metrics"]["correctness"]["score"] for x in evaluations] == [1.0, 0.0]
+    assert [x["metrics"]["semantic_correctness"]["score"] for x in evaluations] == [1.0, 0.0]
     kpis = json.loads((out / "kpis.json").read_text(encoding="utf-8"))
-    assert kpis["task_success_rate"] == 0.5 and kpis["judged"] == 2
+    assert kpis["accuracy"] == kpis["task_success_rate"] == 0.5 and kpis["judged"] == 2
     assert (out / "kpis.csv").read_text(encoding="utf-8").startswith("kpi,value,n")
     # one generic judgement per response; no SQL plugin call (design v3)
     assert len(llm.calls) == 2
-    assert all("Cheat sheet of this scenario (AUTHORITATIVE" in c.user for c in llm.calls)
+    assert all("Allowed schema names, rules, and joins" in c.user for c in llm.calls)
+    assert all('"allowed_table": "card_transactions"' in c.user for c in llm.calls)
 
 
 def test_grounded_file_mode_needs_the_packs(

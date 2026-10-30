@@ -222,7 +222,9 @@ async def test_executor_records_outcomes_in_order(
     assert results[0].latency_ms is not None
     assert (results[0].product_id, results[0].adapter) == ("sample_nl2sql", "fixture")
     sent = adapter.asked[0]
-    assert (sent.question_id, sent.session_id) == ("Q_001", None)
+    # One stable session id per question (reused across clarification turns).
+    assert sent.question_id == "Q_001" and sent.session_id
+    assert results[0].session_id == sent.session_id
     assert sent.context == {"scenario_id": "SCN_001", "persona_id": "finance_controller"}
 
 

@@ -23,7 +23,18 @@ from pydantic import (
 
 from synthetic_user.core.exceptions import ConfigError, format_validation_error
 from synthetic_user.core.loaders import read_yaml_mapping
+from synthetic_user.core.trace import MAX_FIELD_CHARS
 from synthetic_user.models.base import AmbiguityLevel
+from synthetic_user.models.evaluation_profile import (
+    DEFAULT_AGENT_METRICS,
+    AgentMetric,
+    normalize_agent_metrics,
+)
+from synthetic_user.models.question import (
+    MAX_DELIVERABLES,
+    MAX_SUCCESS_CRITERIA,
+    QuestionComplexity,
+)
 
 DEFAULT_CONFIG_PATH = Path("config/app.yaml")
 CONFIG_PATH_ENV = "CONFIG_PATH"
@@ -34,6 +45,7 @@ LLM_PROVIDER_ENV = "LLM_PROVIDER"  # overrides llm.provider
 SAFECHAIN_MODEL_ENV = "SAFECHAIN_MODEL_ID"  # SafeChain YAML models key, e.g. "1"
 # Not CONFIG_PATH: that is this app's config; the adapter hands this path to SafeChain (D117).
 SAFECHAIN_CONFIG_ENV = "SAFECHAIN_CONFIG_PATH"
+DEFAULT_ARTIFACT_MAX_CHARS = 8_000
 # A header value made only of ${ENV_VAR} references (safe to record in the manifest).
 _ENV_ONLY = re.compile(r"(?:[^$]*\$\{[A-Za-z_][A-Za-z0-9_]*\})+[^$]*")
 
@@ -47,7 +59,15 @@ class LLMProvider(StrEnum):
 class ProductAdapterType(StrEnum):
     FIXTURE = "fixture"
     HTTP_JSON = "http_json"
+    HTTP_SSE = "http_sse"
     PYTHON = "python"
+
+
+class ClarificationPolicy(StrEnum):
+    """How a single-turn product call should handle missing details."""
+
+    ASK = "ask"
+    ASSUME = "assume"
 
 
 class _Section(BaseModel):
@@ -81,6 +101,10 @@ class ProductSettings(_Section):
     # Questions in flight at once. Separate from llm.max_concurrency: a local product often
     # answers one request at a time, and queued requests would use up their timeout (D184).
     max_concurrency: int = Field(default=1, ge=1, le=32)
+    # In ask mode the executor answers product clarifications as the persona and continues with
+    # one stable session id. In assume mode it appends a transport-only instruction so the
+    # product answers with reasonable assumptions. The generated/stored question is unchanged.
+    clarification_policy: ClarificationPolicy = ClarificationPolicy.ASSUME
 
 
 class ProductAdapterSettings(_Section):
@@ -97,9 +121,42 @@ class ReferenceSettings(_Section):
     max_chars: int = Field(default=200_000, ge=1_000)
 
 
+class EvaluationSettings(_Section):
+    # Temporary product workaround: omit only the exact cg_id IN ('DUMMY') predicate from the
+    # judge's copy of SQL. The original product response and SQL remain stored unchanged.
+    ignore_dummy_cg_id_filter: bool = False
+    # Per response artifact included in an evaluator prompt. The stored response is unchanged.
+    artifact_max_chars: int = Field(default=DEFAULT_ARTIFACT_MAX_CHARS, ge=1_000)
+    # Relevance and completion are mandatory. The other Agent metrics can be disabled here and
+    # overridden per UI run. Enabled optional metrics become not_applicable when the response
+    # does not expose the tool/retrieval information they require.
+    agent_metrics: list[AgentMetric] = Field(default_factory=lambda: list(DEFAULT_AGENT_METRICS))
+
+    @model_validator(mode="after")
+    def _valid_agent_metrics(self) -> Self:
+        normalized = normalize_agent_metrics(self.agent_metrics)
+        object.__setattr__(self, "agent_metrics", normalized)
+        return self
+
+
 class TraceSettings(_Section):
     # Append every LLM / product call (prompt in, output out) to runs/<run_id>/run.log (D202).
     enabled: bool = True
+    # Per prompt / response field. The marker records the original character count.
+    max_field_chars: int = Field(default=MAX_FIELD_CHARS, ge=1_000)
+
+
+class WebSettings(_Section):
+    """Web server defaults and request safety limits; CLI host/port flags override these."""
+
+    host: str = Field(default="127.0.0.1", min_length=1)
+    port: int = Field(default=8_000, ge=1, le=65_535)
+    max_upload_bytes: int = Field(default=10_000_000, ge=1)
+    max_persona_queries: int = Field(default=50, ge=1)
+    recent_runs_limit: int = Field(default=20, ge=1)
+    max_step_count: int = Field(default=100, ge=1)
+    max_reference_instructions_chars: int = Field(default=50_000, ge=1)
+    max_product_url_chars: int = Field(default=2_000, ge=1)
 
 
 class ScenarioGenerationSettings(_Section):
@@ -107,14 +164,36 @@ class ScenarioGenerationSettings(_Section):
     include_unsupported_scenarios: bool = True
     diversity_preference: str = Field(default="balanced", min_length=1)
     max_topup_rounds: int = Field(default=1, ge=0)
+    # Bounded representative SME examples sent to scenario generation when uploaded.
+    agent_golden_examples: int = Field(default=12, ge=1, le=50)
 
 
 class QuestionGenerationSettings(_Section):
     question_count: int = Field(default=1, ge=1)
+    # Golden-guided runs default to this value and reject larger per-scenario batches.
+    agent_golden_max_questions_per_scenario: int = Field(default=2, ge=1)
+    # Most relevant SME examples sent to each question-generation call when uploaded.
+    agent_golden_examples: int = Field(default=6, ge=1, le=20)
+    # Minimum operational breadth for supported golden-guided Agent questions. Complexity
+    # overrides can raise these per run; unsupported scenarios are exempt.
+    agent_min_tool_calls: int = Field(default=1, ge=0, le=12)
+    agent_min_data_sources: int = Field(default=1, ge=0, le=2)
+    # Hard policy: persona preferences can shape a question only inside these limits.
+    max_deliverables: int = Field(default=2, ge=1, le=MAX_DELIVERABLES)
+    max_sources: int = Field(default=1, ge=0, le=2)
+    max_success_criteria: int = Field(default=2, ge=1, le=MAX_SUCCESS_CRITERIA)
+    max_words: int = Field(default=40, ge=5, le=200)
+    allowed_complexities: list[QuestionComplexity] = Field(
+        default_factory=lambda: [QuestionComplexity.SIMPLE, QuestionComplexity.MEDIUM],
+        min_length=1,
+    )
+    allow_follow_ups: bool = False
+    allow_cross_source_comparison: bool = False
     ambiguity_level: AmbiguityLevel = AmbiguityLevel.LOW
     language: str = Field(default="en", min_length=1)
     allow_vague_questions: bool = False
     reject_reference_leaks: bool = True
+    near_duplicate_threshold: float = Field(default=0.8, gt=0.0, le=1.0)
 
 
 class GenerationSettings(_Section):
@@ -148,11 +227,13 @@ class AppConfig(_Section):
     product: ProductSettings = Field(default_factory=ProductSettings)
     product_adapter: ProductAdapterSettings
     reference: ReferenceSettings = Field(default_factory=ReferenceSettings)
+    evaluation: EvaluationSettings = Field(default_factory=EvaluationSettings)
     generation: GenerationSettings = Field(default_factory=GenerationSettings)
     paths: PathsSettings
     inputs: InputsSettings
     secrets: SecretsSettings = Field(default_factory=SecretsSettings)
     trace: TraceSettings = Field(default_factory=TraceSettings)
+    web: WebSettings = Field(default_factory=WebSettings)
 
     @model_validator(mode="after")
     def _provider_has_credentials(self) -> Self:

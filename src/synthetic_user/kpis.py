@@ -3,8 +3,8 @@
 Definitions (docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md section 11):
 - metric mean / pass rate over answers where the metric was scored; not_applicable and
   inconclusive answers are counted separately, never averaged in;
-- pass rate = share scoring 1 (hallucination_rate: share scoring 0);
-- task success rate = pass verdicts / judged answers;
+- metric pass rate = share scoring 1;
+- final accuracy = pass verdicts / judged answers (every applicable evaluation driver passes);
 - availability = 1 - (error + timeout) / questions asked;
 - latency p50 / p95 (nearest rank) over executions with a measured latency;
 - a bug is a known-gap bug when every one of its findings matches a known gap, else new;
@@ -17,32 +17,370 @@ from __future__ import annotations
 import csv
 import io
 import math
+import re
 from collections import Counter
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from synthetic_user.models.evaluation import (
     LOWER_IS_BETTER,
-    REPORTED_METRICS,
+    NL2SQL_METRICS,
     EvaluationResult,
+    Finding,
     MetricName,
     MetricStatus,
     Severity,
     Verdict,
 )
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
-from synthetic_user.models.kpi import GroupKpi, MetricKpi, RunKpis
+from synthetic_user.models.kpi import (
+    ConsolidatedIssue,
+    GroupKpi,
+    IssueSummary,
+    MetricKpi,
+    RunKpis,
+)
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
 
 _SEVERITY_RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2, Severity.CRITICAL: 3}
 METRIC_LABELS = {
-    MetricName.RELEVANCY: "Answer relevancy",
-    MetricName.CORRECTNESS: "Correctness",
-    MetricName.GROUNDEDNESS: "Groundedness",
-    MetricName.HALLUCINATION_RATE: "Hallucination rate",
-    MetricName.COMPLETENESS: "Completeness",
+    MetricName.SEMANTIC_CORRECTNESS: "Semantic Correctness",
+    MetricName.RULES_ADHERENCE: "Rules Adherence",
+    MetricName.SCHEMA_FAITHFULNESS: "Schema Faithfulness",
+    MetricName.RELEVANCE: "Relevance",
+    MetricName.COMPLETION: "Completion",
+    MetricName.TOOL_SELECTION: "Tool Selection",
+    MetricName.FAITHFULNESS: "Faithfulness",
+    MetricName.CONTEXT_PRECISION: "Context Precision",
+    MetricName.CONTEXT_RECALL: "Context Recall",
 }
+
+
+@dataclass(frozen=True)
+class _IssueTheme:
+    key: str
+    title: str
+    recommended_action: str
+    pattern: re.Pattern[str]
+
+
+# Ordered, product-actionable taxonomy. A finding belongs to exactly one theme; wording similarity
+# never creates a new category, so reports remain comparable from run to run.
+_ISSUE_THEMES = (
+    _IssueTheme(
+        "missing_requested_output",
+        "Requested output was not produced",
+        "Return the requested SQL/result, or ask one targeted clarification when required.",
+        re.compile(
+            r"\brefus(?:e|es|ed|al)\b|\bno sql\b|\bwithout (?:any )?sql\b|"
+            r"(?:fails?|failed) to (?:provide|produce|generate|return).{0,45}\bsql\b|"
+            r"does not (?:provide|produce|generate|return|include).{0,45}\bsql\b|"
+            r"generic (?:unsupported|inability|refusal) message",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "schema_and_identifiers",
+        "Uses undocumented tables or columns",
+        "Generate SQL using only tables and columns allowed by the question's cheat sheet.",
+        re.compile(
+            r"\b(?:undocumented|unallowed|unlisted|unknown)\b.{0,55}"
+            r"\b(?:column|table|field|identifier|schema)\b|"
+            r"\b(?:column|table|field|identifier)\b.{0,70}"
+            r"(?:not (?:in|present in|included in|listed in)|outside).{0,35}"
+            r"(?:allowed|schema|cheat sheet)|"
+            r"\ballowed (?:schema|column|table).{0,45}\b(?:missing|mismatch|inconsistent)",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "joins_and_relationships",
+        "Uses a missing or invalid join",
+        "Use the documented relationship and join keys required for the requested dimensions.",
+        re.compile(r"\bjoin(?:s|ed|ing)?\b|\brelationship\b|\bjoin keys?\b", re.IGNORECASE),
+    ),
+    _IssueTheme(
+        "reference_rule_compliance",
+        "Violates an applicable business or data rule",
+        "Apply the relevant cheat-sheet rule without introducing restrictions unrelated to "
+        "the ask.",
+        re.compile(
+            r"\b(?:violat(?:e|es|ed|ion)|contrary|conflict)\b.{0,80}\b(?:rule|requirement)\b|"
+            r"\b(?:sensitive|privacy|currency|currencies|date availability)\b|"
+            r"\bexpos(?:e|es|ed|ing)\b.{0,50}\bidentifier\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "unsupported_request_handling",
+        "Unsupported request was handled incorrectly",
+        "State the limitation and ask for the missing input or offer a supported alternative.",
+        re.compile(
+            r"\bunsupported\b|\bnot supported\b|\bmissing (?:merchant|dimension|metric)\b|"
+            r"\bpropose an alternative\b|\bflag (?:the|that).{0,40}\blimitation\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "clarification_handling",
+        "Clarification was missing or mishandled",
+        "Ask only for information needed to resolve a material ambiguity, then use the answer.",
+        re.compile(r"\bclarif(?:y|ies|ied|ication)\b|\bambig(?:uous|uity)\b", re.IGNORECASE),
+    ),
+    _IssueTheme(
+        "time_window_and_period",
+        "Uses the wrong or incomplete time window",
+        "Apply the requested date, month, quarter, or comparison period using documented fields.",
+        re.compile(
+            r"\b(?:year[- ]to[- ]date|ytd|month|quarter|date|period|recent|time window|"
+            r"year[- ]over[- ]year)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "filters_and_scope",
+        "Applies an incorrect filter or scope",
+        "Align filters with the requested population and remove scope-changing extras.",
+        re.compile(r"\bfilter(?:s|ed|ing)?\b|\bscope\b|\brestrict(?:s|ed|ing)?\b", re.IGNORECASE),
+    ),
+    _IssueTheme(
+        "aggregation_and_calculation",
+        "Uses an incorrect aggregation or calculation",
+        "Use the requested measure, aggregation grain, and documented formula.",
+        re.compile(
+            r"\b(?:sum|count|average|avg|aggregate|aggregation|calculation|formula|ratio|cpm)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "grouping_ranking_and_limits",
+        "Groups, ranks, or limits results incorrectly",
+        "Use the requested grouping dimension, ordering direction, and top-N limit.",
+        re.compile(
+            r"\b(?:group(?:s|ed|ing)?|rank(?:s|ed|ing)?|order(?:s|ed|ing)?|top[- ]?n|limit)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "wrong_intent_or_dimension",
+        "Answers a different intent, metric, or dimension",
+        "Align the generated answer with the requested business question and dimensions.",
+        re.compile(
+            r"\bdoes not (?:address|respond|engage)\b|\binstead (?:returns?|uses?|provides?)\b|"
+            r"\bwrong (?:intent|metric|dimension|question)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    _IssueTheme(
+        "response_format",
+        "Required response format is missing",
+        "Return all explicitly requested response components in the product's supported format.",
+        re.compile(r"\b(?:format|explanation|widget|artifact|output component)\b", re.IGNORECASE),
+    ),
+)
+
+_FALLBACK_THEMES = {
+    MetricName.SEMANTIC_CORRECTNESS.value: _IssueTheme(
+        "other_semantic_correctness",
+        "Query does not produce the requested result",
+        "Implement every applicable expected criterion for the requested result.",
+        re.compile(r"$^"),
+    ),
+    MetricName.RULES_ADHERENCE.value: _IssueTheme(
+        "other_rules_adherence",
+        "Query violates an applicable rule or join",
+        "Follow the applicable table/business rules and documented joins.",
+        re.compile(r"$^"),
+    ),
+    MetricName.SCHEMA_FAITHFULNESS.value: _IssueTheme(
+        "other_schema_faithfulness",
+        "Query uses undocumented tables or columns",
+        "Use only the allowed table and column names.",
+        re.compile(r"$^"),
+    ),
+    MetricName.RELEVANCE.value: _IssueTheme(
+        "other_relevance",
+        "Answer does not address the request",
+        "Respond directly to the user's request.",
+        re.compile(r"$^"),
+    ),
+    MetricName.COMPLETION.value: _IssueTheme(
+        "other_completion",
+        "Requested task is incomplete",
+        "Complete every requested output and action.",
+        re.compile(r"$^"),
+    ),
+    MetricName.TOOL_SELECTION.value: _IssueTheme(
+        "other_tool_selection",
+        "Tool or data-source selection does not match the task",
+        "Align tool, source, metric, grouping, filters and time window with the request.",
+        re.compile(r"$^"),
+    ),
+    MetricName.FAITHFULNESS.value: _IssueTheme(
+        "other_faithfulness",
+        "Answer claims are not supported by exposed context",
+        "Ground every material claim in the retrieved context or tool results.",
+        re.compile(r"$^"),
+    ),
+    MetricName.CONTEXT_PRECISION.value: _IssueTheme(
+        "other_context_precision",
+        "Retrieved context is not sufficiently relevant",
+        "Retrieve focused context that is relevant to the user's request.",
+        re.compile(r"$^"),
+    ),
+    MetricName.CONTEXT_RECALL.value: _IssueTheme(
+        "other_context_recall",
+        "Retrieved context misses required information",
+        "Retrieve all context necessary to complete the task.",
+        re.compile(r"$^"),
+    ),
+}
+
+
+def consolidate_findings(
+    evaluations: Sequence[EvaluationResult],
+    executions: Sequence[ExecutionRecord] = (),
+) -> IssueSummary:
+    """Group findings into stable, product-actionable themes without another LLM call."""
+
+    sql_expected = run_expects_sql(executions, evaluations)
+    no_sql_questions = {
+        execution.question_id
+        for execution in executions
+        if no_sql_execution(execution, sql_expected=sql_expected)
+    }
+    no_sql_findings = [
+        finding
+        for evaluation in evaluations
+        if evaluation.question_id in no_sql_questions
+        for finding in evaluation.findings
+    ]
+
+    rows = sorted(
+        (
+            (evaluation.question_id, finding)
+            for evaluation in evaluations
+            if evaluation.question_id not in no_sql_questions
+            for finding in evaluation.findings
+        ),
+        key=lambda item: (
+            item[1].matches_known_gap,
+            -_SEVERITY_RANK[item[1].severity],
+            item[1].description.casefold(),
+            item[0],
+        ),
+    )
+    groups: dict[str, tuple[_IssueTheme, list[tuple[str, Finding]]]] = {}
+    for question_id, finding in rows:
+        theme = _issue_theme(finding)
+        groups.setdefault(theme.key, (theme, []))[1].append((question_id, finding))
+
+    issues = []
+    ordered_groups = sorted(
+        groups.values(),
+        key=lambda group: (
+            -max(_SEVERITY_RANK[finding.severity] for _, finding in group[1]),
+            -len({question_id for question_id, _ in group[1]}),
+            group[0].title,
+        ),
+    )
+    for theme, items in ordered_groups:
+        descriptions = sorted(
+            {finding.description for _, finding in items}, key=lambda text: (len(text), text)
+        )
+        questions = sorted({question_id for question_id, _ in items}, key=_numeric_id)
+        worst = max(
+            (finding.severity for _, finding in items),
+            key=lambda value: _SEVERITY_RANK[value],
+        )
+        issues.append(
+            ConsolidatedIssue(
+                issue_id="ISSUE_999",
+                theme=theme.key,
+                categories=sorted({finding.category for _, finding in items}),
+                title=theme.title,
+                recommended_action=theme.recommended_action,
+                severity=worst,
+                occurrences=len(items),
+                affected_question_ids=questions,
+                finding_ids=[finding.finding_id for _, finding in items],
+                examples=descriptions[:3],
+                known_gap=all(finding.matches_known_gap for _, finding in items),
+            )
+        )
+    if no_sql_questions:
+        categories = {finding.category for finding in no_sql_findings}
+        if any(
+            execution.question_id in no_sql_questions
+            and execution.outcome is ProductOutcome.TIMEOUT
+            for execution in executions
+        ):
+            categories.add("availability")
+        if not categories:
+            categories.add(MetricName.SEMANTIC_CORRECTNESS.value)
+        worst = max(
+            (finding.severity for finding in no_sql_findings),
+            key=lambda value: _SEVERITY_RANK[value],
+            default=Severity.HIGH,
+        )
+        issues.append(
+            ConsolidatedIssue(
+                issue_id="ISSUE_999",
+                theme="no_sql_generated",
+                categories=sorted(categories),
+                title="No SQL generated",
+                recommended_action="Return a SQL query before the request times out.",
+                severity=worst,
+                occurrences=len(no_sql_questions),
+                affected_question_ids=sorted(no_sql_questions, key=_numeric_id),
+                finding_ids=sorted(
+                    {finding.finding_id for finding in no_sql_findings}, key=_numeric_id
+                ),
+                examples=[NO_SQL_REASON],
+                known_gap=False,
+            )
+        )
+    issues = [
+        issue.model_copy(update={"issue_id": f"ISSUE_{index:03d}"})
+        for index, issue in enumerate(
+            sorted(
+                issues,
+                key=lambda issue: (
+                    -_SEVERITY_RANK[issue.severity],
+                    -len(issue.affected_question_ids),
+                    issue.title,
+                ),
+            ),
+            start=1,
+        )
+    ]
+    return IssueSummary(
+        total_findings=len(rows) + len(no_sql_findings),
+        affected_questions=len({question_id for question_id, _ in rows} | no_sql_questions),
+        issues=issues,
+    )
+
+
+def _issue_theme(finding: Finding) -> _IssueTheme:
+    text = " ".join(
+        (
+            finding.description,
+            finding.expected_behavior,
+            finding.observed_behavior,
+        )
+    )
+    return next(
+        (theme for theme in _ISSUE_THEMES if theme.pattern.search(text)),
+        _FALLBACK_THEMES[finding.category],
+    )
+
+
+def _numeric_id(value: str) -> tuple[str, int]:
+    prefix, _, suffix = value.rpartition("_")
+    return prefix, int(suffix) if suffix.isdigit() else 0
 
 
 def compute_kpis(
@@ -75,6 +413,18 @@ def compute_kpis(
             new_bugs[worst.severity.value] += 1
 
     by_scenario = {s.id: s for s in scenarios}
+    active_metrics = (
+        tuple(
+            dict.fromkeys(
+                metric
+                for evaluation in evaluations
+                for metric in (
+                    evaluation.metrics.by_name() if evaluation.metrics is not None else ()
+                )
+            )
+        )
+        or NL2SQL_METRICS
+    )
     return RunKpis(
         run_id=run_id,
         product_id=product_id,
@@ -84,8 +434,9 @@ def compute_kpis(
         outcomes={o.value: outcomes.get(o.value, 0) for o in ProductOutcome},
         judged=len(judged),
         verdicts={v.value: verdicts.get(v.value, 0) for v in Verdict},
+        accuracy=_ratio(verdicts[Verdict.PASS.value], len(judged)),
         task_success_rate=_ratio(verdicts[Verdict.PASS.value], len(judged)),
-        metrics=[_metric_kpi(name, judged) for name in REPORTED_METRICS],
+        metrics=[_metric_kpi(name, judged) for name in active_metrics],
         availability=_round(1 - failed_calls / asked) if asked else None,
         latency_p50_ms=_percentile(latencies, 50),
         latency_p95_ms=_percentile(latencies, 95),
@@ -112,10 +463,10 @@ def kpis_csv(kpis: RunKpis) -> str:
         rows.append([kpi, "" if value is None else f"{value:g}", str(n), excluded, note])
 
     row(
-        "Task success rate",
-        kpis.task_success_rate,
+        "Accuracy",
+        kpis.accuracy,
         kpis.judged,
-        note="pass verdicts / judged answers",
+        note="answers passing every applicable evaluation check / evaluated answers",
     )
     for m in kpis.metrics:
         excluded = f"{m.not_applicable} not applicable, {m.inconclusive} inconclusive"
@@ -145,7 +496,12 @@ def kpis_csv(kpis: RunKpis) -> str:
 
 
 def _metric_kpi(name: MetricName, judged: Sequence[EvaluationResult]) -> MetricKpi:
-    results = [ev.metrics.by_name()[name] for ev in judged if ev.metrics is not None]
+    results = [
+        result
+        for ev in judged
+        if ev.metrics is not None
+        if (result := ev.metrics.by_name().get(name)) is not None
+    ]
     scores = [r.score for r in results if r.status is MetricStatus.SCORED and r.score is not None]
     lower = name in LOWER_IS_BETTER
     best = 0.0 if lower else 1.0
@@ -176,7 +532,16 @@ def _breakdown(
                 questions=len(items),
                 judged=len(judged),
                 pass_rate=_ratio(passed, len(judged)),
-                metric_means={m: _metric_kpi(m, judged).mean for m in REPORTED_METRICS},
+                metric_means={
+                    m: _metric_kpi(m, judged).mean
+                    for m in dict.fromkeys(
+                        metric
+                        for evaluation in judged
+                        for metric in (
+                            evaluation.metrics.by_name() if evaluation.metrics is not None else ()
+                        )
+                    )
+                },
             )
         )
     return out

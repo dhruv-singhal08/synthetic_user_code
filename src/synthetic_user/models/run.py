@@ -9,6 +9,7 @@ from typing import Any, Self
 from pydantic import Field, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
+from synthetic_user.models.evaluation_profile import EvaluationProfile
 
 _SECRET_KEY_MARKERS = ("secret", "api_key", "password")
 
@@ -36,6 +37,9 @@ class RunManifest(StrictModel):
     product_id: NonEmptyStr
     mode: GenerationMode
     reference_id: NonEmptyStr | None = None
+    # None keeps manifests created before profile-aware generation readable. New runs always set
+    # this so changing profile invalidates scenario/question artifacts.
+    evaluation_profile: EvaluationProfile | None = None
     llm_provider: NonEmptyStr
     llm_model: NonEmptyStr
     pipeline_version: NonEmptyStr

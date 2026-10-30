@@ -11,10 +11,13 @@ from typing import Any, get_args, get_origin
 import pytest
 from pydantic import BaseModel
 
-from synthetic_user.models.evaluation import EvaluationDraft
+from synthetic_user.models.evaluation import AgentEvaluationDraft, EvaluationDraft, MetricName
 from synthetic_user.models.question import QuestionBatchDraft
 from synthetic_user.models.reference import CatalogPackDraft, DocumentPackDraft, ReferenceKind
 from synthetic_user.models.scenario import ScenarioBatchDraft
+from synthetic_user.prompts.agent_response_evaluation import (
+    evaluation_example as agent_evaluation_example,
+)
 from synthetic_user.prompts.contracts import render_contract
 from synthetic_user.prompts.question import QUESTION_EXAMPLE
 from synthetic_user.prompts.response_evaluation import evaluation_example
@@ -41,6 +44,8 @@ def _assert_matches(example: Any, model: type[BaseModel], path: str) -> None:
         if not isinstance(value, dict):
             continue
         candidates = _models(field.annotation)
+        if not candidates:  # a plain mapping such as golden_set_criteria: dict[str, str]
+            continue
         if len(candidates) > 1:  # a union: the example shows the right member
             candidates = [m for m in candidates if set(value) == set(m.model_fields)]
         assert len(candidates) == 1, f"{path}.{name}: no single model fits {sorted(value)}"
@@ -65,11 +70,25 @@ def test_question_example_matches_the_model() -> None:
     _assert_matches(QUESTION_EXAMPLE, QuestionBatchDraft, "questions")
 
 
-@pytest.mark.parametrize("grounded", [True, False])
-def test_evaluation_example_matches_the_model(grounded: bool) -> None:
-    example = evaluation_example(grounded)
-    assert (example["correctness"] is None) is (not grounded)
-    _assert_matches({**example, "correctness": example["relevancy"]}, EvaluationDraft, "eval")
+def test_evaluation_example_matches_the_model() -> None:
+    _assert_matches(evaluation_example(), EvaluationDraft, "eval")
+
+
+def test_agent_evaluation_example_with_every_metric_matches_the_model() -> None:
+    agent_metrics = [
+        MetricName.RELEVANCE,
+        MetricName.COMPLETION,
+        MetricName.TOOL_SELECTION,
+        MetricName.FAITHFULNESS,
+        MetricName.CONTEXT_PRECISION,
+        MetricName.CONTEXT_RECALL,
+    ]
+    _assert_matches(agent_evaluation_example(agent_metrics), AgentEvaluationDraft, "agent")
+
+
+def test_agent_evaluation_example_lists_only_applicable_metrics() -> None:
+    example = agent_evaluation_example([MetricName.RELEVANCE, MetricName.COMPLETION])
+    assert "tool_selection" not in example and "relevance" in example
 
 
 @pytest.mark.parametrize(
@@ -78,7 +97,7 @@ def test_evaluation_example_matches_the_model(grounded: bool) -> None:
         scenario_example(ReferenceKind.DATA_CATALOG),
         scenario_example(None),
         QUESTION_EXAMPLE,
-        evaluation_example(True),
+        evaluation_example(),
     ],
 )
 def test_contracts_stay_short(example: dict[str, Any]) -> None:

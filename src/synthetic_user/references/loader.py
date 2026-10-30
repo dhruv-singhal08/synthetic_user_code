@@ -28,7 +28,7 @@ Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 REFERENCE_SUFFIXES = frozenset({".yaml", ".yml", ".json"})
 GUIDE_SUFFIXES = frozenset({".txt", ".md", ".markdown"})
 KINDS = ", ".join(k.value for k in ReferenceKind)
-_CONTENT: TypeAdapter[Any] = TypeAdapter(ReferenceContent)  # type: ignore[arg-type]
+_CONTENT: TypeAdapter[Any] = TypeAdapter(ReferenceContent)
 
 
 def parse_reference(
@@ -70,7 +70,11 @@ def parse_reference(
         if Path(name).suffix.lower() not in GUIDE_SUFFIXES:
             raise InputAssetError(f"Usage instructions {name}: use a .md or .txt file")
         instructions = _text(guide, name).strip() or None
-    canonical = json.dumps(parsed.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
+    canonical_content = parsed.model_dump(mode="json")
+    # Adding optional Agent metadata must not change ids of existing reference files.
+    if canonical_content.get("agent_context") is None:
+        canonical_content.pop("agent_context", None)
+    canonical = json.dumps(canonical_content, sort_keys=True, ensure_ascii=False)
     digest = hashlib.sha256(f"{canonical}\n\x00\n{instructions or ''}".encode()).hexdigest()[:8]
     reference = Reference(
         reference_id=f"{Path(source_name).stem}-{digest}",
@@ -79,7 +83,7 @@ def parse_reference(
         instructions=instructions,
         instructions_name=Path(guide_name).name if guide_name and instructions else None,
     )
-    size = len(reference.render())
+    size = reference.rendered_chars()
     if size > max_chars:
         raise InputAssetError(
             f"Reference {source_name} has {size:,} characters as used in prompts; the limit is "
@@ -113,7 +117,7 @@ def load_optional_reference(
         "Reference %s (%s, %d chars, instructions: %s): mode %s",
         reference.reference_id,
         reference.kind.value,
-        len(reference.render()),
+        reference.rendered_chars(),
         reference.instructions_name or "default",
         GenerationMode.GROUNDED,
     )

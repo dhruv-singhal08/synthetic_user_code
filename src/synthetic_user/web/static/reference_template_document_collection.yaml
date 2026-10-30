@@ -4,6 +4,24 @@ kind: document_collection
 name: My knowledge base                        # what this collection covers
 description: Documents the product answers from   # (optional)
 
+# Required for Agent runs.
+agent_context:
+  data_sources:
+    - name: policy_documents
+      aliases: [Policy documents]
+      description: The approved policy corpus available to retrieval.
+  tools:
+    - name: search_policies
+      description: Retrieves policy passages relevant to the user's question.
+      data_sources: [policy_documents]
+  workflow:
+    - name: retrieval
+      description: Selects and retrieves relevant policy passages.
+    - name: response_synthesis
+      description: Answers only from the retrieved policy evidence.
+  rules:
+    - If the approved documents do not answer the question, state that the answer is unavailable.
+
 documents:
   - name: Hotel policy                         # unique name
     summary: >                                 # free text: what the document says (key facts, limits, rules...)

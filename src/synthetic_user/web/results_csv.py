@@ -16,7 +16,6 @@ import json
 from collections.abc import Sequence
 
 from synthetic_user.models.evaluation import (
-    HALLUCINATED,
     EvaluationResult,
     MetricName,
     MetricStatus,
@@ -33,15 +32,25 @@ from synthetic_user.models.execution import (
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import ReferencePack, render_join
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.no_sql import NO_SQL_REASON
 
 BULLET = "• "
 
-SCENARIO_COLUMNS = ["scenario_id", "mode", "scenario_title", "business_goal"]
+SCENARIO_COLUMNS = ["scenario_id", "golden_case_id", "mode", "scenario_title", "business_goal"]
 QUESTION_COLUMNS = [
     "question_id",
     "question",
     "expected_behavior",
     "success_criteria",
+    "expected_tools",
+    "expected_journey",
+    "expected_time_period",
+    "expected_data_sources",
+    "expected_context",
+    "prohibited_behaviors",
+    "reference_context",
+    "golden_set_criteria",
+    "expected_behavior_contract",
 ]
 # The scenario's cheat sheet: tables (with columns) or documents; joins and rules.
 REFERENCE_COLUMNS = ["cheat_sheet", "cheat_sheet_rules"]
@@ -52,17 +61,26 @@ EXECUTION_COLUMNS = [
     "product_message",
     "latency_ms",
 ]
-# Each reported metric with the reason behind its score, then the verdict and its reason
-# (D206; groundedness is not reported for now).
+# Each observable metric with the reason behind its score, then the verdict and its reason.
 EVALUATION_COLUMNS = [
-    "relevancy",
-    "relevancy_reason",
-    "correctness",
-    "correctness_reason",
-    "hallucination_rate",
-    "hallucination_reason",
-    "completeness",
-    "completeness_reason",
+    "semantic_correctness",
+    "semantic_correctness_reason",
+    "rules_adherence",
+    "rules_adherence_reason",
+    "schema_faithfulness",
+    "schema_faithfulness_reason",
+    "relevance",
+    "relevance_reason",
+    "completion",
+    "completion_reason",
+    "tool_selection",
+    "tool_selection_reason",
+    "faithfulness",
+    "faithfulness_reason",
+    "context_precision",
+    "context_precision_reason",
+    "context_recall",
+    "context_recall_reason",
     "final_verdict",
     "verdict_reason",
     "bug_ids",
@@ -132,6 +150,7 @@ def _complete(row: dict[str, str]) -> dict[str, str]:
 def _scenario_cells(s: Scenario) -> dict[str, str]:
     return {
         "scenario_id": s.id,
+        "golden_case_id": s.golden_case_id or "",
         "mode": s.mode.value,
         "scenario_title": s.title,
         "business_goal": s.business_goal,
@@ -160,6 +179,51 @@ def _question_cells(q: QuestionCase) -> dict[str, str]:
         "question": q.utterance,
         "expected_behavior": e.expected_behavior,
         "success_criteria": bullets(e.success_criteria),
+        "expected_tools": bullets(e.expected_tools),
+        "expected_journey": e.expected_journey or "",
+        "expected_time_period": e.expected_time_period or "",
+        "expected_data_sources": bullets(e.expected_data_sources),
+        "expected_context": bullets(e.expected_context),
+        "prohibited_behaviors": bullets(e.prohibited_behaviors),
+        "reference_context": bullets(e.reference_context),
+        "golden_set_criteria": bullets(
+            [f"{label}: {value}" for label, value in e.golden_set_criteria.items()]
+        ),
+        "expected_behavior_contract": "\n".join(
+            part
+            for part in (
+                f"Behavior: {e.expected_behavior}",
+                f"Must have: {bullets(e.success_criteria)}",
+                f"Expected tools: {bullets(e.expected_tools)}" if e.expected_tools else "",
+                f"Expected journey: {e.expected_journey}" if e.expected_journey else "",
+                (
+                    f"Expected time period: {e.expected_time_period}"
+                    if e.expected_time_period
+                    else ""
+                ),
+                (
+                    f"Expected data sources: {bullets(e.expected_data_sources)}"
+                    if e.expected_data_sources
+                    else ""
+                ),
+                f"Expected context: {bullets(e.expected_context)}" if e.expected_context else "",
+                (
+                    f"Reference definitions: {bullets(e.reference_context)}"
+                    if e.reference_context
+                    else ""
+                ),
+                (f"Must not: {bullets(e.prohibited_behaviors)}" if e.prohibited_behaviors else ""),
+                (
+                    "Uploaded golden-set criteria: "
+                    + bullets(
+                        [f"{label}: {value}" for label, value in e.golden_set_criteria.items()]
+                    )
+                    if e.golden_set_criteria
+                    else ""
+                ),
+            )
+            if part
+        ),
     }
 
 
@@ -191,7 +255,9 @@ def _execution_cells(e: ExecutionRecord) -> dict[str, str]:
 def _metric_cell(ev: EvaluationResult, name: MetricName) -> str:
     if ev.metrics is None:
         return ""
-    result = ev.metrics.by_name()[name]
+    result = ev.metrics.by_name().get(name)
+    if result is None:
+        return ""
     if result.status is MetricStatus.INCONCLUSIVE:
         return "inconclusive"
     return f"{result.score:g}" if result.score is not None else ""
@@ -199,26 +265,25 @@ def _metric_cell(ev: EvaluationResult, name: MetricName) -> str:
 
 def _judged_reason(ev: EvaluationResult, name: MetricName) -> str:
     """The judge's reason for a 0 / 0.5 / 1 score, with the quote it relied on."""
+    if NO_SQL_REASON in ev.notes:
+        return (
+            NO_SQL_REASON
+            if name is MetricName.SEMANTIC_CORRECTNESS
+            else "not applicable: no SQL query was generated to assess"
+        )
     if ev.metrics is None:
         return ""
-    result = ev.metrics.by_name()[name]
+    result = ev.metrics.by_name().get(name)
+    if result is None:
+        return ""
     if result.status is MetricStatus.NOT_APPLICABLE:
         return f"not applicable: {result.rationale}"
     return f"{result.rationale} - '{result.evidence}'" if result.evidence else result.rationale
 
 
-def _hallucination_reason(ev: EvaluationResult) -> str:
-    if ev.metrics is None:
-        return ""
-    bad = [c for c in ev.claims if c.status in HALLUCINATED]
-    if bad:
-        return bullets([f"'{c.text}' ({c.status.value}): {c.reason}" for c in bad])
-    if ev.claims:
-        return f"No hallucinated statements ({len(ev.claims)} checked)"
-    return ev.metrics.hallucination_rate.rationale
-
-
 def _verdict_reason(ev: EvaluationResult) -> str:
+    if NO_SQL_REASON in ev.notes:
+        return NO_SQL_REASON
     if ev.verdict is None:
         return ""
     if ev.findings:
@@ -233,16 +298,24 @@ def _verdict_reason(ev: EvaluationResult) -> str:
 
 def _evaluation_cells(ev: EvaluationResult) -> dict[str, str]:
     return {
-        "relevancy": _metric_cell(ev, MetricName.RELEVANCY),
-        "relevancy_reason": _judged_reason(ev, MetricName.RELEVANCY),
-        "correctness": _metric_cell(ev, MetricName.CORRECTNESS),
-        "correctness_reason": _judged_reason(ev, MetricName.CORRECTNESS),
-        "hallucination_rate": _metric_cell(ev, MetricName.HALLUCINATION_RATE),
-        "hallucination_reason": _hallucination_reason(ev),
-        "completeness": _metric_cell(ev, MetricName.COMPLETENESS),
-        "completeness_reason": bullets(
-            [f"{c.status.value}: {c.criterion}" for c in ev.criteria_results]
-        ),
+        "semantic_correctness": _metric_cell(ev, MetricName.SEMANTIC_CORRECTNESS),
+        "semantic_correctness_reason": _judged_reason(ev, MetricName.SEMANTIC_CORRECTNESS),
+        "rules_adherence": _metric_cell(ev, MetricName.RULES_ADHERENCE),
+        "rules_adherence_reason": _judged_reason(ev, MetricName.RULES_ADHERENCE),
+        "schema_faithfulness": _metric_cell(ev, MetricName.SCHEMA_FAITHFULNESS),
+        "schema_faithfulness_reason": _judged_reason(ev, MetricName.SCHEMA_FAITHFULNESS),
+        "relevance": _metric_cell(ev, MetricName.RELEVANCE),
+        "relevance_reason": _judged_reason(ev, MetricName.RELEVANCE),
+        "completion": _metric_cell(ev, MetricName.COMPLETION),
+        "completion_reason": _judged_reason(ev, MetricName.COMPLETION),
+        "tool_selection": _metric_cell(ev, MetricName.TOOL_SELECTION),
+        "tool_selection_reason": _judged_reason(ev, MetricName.TOOL_SELECTION),
+        "faithfulness": _metric_cell(ev, MetricName.FAITHFULNESS),
+        "faithfulness_reason": _judged_reason(ev, MetricName.FAITHFULNESS),
+        "context_precision": _metric_cell(ev, MetricName.CONTEXT_PRECISION),
+        "context_precision_reason": _judged_reason(ev, MetricName.CONTEXT_PRECISION),
+        "context_recall": _metric_cell(ev, MetricName.CONTEXT_RECALL),
+        "context_recall_reason": _judged_reason(ev, MetricName.CONTEXT_RECALL),
         "final_verdict": ev.verdict.value if ev.verdict else "recorded_only",
         "verdict_reason": _verdict_reason(ev),
         "bug_ids": bullets([b.bug_id for b in ev.bug_candidates]),

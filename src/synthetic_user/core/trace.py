@@ -38,11 +38,12 @@ _RULE = "-" * 100
 class RunLog:
     """Appends readable blocks for one step of one run to ``path``."""
 
-    def __init__(self, path: Path, run_id: str, step: str) -> None:
+    def __init__(self, path: Path, run_id: str, step: str, max_field_chars: int) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.run_id = run_id
         self.step = step
+        self.max_field_chars = max_field_chars
         self._file: IO[str] = path.open("a", encoding="utf-8")
         self._seq = 0
         self._started = time.perf_counter()
@@ -76,19 +77,24 @@ class _RunLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if getattr(record, "run_id", None) != self._log.run_id:
             return
-        self._log.write_text(f"{_now()}  {record.levelname} {record.getMessage()}\n")
+        self._log.write_text(
+            f"{_now()}  {record.levelname} {_apply_redactions(record.getMessage())}\n"
+        )
 
 
 _log: ContextVar[RunLog | None] = ContextVar("run_log", default=None)
 _subject: ContextVar[str | None] = ContextVar("run_log_subject", default=None)
 _purpose: ContextVar[tuple[str, int] | None] = ContextVar("run_log_purpose", default=None)
 _last_call: ContextVar[int | None] = ContextVar("run_log_last_call", default=None)
+_redactions: ContextVar[tuple[tuple[str, str], ...]] = ContextVar("run_log_redactions", default=())
 
 
 @contextmanager
-def trace_step(path: Path, run_id: str, step: str) -> Iterator[RunLog]:
+def trace_step(
+    path: Path, run_id: str, step: str, *, max_field_chars: int = MAX_FIELD_CHARS
+) -> Iterator[RunLog]:
     """Append every traced call (and the run's log lines) made inside this block to ``path``."""
-    log = RunLog(path, run_id, step)
+    log = RunLog(path, run_id, step, max_field_chars)
     handler = _RunLogHandler(log)
     package_logger = logging.getLogger("synthetic_user")
     package_logger.addHandler(handler)
@@ -119,6 +125,20 @@ def trace_attempt(purpose: str, attempt: int) -> Iterator[None]:
         yield
     finally:
         _purpose.reset(token)
+
+
+@contextmanager
+def trace_redactions(*replacements: tuple[str, str]) -> Iterator[None]:
+    """Replace transport-only text in every nested trace and run-log record.
+
+    A product can receive an augmented single-turn utterance while run.log continues to show
+    only the canonical generated question.
+    """
+    token = _redactions.set((*_redactions.get(), *replacements))
+    try:
+        yield
+    finally:
+        _redactions.reset(token)
 
 
 def tracing() -> bool:
@@ -201,12 +221,20 @@ def _section(title: str, value: Any) -> str:
         text = value
     else:
         text = json.dumps(value, indent=2, ensure_ascii=False, default=str)
-    return f">>> {title}\n{_clip(text).rstrip()}\n"
+    return f">>> {title}\n{_clip(_apply_redactions(text)).rstrip()}\n"
+
+
+def _apply_redactions(text: str) -> str:
+    for hidden, visible in _redactions.get():
+        text = text.replace(hidden, visible)
+    return text
 
 
 def _clip(text: str) -> str:
-    if len(text) > MAX_FIELD_CHARS:
-        return text[:MAX_FIELD_CHARS] + f"\n[... cut: {len(text):,} chars in total]"
+    log = _log.get()
+    max_chars = log.max_field_chars if log is not None else MAX_FIELD_CHARS
+    if len(text) > max_chars:
+        return text[:max_chars] + f"\n[... cut: {len(text):,} chars in total]"
     return text
 
 

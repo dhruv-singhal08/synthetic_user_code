@@ -19,9 +19,19 @@ __all__ = ["ProductAdapter", "ProductRequest", "ProductResponse", "UnavailableAd
 
 class ProductRequest(StrictModel):
     question_id: NonEmptyStr
+    # ``utterance`` is delivered to the product. ``canonical_utterance`` is the generated
+    # question retained for fixture matching and safe tracing when a transport-only instruction
+    # has been appended. It is excluded from serialization so adapters cannot send it as a
+    # second request field accidentally.
     utterance: NonEmptyStr
+    canonical_utterance: NonEmptyStr | None = Field(default=None, exclude=True, repr=False)
     session_id: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def report_utterance(self) -> str:
+        """Question text that may be persisted or shown in reports and traces."""
+        return self.canonical_utterance or self.utterance
 
 
 @runtime_checkable

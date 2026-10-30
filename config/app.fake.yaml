@@ -14,8 +14,9 @@ llm:
 product:
   timeout_seconds: 30
   max_concurrency: 4
+  clarification_policy: assume
 product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
-  type: fixture             # fixture | http_json | python
+  type: fixture             # fixture | http_json | http_sse | python
   options:
     path: ./data/fixtures/product_responses/sample_responses.json
 reference:
@@ -26,8 +27,13 @@ generation:
     include_unsupported_scenarios: true
     diversity_preference: balanced
     max_topup_rounds: 0
+    agent_golden_examples: 12
   question:
     question_count: 1
+    agent_golden_max_questions_per_scenario: 2
+    agent_min_tool_calls: 1
+    agent_min_data_sources: 1
+    agent_golden_examples: 6
     ambiguity_level: low
     language: en
     allow_vague_questions: false

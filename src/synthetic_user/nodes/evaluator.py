@@ -1,10 +1,10 @@
 """Node 5: evaluate product executions (routing + assembly).
 
-Routing by outcome (design v3 KPIs):
-- answered -> one LLM judgement, then the 5 metrics (relevancy, correctness, groundedness,
-              hallucination_rate, completeness), claims and the verdict computed by code
-              (nodes/evaluators/generic.py). Grounded questions are judged against the
-              scenario's Reference Pack.
+Routing by outcome:
+- answered -> one LLM judgement, then semantic correctness, rules adherence, schema
+              faithfulness and the verdict computed by code (nodes/evaluators/generic.py).
+              A scenario Reference Pack supplies only allowed table/column names, not
+              factual answer ground truth.
 - clarification / denied / error / timeout -> recorded_only, verdict None, no LLM call.
 
 Artifact plugins (nodes/evaluators/plugins/) are disconnected for now: every product goes
@@ -29,9 +29,13 @@ from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import ArtifactIntegrityError
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
 from synthetic_user.core.trace import trace_subject
+from synthetic_user.evaluation_trace import criterion_tag, link_finding_tags, merge_finding_tags
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.models.evaluation import (
+    AgentEvaluationDraft,
     BugCandidate,
+    CriterionResult,
+    EvaluationDraft,
     EvaluationResult,
     EvaluationStatus,
     EvidenceStatus,
@@ -40,12 +44,23 @@ from synthetic_user.models.evaluation import (
     Severity,
     Verdict,
 )
-from synthetic_user.models.execution import AnsweredResponse, ExecutionRecord
+from synthetic_user.models.evaluation_profile import AgentMetric, EvaluationProfile
+from synthetic_user.models.execution import (
+    AnsweredResponse,
+    ConversationTurnKind,
+    ExecutionRecord,
+)
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.no_sql import NO_SQL_REASON, no_sql_execution, product_expects_sql
+from synthetic_user.nodes.evaluators.agent import (
+    AgentEvaluator,
+    AgentJudgement,
+    compute_agent_metrics,
+)
 from synthetic_user.nodes.evaluators.generic import (
     GenericEvaluator,
     GenericJudgement,
@@ -75,13 +90,17 @@ class Evaluator:
         logger: Logger,
         *,
         reference: Reference | None,
+        profile: EvaluationProfile = EvaluationProfile.NL2SQL,
+        agent_metrics: Sequence[AgentMetric] | None = None,
         id_generator: SequentialIdGenerator | None = None,
     ) -> None:
         self._settings = settings
         self._log = logger
         self._ids = id_generator or SequentialIdGenerator()
         self._reference = reference
+        self._profile = profile
         self._generic = GenericEvaluator(llm, settings, logger)
+        self._agent = AgentEvaluator(llm, settings, logger, enabled_metrics=agent_metrics)
 
     async def evaluate(self, case: EvaluationCase, product: ProductDescription) -> EvaluationResult:
         return (await self.evaluate_many([case], product))[0]
@@ -111,7 +130,7 @@ class Evaluator:
         case: EvaluationCase,
         product: ProductDescription,
         semaphore: asyncio.Semaphore,
-    ) -> GenericJudgement | None:
+    ) -> GenericJudgement | AgentJudgement | None:
         response = case.execution.response
         if not isinstance(response, AnsweredResponse):
             return None  # clarification / denied / error / timeout: recorded only
@@ -122,8 +141,24 @@ class Evaluator:
         )
         async with semaphore:
             with trace_subject(case.question.question_id):
-                return await self._generic.judge(
-                    product, case.scenario, case.question, response, grounding
+                evaluator = (
+                    self._agent if self._profile is EvaluationProfile.AGENT else self._generic
+                )
+                return await evaluator.judge(
+                    product,
+                    case.scenario,
+                    case.question,
+                    response,
+                    grounding,
+                    [
+                        turn
+                        for turn in case.execution.turns
+                        if turn.kind
+                        in (
+                            ConversationTurnKind.CLARIFICATION,
+                            ConversationTurnKind.CLARIFICATION_ANSWER,
+                        )
+                    ],
                 )
 
     # --- phase 2: assembly (sequential, assigns ids) --------------------------------------
@@ -131,7 +166,7 @@ class Evaluator:
     def _assemble(
         self,
         case: EvaluationCase,
-        judgement: GenericJudgement | None,
+        judgement: GenericJudgement | AgentJudgement | None,
         product: ProductDescription,
     ) -> EvaluationResult:
         ids: dict[str, Any] = {
@@ -141,10 +176,23 @@ class Evaluator:
             "execution_id": case.execution.execution_id,
             "product_outcome": case.execution.outcome,
             "mode": case.question.mode,
+            "evaluation_profile": self._profile,
         }
         if judgement is None:
+            notes = (
+                [NO_SQL_REASON]
+                if self._profile is EvaluationProfile.NL2SQL
+                and no_sql_execution(
+                    case.execution,
+                    sql_expected=product_expects_sql(product),
+                )
+                else []
+            )
             return EvaluationResult(
-                **ids, verdict=None, evaluation_status=EvaluationStatus.RECORDED_ONLY
+                **ids,
+                verdict=None,
+                evaluation_status=EvaluationStatus.RECORDED_ONLY,
+                notes=notes,
             )
 
         fields: dict[str, Any] = {}
@@ -152,13 +200,58 @@ class Evaluator:
         verdict = Verdict.INCONCLUSIVE
         draft = judgement.draft
         if draft is not None:
-            metrics = compute_metrics(draft, grounded=case.pack is not None)
+            if self._profile is EvaluationProfile.AGENT:
+                assert isinstance(judgement, AgentJudgement)
+                assert isinstance(draft, AgentEvaluationDraft)
+                assert judgement.plan is not None
+                metrics = compute_agent_metrics(draft, judgement.plan)
+                sql_generated = True
+            else:
+                assert isinstance(judgement, GenericJudgement)
+                assert isinstance(draft, EvaluationDraft)
+                schema_applicable = bool(
+                    case.pack is not None
+                    and any(table.name or table.columns for table in case.pack.tables)
+                )
+                rules_applicable = bool(
+                    case.pack is not None
+                    and (
+                        case.pack.rules
+                        or case.pack.joins
+                        or any(table.rules for table in case.pack.tables)
+                    )
+                )
+                sql_generated = not no_sql_execution(
+                    case.execution,
+                    sql_expected=product_expects_sql(product),
+                )
+                metrics = compute_metrics(
+                    draft,
+                    rules_applicable=rules_applicable,
+                    schema_applicable=schema_applicable,
+                    sql_generated=sql_generated,
+                )
+            criteria_results = [
+                CriterionResult(tag=criterion_tag(index), **result.model_dump())
+                for index, result in enumerate(draft.criteria, start=1)
+            ]
             findings = [
                 Finding(
                     finding_id=self._ids.next(IdKind.FINDING),
                     source=FindingSource.LLM,
                     **{
                         **f.model_dump(),
+                        "related_tags": merge_finding_tags(
+                            f.related_tags,
+                            link_finding_tags(
+                                f,
+                                case.question,
+                                case.pack,
+                                criteria_results,
+                            ),
+                            case.question,
+                            case.pack,
+                        ),
                         "matches_known_gap": f.matches_known_gap
                         or matches_known_gap(
                             f"{f.category} {f.description} {f.observed_behavior}",
@@ -170,10 +263,14 @@ class Evaluator:
             ]
             fields = {
                 "metrics": metrics,
-                "claims": draft.claims,
-                "criteria_results": draft.criteria,
+                "criteria_results": criteria_results,
             }
-            verdict = metrics_verdict(metrics, findings)
+            verdict = Verdict.FAIL if not sql_generated else metrics_verdict(metrics, findings)
+        notes = list(judgement.notes)
+        if self._profile is EvaluationProfile.NL2SQL and no_sql_execution(
+            case.execution, sql_expected=product_expects_sql(product)
+        ):
+            notes.append(NO_SQL_REASON)
         return EvaluationResult(
             **ids,
             verdict=verdict,
@@ -181,7 +278,7 @@ class Evaluator:
             findings=findings,
             bug_candidates=self._bug_candidates(verdict, findings, case, product),
             llm_verdict=draft.overall_verdict if draft else None,
-            notes=judgement.notes,
+            notes=list(dict.fromkeys(notes)),
             **fields,
         )
 

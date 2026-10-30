@@ -24,6 +24,18 @@ REFERENCES = REPO_ROOT / "data" / "references"
 REFERENCE_YAML = (REFERENCES / "sample_card_spend_catalog.yaml").read_bytes()
 GUIDE_MD = (REFERENCES / "sample_card_spend_instructions.md").read_bytes()
 POLICY_DOCS = (REFERENCES / "sample_travel_policy_docs.yaml").read_bytes()
+# The same documents with the structured Agent context that Agent runs require.
+POLICY_AGENT_CONTEXT = b"""
+agent_context:
+  data_sources:
+    - name: policy_documents
+      description: The approved travel policy corpus.
+  tools:
+    - name: search_policies
+      description: Retrieves policy passages relevant to the question.
+      data_sources: [policy_documents]
+"""
+POLICY_DOCS_AGENT = POLICY_DOCS + POLICY_AGENT_CONTEXT
 CONTRACT_YAML = b"""
 method: POST
 headers: {Authorization: "Bearer ${PRODUCT_API_TOKEN}"}
@@ -125,9 +137,16 @@ def test_config_and_samples(client: TestClient) -> None:
     assert config["llm_provider"] == "fake"
     assert config["steps"] == ["reference", "scenarios", "questions", "execute", "evaluate"]
     assert config["reference_max_chars"] == 200_000 and "sql_dialect" not in config
+    assert config["evaluation_profiles"] == [
+        {"id": "nl2sql", "enabled": True},
+        {"id": "agent", "enabled": True},
+    ]
+    assert config["agent_metrics"] == ["relevance", "completion"]
+    assert config["web"]["max_step_count"] == 100 and config["execution_resume"] is True
     samples = client.get("/api/samples").json()
-    # Only the persona has a sample; product description and reference are upload-only.
-    assert samples["product"] is None and samples["reference"] is None
+    # Persona, product and reference all default to the files configured under inputs.
+    assert samples["product"]["parsed"]["product_id"] == "sample_nl2sql"
+    assert samples["reference"]["parsed"]["kind"] == "data_catalog"
     assert samples["persona"]["parsed"]["id"] == "finance_controller"
     assert "finance_controller" in samples["persona"]["raw"]
 
@@ -185,7 +204,9 @@ def test_create_run_with_upload_and_queries(client: TestClient, config_path: Pat
         "product": "uploaded: my_product.yaml",
         "reference": "off",
         "reference_guide": "off",
+        "golden_set": "none",
     }
+    assert state["evaluation_profile"] == "nl2sql"  # the sample product generates SQL
     assert state["persona_queries"] == ["How much did we spend on travel?", "Top vendors?"]
 
     settings = load_config(config_path, env={})
@@ -220,24 +241,33 @@ def test_create_run_rejects_bad_upload_and_too_many_queries(client: TestClient) 
 def test_create_run_needs_uploaded_product_and_reference_when_switched_on(
     client: TestClient,
 ) -> None:
-    no_product = client.post("/api/runs", data={})
-    assert no_product.status_code == 400
-    assert "Upload a product description" in no_product.json()["detail"]
-    no_index = client.post(
-        "/api/runs",
-        files={"product": ("p.yaml", PRODUCT_YAML)},
-        data={"use_reference": "true"},
-    )
-    assert no_index.status_code == 400 and "switch it off" in no_index.json()["detail"]
+    # With nothing uploaded the configured persona, product and reference are used.
+    defaults = client.post("/api/runs", data={"use_reference": "true"})
+    assert defaults.status_code == 200, defaults.text
+    assert defaults.json()["state"]["sources"] == {
+        "persona": "sample",
+        "product": "sample",
+        "reference": "sample",
+        "reference_guide": "default",
+        "golden_set": "none",
+    }
 
 
 def test_document_reference_with_default_or_typed_instructions(
     client: TestClient, config_path: Path
 ) -> None:
-    files = {"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.yaml", POLICY_DOCS)}
+    without_context = client.post(
+        "/api/runs",
+        files={"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.yaml", POLICY_DOCS)},
+        data={"use_reference": "true"},
+    )
+    assert without_context.status_code == 400  # the chatbot is auto-detected as Agent
+    assert "has no agent_context" in without_context.json()["detail"]
+    files = {"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.yaml", POLICY_DOCS_AGENT)}
     response = client.post("/api/runs", files=files, data={"use_reference": "true"})
     assert response.status_code == 200, response.text
     state = response.json()["state"]
+    assert state["evaluation_profile"] == "agent"
     assert state["sources"]["reference"] == "uploaded: policy.yaml"
     assert state["sources"]["reference_guide"] == "default"
     settings = load_config(config_path, env={})
@@ -355,9 +385,15 @@ def test_execute_through_connected_product(config_path: Path) -> None:
     assert body["detail"]["product"] == "http_json (https://p.example.com/ask)"
     assert sent and all(r.url == "https://p.example.com/ask" for r in sent)
     assert sent[0].headers["Authorization"] == f"Bearer {TOKEN}"
-    asked = {json.loads(r.body or b"{}")["question"] for r in sent}
+    asked = [json.loads(r.body or b"{}")["question"] for r in sent]
     rows = [r for r in body["rows"] if r["question_id"]]
-    assert asked == {r["question"] for r in rows}
+    # clarification_policy "assume": the product receives the question plus a hidden
+    # single-turn instruction; stored rows and the run log show only the question.
+    assert {a.split("\n\nInternal execution instruction", 1)[0] for a in asked} == {
+        r["question"] for r in rows
+    }
+    assert all("Internal execution instruction" in a for a in asked)
+    assert all("Internal execution instruction" not in r["question"] for r in rows)
     assert all(r["product_outcome"] == "answered" for r in rows)
     assert all(r["artifacts"] == "sql:\nSELECT 1" for r in rows)
     assert TOKEN not in json.dumps(body)
@@ -366,6 +402,7 @@ def test_execute_through_connected_product(config_path: Path) -> None:
     artifacts_dir = load_config(config_path, env={}).paths.artifacts_dir
     log = (artifacts_dir / "runs" / run_id / "run.log").read_text(encoding="utf-8")
     assert TOKEN not in log
+    assert "Internal execution instruction" not in log
     assert log.count("PRODUCT HTTP") == len(rows)
     assert "POST https://p.example.com/ask · headers: Accept, Authorization, Content-Type" in log
     assert ">>> RESPONSE (HTTP 200)" in log and "Travel spend was 1.2M USD." in log
@@ -406,8 +443,9 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     assert verdicts == ["fail", "recorded_only", "recorded_only"]  # clarification + denial
     failed = next(r for r in final["rows"] if r["final_verdict"] == "fail")
     assert failed["bug_ids"] == "BUG_001"
-    assert (failed["correctness"], failed["hallucination_rate"]) == ("0", "0.333")
-    assert final["detail"]["task_success_rate"] == 0.0
+    assert (failed["semantic_correctness"], failed["rules_adherence"]) == ("1", "0")
+    assert final["detail"]["accuracy"] == final["detail"]["task_success_rate"] == 0.0
+    assert final["issue_summary"]["issues"][0]["theme"] == "joins_and_relationships"
     assert final["kpis"]["judged"] == 1 and final["kpis"]["new_bugs"] == 1
     assert {"kpis.json", "kpis.csv"} <= set(final["artifacts"])
     assert client.get(f"/api/runs/{run_id}/artifacts/kpis.csv").status_code == 200
@@ -447,8 +485,18 @@ def test_execute_without_contract_uses_fixture_product(client: TestClient) -> No
     }
 
 
+def test_agent_run_without_reference_is_refused(client: TestClient) -> None:
+    response = client.post(
+        "/api/runs",
+        files={"product": ("p.yaml", CHATBOT_YAML)},
+        data={"use_reference": "false"},
+    )
+    assert response.status_code == 400
+    assert "Agent runs require Reference data" in response.json()["detail"]
+
+
 def test_ungrounded_run_has_no_reference_pack(client: TestClient) -> None:
-    run_id = _run(client, grounded=False, product=CHATBOT_YAML)
+    run_id = _run(client, grounded=False)
     state = client.get(f"/api/runs/{run_id}").json()["state"]
     assert state["sources"]["reference"] == "off"
     body = _steps(client, run_id, "scenarios", "questions")

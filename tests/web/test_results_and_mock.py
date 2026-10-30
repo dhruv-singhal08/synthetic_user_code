@@ -89,33 +89,33 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
 
 
 def test_columns_are_the_evaluation_view() -> None:
-    assert len(COLUMNS) == 28
-    assert COLUMNS[-12:] == [
-        "relevancy",
-        "relevancy_reason",
-        "correctness",
-        "correctness_reason",
-        "hallucination_rate",
-        "hallucination_reason",
-        "completeness",
-        "completeness_reason",
+    metrics = [
+        "semantic_correctness",
+        "rules_adherence",
+        "schema_faithfulness",
+        "relevance",
+        "completion",
+        "tool_selection",
+        "faithfulness",
+        "context_precision",
+        "context_recall",
+    ]
+    assert COLUMNS[-22:] == [
+        *(c for m in metrics for c in (m, f"{m}_reason")),
         "final_verdict",
         "verdict_reason",
         "bug_ids",
         "evaluation_notes",
     ]
-    assert "groundedness" not in COLUMNS  # computed, not reported (D206)
+    assert "golden_case_id" in COLUMNS and "expected_behavior_contract" in COLUMNS
     for removed in (
+        "relevancy",
+        "correctness",
+        "groundedness",
+        "hallucination_rate",
+        "completeness",
         "failed_checks",
-        "inconclusive_checks",
-        "task_type",
-        "capability_rationale",
-        "cheat_tables",
-        "clarification_expected",
-        "unacceptable_behaviors",
-        "interpretation_notes",
         "generated_sql",
-        "plugins_applied",
         "llm_verdict",
     ):
         assert removed not in COLUMNS
@@ -195,29 +195,8 @@ def test_contract_rejects_bad_urls(url: str) -> None:
         request_contract(url, "p")
 
 
-def test_bullets_and_metric_cells(sample_scenarios: list[Scenario]) -> None:
-    assert bullets([]) == "" and bullets(["one"]) == "one"
-    assert bullets(["a", "", "b"]) == "• a\n• b"
-    question = _question(sample_scenarios[0])
-    execution = ExecutionRecord.model_validate(
-        {
-            "execution_id": "EXE_001",
-            "question_id": "Q_001",
-            "product_id": "p",
-            "adapter": "fixture",
-            "submitted_question": "Top spenders?",
-            "started_at": datetime(2026, 10, 14, tzinfo=UTC),
-            "response": {
-                "outcome": "answered",
-                "artifacts": [
-                    {"kind": "sql", "content": "SELECT 1"},
-                    {"kind": "tool_calls", "content": [{"name": "aggregate"}]},
-                ],
-            },
-        }
-    )
-    metric = {"status": "scored", "score": 1.0, "rationale": "ok"}
-    evaluation = EvaluationResult.model_validate(
+def _evaluation(**fields: object) -> EvaluationResult:
+    return EvaluationResult.model_validate(
         {
             "evaluation_id": "EVAL_001",
             "question_id": "Q_001",
@@ -225,35 +204,14 @@ def test_bullets_and_metric_cells(sample_scenarios: list[Scenario]) -> None:
             "execution_id": "EXE_001",
             "product_outcome": "answered",
             "mode": "grounded",
-            "verdict": "inconclusive",
             "evaluation_status": "evaluated",
-            "metrics": {
-                "relevancy": metric,
-                "correctness": {"status": "inconclusive", "rationale": "cannot tell"},
-                "groundedness": {"status": "not_applicable", "rationale": "no claims"},
-                "hallucination_rate": {**metric, "score": 0.25},
-                "completeness": {**metric, "score": 0.5},
-            },
-            "criteria_results": [
-                {"criterion": "names the top spenders", "status": "met", "rationale": "ok"},
-                {"criterion": "per currency", "status": "not_met", "rationale": "no"},
-            ],
+            **fields,
         }
     )
-    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [evaluation])[0]
-    assert row["artifacts"].startswith("• sql:\nSELECT 1\n• tool_calls:\n[")
-    assert [row[m] for m in ("relevancy", "correctness")] == ["1", "inconclusive"]
-    assert (row["relevancy_reason"], row["correctness_reason"]) == ("ok", "cannot tell")
-    assert (row["hallucination_rate"], row["completeness"]) == ("0.25", "0.5")
-    assert row["completeness_reason"] == "• met: names the top spenders\n• not_met: per currency"
-    assert row["verdict_reason"] == ""  # inconclusive without findings
-    parsed = list(csv.DictReader(io.StringIO(to_csv([row]))))
-    assert parsed == [row]  # multi-line cells survive the CSV round trip
 
 
-def test_reason_columns_explain_each_score(sample_scenarios: list[Scenario]) -> None:
-    question = _question(sample_scenarios[0])
-    execution = ExecutionRecord.model_validate(
+def _execution(response: dict[str, object]) -> ExecutionRecord:
+    return ExecutionRecord.model_validate(
         {
             "execution_id": "EXE_001",
             "question_id": "Q_001",
@@ -261,29 +219,59 @@ def test_reason_columns_explain_each_score(sample_scenarios: list[Scenario]) -> 
             "adapter": "fixture",
             "submitted_question": "Top spenders?",
             "started_at": datetime(2026, 10, 14, tzinfo=UTC),
-            "response": {"outcome": "answered", "text": "Ann spent most."},
+            "response": response,
         }
     )
+
+
+def test_bullets_and_metric_cells(sample_scenarios: list[Scenario]) -> None:
+    assert bullets([]) == "" and bullets(["one"]) == "one"
+    assert bullets(["a", "", "b"]) == "• a\n• b"
+    question = _question(sample_scenarios[0])
+    execution = _execution(
+        {
+            "outcome": "answered",
+            "artifacts": [
+                {"kind": "sql", "content": "SELECT 1"},
+                {"kind": "tool_calls", "content": [{"name": "aggregate"}]},
+            ],
+        }
+    )
+    metric = {"status": "scored", "score": 1.0, "rationale": "ok"}
+    evaluation = _evaluation(
+        verdict="inconclusive",
+        metrics={
+            "semantic_correctness": metric,
+            "rules_adherence": {"status": "inconclusive", "rationale": "cannot tell"},
+            "schema_faithfulness": {**metric, "score": 0.5},
+        },
+    )
+    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [evaluation])[0]
+    assert row["artifacts"].startswith("• sql:\nSELECT 1\n• tool_calls:\n[")
+    assert [row[m] for m in ("semantic_correctness", "rules_adherence")] == ["1", "inconclusive"]
+    assert (row["semantic_correctness_reason"], row["rules_adherence_reason"]) == (
+        "ok",
+        "cannot tell",
+    )
+    assert row["schema_faithfulness"] == "0.5"
+    assert row["relevance"] == "" and row["relevance_reason"] == ""  # not an NL2SQL metric
+    assert row["verdict_reason"] == ""  # inconclusive without findings
+    parsed = list(csv.DictReader(io.StringIO(to_csv([row]))))
+    assert parsed == [row]  # multi-line cells survive the CSV round trip
+
+
+def test_reason_columns_explain_each_score(sample_scenarios: list[Scenario]) -> None:
+    question = _question(sample_scenarios[0])
+    execution = _execution({"outcome": "answered", "text": "Ann spent most."})
     scored = {"status": "scored", "score": 1.0, "rationale": "on topic", "evidence": "Ann"}
-    base = {
-        "evaluation_id": "EVAL_001",
-        "question_id": "Q_001",
-        "scenario_id": "SCN_001",
-        "execution_id": "EXE_001",
-        "product_outcome": "answered",
-        "mode": "grounded",
-        "evaluation_status": "evaluated",
-    }
     metrics = {
-        "relevancy": scored,
-        "correctness": {**scored, "score": 0.0, "rationale": "wrong join", "evidence": None},
-        "groundedness": {"status": "scored", "score": 0.5, "rationale": "1 of 2"},
-        "hallucination_rate": {"status": "scored", "score": 0.5, "rationale": "1 of 2"},
-        "completeness": {"status": "scored", "score": 1.0, "rationale": "all met"},
+        "semantic_correctness": scored,
+        "rules_adherence": {**scored, "score": 0.0, "rationale": "wrong join", "evidence": None},
+        "schema_faithfulness": {"status": "not_applicable", "rationale": "no pack"},
     }
     finding = {
         "finding_id": "F_001",
-        "category": "correctness",
+        "category": "rules_adherence",
         "description": "joins on the wrong key",
         "expected_behavior": "e",
         "observed_behavior": "o",
@@ -291,31 +279,47 @@ def test_reason_columns_explain_each_score(sample_scenarios: list[Scenario]) -> 
         "evidence_status": "supported",
         "source": "llm",
     }
-    failed = EvaluationResult.model_validate(
-        {
-            **base,
-            "verdict": "fail",
-            "metrics": metrics,
-            "claims": [
-                {"text": "Ann", "status": "supported", "reason": "in the data"},
-                {"text": "spent most", "status": "contradicted", "reason": "wrong join"},
-            ],
-            "findings": [finding],
-        }
-    )
+    failed = _evaluation(verdict="fail", metrics=metrics, findings=[finding])
     row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [failed])[0]
-    assert row["relevancy_reason"] == "on topic - 'Ann'"  # reason + the quote it relied on
-    assert row["correctness_reason"] == "wrong join"
-    assert row["hallucination_reason"] == "'spent most' (contradicted): wrong join"
-    assert row["verdict_reason"] == "F_001 [high] correctness: joins on the wrong key"
-    clean = EvaluationResult.model_validate(
-        {
-            **failed.model_dump(mode="json"),
-            "verdict": "pass",
-            "findings": [],
-            "claims": [failed.claims[0].model_dump(mode="json")],
+    assert row["semantic_correctness_reason"] == "on topic - 'Ann'"  # reason + its quote
+    assert row["rules_adherence_reason"] == "wrong join"
+    assert row["schema_faithfulness_reason"] == "not applicable: no pack"
+    assert row["verdict_reason"] == "F_001 [high] rules_adherence: joins on the wrong key"
+    clean = _evaluation(verdict="pass", metrics={**metrics, "rules_adherence": scored})
+    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [clean])[0]
+    assert row["verdict_reason"] == "All metrics passed"
+
+
+def test_no_sql_note_explains_every_metric(sample_scenarios: list[Scenario]) -> None:
+    question = _question(sample_scenarios[0])
+    timeout = _execution({"outcome": "timeout"})
+    recorded = _evaluation(
+        product_outcome="timeout",
+        verdict=None,
+        evaluation_status="recorded_only",
+        notes=["No SQL generated."],
+    )
+    row = build_rows("RUN_1", sample_scenarios[:1], [question], [timeout], [recorded])[0]
+    assert row["semantic_correctness_reason"] == "No SQL generated."
+    assert row["rules_adherence_reason"].startswith("not applicable: no SQL")
+    assert row["verdict_reason"] == "No SQL generated."
+
+
+def test_agent_expectations_fill_their_own_columns(sample_scenarios: list[Scenario]) -> None:
+    question = _question(sample_scenarios[0])
+    expectations = question.expectations.model_copy(
+        update={
+            "expected_tools": ["aggregate_feedback"],
+            "expected_data_sources": ["complaints"],
+            "expected_journey": "card replacement",
+            "golden_set_criteria": {"Expected Journey": "card replacement"},
         }
     )
-    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [clean])[0]
-    assert row["hallucination_reason"] == "No hallucinated statements (1 checked)"
-    assert row["verdict_reason"] == "All metrics passed"
+    question = question.model_copy(update={"expectations": expectations})
+    row = build_rows("RUN_1", sample_scenarios[:1], [question])[0]
+    assert row["expected_tools"] == "aggregate_feedback"
+    assert row["expected_journey"] == "card replacement"
+    assert row["golden_set_criteria"] == "Expected Journey: card replacement"
+    contract = row["expected_behavior_contract"].split("\n")
+    assert contract[0] == "Behavior: Rank the top spenders."
+    assert "Expected tools: aggregate_feedback" in contract

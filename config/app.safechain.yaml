@@ -14,20 +14,37 @@ llm:
 product:
   timeout_seconds: 300       # per question; the contract `timeout` must not be lower
   max_concurrency: 1         # questions sent to the product at once
+  clarification_policy: ask    # continue clarification turns in the same product session
 product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
-  type: fixture             # fixture | http_json | python
+  type: fixture             # fixture | http_json | http_sse | python
   options:
     path: ./data/fixtures/product_responses/sample_responses.json
 reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
+evaluation:
+  # Temporary NL2SQL workaround approved by the product team. Remove after their fix ships.
+  # Only this exact dummy predicate is ignored; other cg_id usages are still evaluated.
+  ignore_dummy_cg_id_filter: true
 generation:
   scenario:
     scenario_count: 3
     include_unsupported_scenarios: true
     diversity_preference: balanced
     max_topup_rounds: 1
+    agent_golden_examples: 12
   question:
     question_count: 1
+    agent_golden_max_questions_per_scenario: 2
+    agent_min_tool_calls: 1
+    agent_min_data_sources: 1
+    agent_golden_examples: 6
+    max_deliverables: 2                 # hard limit; filters do not count as deliverables
+    max_sources: 1                      # one data source per question by default
+    max_success_criteria: 2
+    max_words: 40
+    allowed_complexities: [simple, medium]
+    allow_follow_ups: false
+    allow_cross_source_comparison: false
     ambiguity_level: low
     language: en
     allow_vague_questions: false
@@ -35,9 +52,9 @@ generation:
 paths:
   artifacts_dir: ./artifacts
 inputs:
-  persona_path: ./data/personas/finance_controller.yaml
-  product_path: ./data/products/sample_product.yaml
-  reference_file: ./data/references/reference_index.yaml   # data_catalog / document_collection (.yaml/.json); omit -> ungrounded
+  persona_path: ./upload_files/gcs_product_owner_v2.2.yaml
+  product_path: ./upload_files/voice_of_customer_agent_v1.1.yaml
+  reference_file: ./upload_files/voc_live_tables_reference.yaml   # loaded by default in the UI
   reference_guide_file: null   # optional usage instructions (.md / .txt)
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json

@@ -18,19 +18,40 @@ llm:
 product:
   timeout_seconds: 300        # per product call (the executor's timeout, any adapter)
   max_concurrency: 1          # questions sent to the product at once (1 = one by one)
+  clarification_policy: assume # assume = hidden single-turn instruction; ask = send unchanged
 
-# Which adapter talks to the product: fixture | http_json | python (see config/products/).
+# Which adapter talks to the product: fixture | http_json | http_sse | python (see config/products/).
 # Inline {type, options}, or a path to a config/products/<product_id>.adapter.yaml file.
 product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
-  type: fixture             # fixture | http_json | python
+  type: fixture             # fixture | http_json | http_sse | python
   options:
     path: ./data/fixtures/product_responses/sample_responses.json
 
 reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 
+evaluation:
+  artifact_max_chars: 8000   # max characters per response artifact sent to the judge
+  # Agent relevance and completion are mandatory. Optional metrics can be removed here or
+  # switched off per run in the UI. If their required trace/context is absent, they are N/A.
+  agent_metrics: [relevance, completion]
+  # Temporary product workaround. When true, only cg_id IN ('DUMMY') is omitted from the
+  # judge's copy of SQL; original responses remain unchanged in artifacts and reports.
+  ignore_dummy_cg_id_filter: true
+
 trace:
   enabled: true              # runs/<run_id>/run.log: every LLM / product call, prompt + output
+  max_field_chars: 250000    # max characters per logged field; stored artifacts are unchanged
+
+web:
+  host: 127.0.0.1            # serve default; --host overrides
+  port: 8000                 # serve default; --port overrides
+  max_upload_bytes: 10000000
+  max_persona_queries: 50
+  recent_runs_limit: 20
+  max_step_count: 100        # largest scenario/question count accepted by one API step
+  max_reference_instructions_chars: 50000
+  max_product_url_chars: 2000
 
 generation:
   scenario:
@@ -40,10 +61,21 @@ generation:
     max_topup_rounds: 1                 # extra calls if fewer scenarios accepted than requested
   question:
     question_count: 1                   # questions per scenario
+    agent_golden_max_questions_per_scenario: 2 # golden-guided default and hard cap
+    agent_min_tool_calls: 1             # supported Agent question; complex UI profile raises to 2
+    agent_min_data_sources: 1           # supported Agent question; complex UI profile raises to 2
+    max_deliverables: 2                 # hard limit; filters do not count as deliverables
+    max_sources: 1                      # sources allowed in one question plan
+    max_success_criteria: 2
+    max_words: 40
+    allowed_complexities: [simple, medium]
+    allow_follow_ups: false
+    allow_cross_source_comparison: false
     ambiguity_level: low                # low | medium | high
     language: en
     allow_vague_questions: false
     reject_reference_leaks: true        # reject questions that repeat internal reference names
+    near_duplicate_threshold: 0.8       # token Jaccard similarity; 1.0 keeps only exact matches
 
 
 paths:

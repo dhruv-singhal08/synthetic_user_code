@@ -12,9 +12,11 @@ import yaml
 from pydantic import ValidationError
 
 from synthetic_user.models.base import AmbiguityLevel
+from synthetic_user.models.evaluation import MetricName
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.prompts.agent_response_evaluation import build_agent_evaluation_prompt
 from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
 from synthetic_user.prompts.scenario import ScenarioPromptOptions, build_scenario_prompt
 
@@ -69,7 +71,7 @@ CHANGES = [
     (
         "question_preferences.complexity",
         "complex",
-        "every question is complex - several parts",
+        "prefer complex - several parts",
         False,
         True,
     ),
@@ -258,9 +260,19 @@ def test_product_fields_reach_the_prompts(sample_persona: Persona) -> None:
             "expectations": {"expected_behavior": "b", "success_criteria": ["c"]},
         }
     )
-    _system, judge = build_response_evaluation_prompt(
-        voc, scenario, question, AnsweredResponse(text="Themes: delays.")
+    # VoC is not an SQL product, so it is judged by the Agent prompt (product contract in full).
+    _system, judge = build_agent_evaluation_prompt(
+        voc,
+        scenario,
+        question,
+        AnsweredResponse(text="Themes: delays."),
+        [MetricName.RELEVANCE, MetricName.COMPLETION],
     )
     assert "should not be interpreted as confirmed causation" in judge  # known_limitations
-    assert "expected to consist of: Executive summaries" in judge
-    assert "under known_limitations" in judge
+    assert "Executive summaries" in judge  # expected_outputs
+    # The NL2SQL judge sees only the answer contract; known gaps are matched in code.
+    _system, nl2sql_judge = build_response_evaluation_prompt(
+        voc, scenario, question, AnsweredResponse(text="Themes: delays.")
+    )
+    assert "Executive summaries" in nl2sql_judge
+    assert "should not be interpreted as confirmed causation" not in nl2sql_judge

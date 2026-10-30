@@ -20,9 +20,14 @@ from synthetic_user.adapters.base import ProductAdapter, UnavailableAdapter
 from synthetic_user.adapters.contract import ProductContract, request_contract
 from synthetic_user.adapters.http_json import (
     HttpJsonAdapter,
-    HttpJsonOptions,
     Transport,
     urllib_transport,
+)
+from synthetic_user.adapters.http_sse import (
+    HttpSseAdapter,
+    HttpSseOptions,
+    SseTransport,
+    aiohttp_sse_transport,
 )
 from synthetic_user.adapters.mock_llm import MockLLMAdapter
 from synthetic_user.adapters.registry import create_adapter
@@ -34,9 +39,21 @@ from synthetic_user.core.exceptions import (
 )
 from synthetic_user.core.identifiers import RUN_ID_PATTERN
 from synthetic_user.core.logging import get_run_logger
+from synthetic_user.golden_set import GOLDEN_SET, validate_agent_contract
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.tracing import TracingLLMClient
+from synthetic_user.models.evaluation_profile import (
+    AGENT_EXPECTATION_METRIC_MAP,
+    ENABLED_EVALUATION_PROFILES,
+    AgentMetric,
+    EvaluationProfile,
+    EvaluationProfileSelection,
+    normalize_agent_metrics,
+    resolve_evaluation_profile,
+)
+from synthetic_user.models.persona import ComplexityPreference
+from synthetic_user.models.question import MAX_DELIVERABLES, QuestionComplexity
 from synthetic_user.models.reference import (
     DEFAULT_INSTRUCTIONS,
     ReferenceKind,
@@ -48,6 +65,7 @@ from synthetic_user.web.workspace import (
     GUIDE,
     REFERENCE,
     RESULTS_CSV,
+    ParsedHttpConnection,
     ProductConnection,
     Upload,
     Workspace,
@@ -65,11 +83,14 @@ _PREREQUISITE = {
 
 
 class StepRequest(BaseModel):
-    count: int | None = Field(default=None, ge=1, le=50)
+    count: int | None = Field(default=None, ge=1)
+    start_from_question: int | None = Field(default=None, ge=1)
+    evaluation_profile: EvaluationProfileSelection | None = None
+    agent_metrics: list[AgentMetric] | None = None
 
 
 class ContractRequest(BaseModel):
-    url: str = Field(min_length=1, max_length=2000)
+    url: str = Field(min_length=1)
 
 
 def create_app(
@@ -77,6 +98,7 @@ def create_app(
     *,
     env: Mapping[str, str] | None = None,
     transport: Transport = urllib_transport,
+    sse_transport: SseTransport = aiohttp_sse_transport,
 ) -> FastAPI:
     """``env`` fills ``${VAR}`` contract headers (default: the process environment);
     ``transport`` is replaceable for tests."""
@@ -111,6 +133,25 @@ def create_app(
             "reference_max_chars": settings.reference.max_chars,
             "scenario_count": settings.generation.scenario.scenario_count,
             "question_count": settings.generation.question.question_count,
+            "agent_golden_max_questions_per_scenario": (
+                settings.generation.question.agent_golden_max_questions_per_scenario
+            ),
+            "execution_resume": True,
+            "max_deliverables": settings.generation.question.max_deliverables,
+            "web": settings.web.model_dump(mode="json"),
+            "question_complexities": [item.value for item in ComplexityPreference],
+            "evaluation_profiles": [
+                {
+                    "id": profile.value,
+                    "enabled": profile in ENABLED_EVALUATION_PROFILES,
+                }
+                for profile in EvaluationProfile
+            ],
+            "agent_metrics": [metric.value for metric in settings.evaluation.agent_metrics],
+            "agent_expectation_metric_map": {
+                field: [metric.value for metric in metrics]
+                for field, metrics in AGENT_EXPECTATION_METRIC_MAP.items()
+            },
             "steps": [s.value for s in Step],
             # Used when no usage instructions are given (shown as the UI's placeholder).
             "default_instructions": {k.value: text for k, text in DEFAULT_INSTRUCTIONS.items()},
@@ -118,20 +159,27 @@ def create_app(
 
     @app.get("/api/samples")
     async def samples() -> dict[str, Any]:
-        """Only the persona has a sample; product description and reference are upload-only."""
+        """Configured persona, product description and reference defaults for the setup UI."""
         result: dict[str, Any] = dict.fromkeys(("persona", "product", REFERENCE, GUIDE))
-        sample = workspace.sample("persona")
-        if sample is not None:
-            text, model = sample
-            result["persona"] = {"raw": text, "parsed": model.model_dump(mode="json")}
+        for kind in ("persona", "product", REFERENCE):
+            sample = workspace.sample(kind)
+            if sample is not None:
+                text, model = sample
+                result[kind] = {"raw": text, "parsed": model.model_dump(mode="json")}
         return result
 
     @app.post("/api/preview/{kind}")
     async def preview(kind: str, file: Annotated[UploadFile, File()]) -> dict[str, Any]:
         upload = Upload(file.filename or kind, await file.read())
-        model = parse_upload(kind, upload, max_chars=settings.reference.max_chars)
+        model = parse_upload(
+            kind,
+            upload,
+            max_chars=settings.reference.max_chars,
+            max_upload_bytes=settings.web.max_upload_bytes,
+        )
         parsed = model.model_dump(mode="json")
-        return {"raw": upload.content.decode("utf-8-sig"), "parsed": parsed}
+        raw = None if kind == GOLDEN_SET else upload.content.decode("utf-8-sig")
+        return {"raw": raw, "parsed": parsed}
 
     @app.get("/api/contract-template", response_class=PlainTextResponse)
     async def contract_template() -> PlainTextResponse:
@@ -166,21 +214,36 @@ def create_app(
         product: Annotated[UploadFile | None, File()] = None,
         reference: Annotated[UploadFile | None, File()] = None,
         reference_guide: Annotated[UploadFile | None, File()] = None,
-        reference_instructions: Annotated[str, Form(max_length=50_000)] = "",
+        golden_set: Annotated[UploadFile | None, File()] = None,
+        reference_instructions: Annotated[str, Form()] = "",
         persona_queries: Annotated[str, Form()] = "",
+        question_complexity: Annotated[ComplexityPreference | None, Form()] = None,
+        evaluation_profile: Annotated[EvaluationProfileSelection, Form()] = (
+            EvaluationProfileSelection.AUTO
+        ),
+        agent_metrics: Annotated[list[AgentMetric] | None, Form()] = None,
         use_reference: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
+        if len(reference_instructions) > settings.web.max_reference_instructions_chars:
+            raise ConfigError(
+                "Reference instructions are longer than "
+                f"{settings.web.max_reference_instructions_chars:,} characters"
+            )
         uploads: dict[str, Upload | None] = {}
         for kind, file in (
             ("persona", persona),
             ("product", product),
             (REFERENCE, reference),
             (GUIDE, reference_guide),
+            (GOLDEN_SET, golden_set),
         ):
             uploads[kind] = Upload(file.filename or kind, await file.read()) if file else None
         state = workspace.create_run(
             uploads,
             persona_queries,
+            question_complexity=question_complexity,
+            evaluation_profile=evaluation_profile,
+            agent_metrics=agent_metrics,
             use_reference=use_reference,
             reference_instructions=reference_instructions,
         )
@@ -199,9 +262,13 @@ def create_app(
     async def connect_product(
         run_id: str,
         contract: Annotated[UploadFile, File()],
-        url: Annotated[str, Form(max_length=2000)] = "",
+        url: Annotated[str, Form()] = "",
     ) -> dict[str, Any]:
-        """Real product: product URL + uploaded contract -> http_json adapter for execute."""
+        """Real product: product URL + uploaded http_json/http_sse contract for execute."""
+        if len(url) > settings.web.max_product_url_chars:
+            raise ConfigError(
+                f"Product URL is longer than {settings.web.max_product_url_chars:,} characters"
+            )
         state = workspace.state(check_run_id(run_id))
         upload = Upload(contract.filename or "contract.yaml", await contract.read())
         state = workspace.connect(state, url, upload)
@@ -217,6 +284,10 @@ def create_app(
     @app.post("/api/runs/{run_id}/contract")
     async def mock_contract(run_id: str, body: ContractRequest) -> dict[str, Any]:
         """MOCK contract from a URL (D113): questions go to the LLM mock product."""
+        if len(body.url) > settings.web.max_product_url_chars:
+            raise ConfigError(
+                f"Product URL is longer than {settings.web.max_product_url_chars:,} characters"
+            )
         state = workspace.state(check_run_id(run_id))
         inputs = workspace.load_inputs(run_id)
         contract = request_contract(body.url, inputs.product.product_id)
@@ -230,27 +301,68 @@ def create_app(
     @app.post("/api/runs/{run_id}/steps/{step}")
     async def run_step(run_id: str, step: Step, body: StepRequest | None = None) -> dict[str, Any]:
         state = workspace.state(check_run_id(run_id))
+        inputs = workspace.load_inputs(run_id)
+        if body is not None and (
+            body.evaluation_profile is not None or body.agent_metrics is not None
+        ):
+            try:
+                resolved_profile, profile_reason = resolve_evaluation_profile(
+                    inputs.product,
+                    body.evaluation_profile or state.evaluation_profile_selection,
+                )
+                selected_agent_metrics = normalize_agent_metrics(
+                    body.agent_metrics or state.agent_metrics
+                )
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+            if resolved_profile is EvaluationProfile.AGENT:
+                validate_agent_contract(inputs.reference)
+            profile_changed = resolved_profile is not state.evaluation_profile
+            update: dict[str, Any] = {
+                "evaluation_profile": resolved_profile,
+                "evaluation_profile_selection": (
+                    body.evaluation_profile or state.evaluation_profile_selection
+                ),
+                "evaluation_profile_reason": profile_reason,
+                "agent_metrics": selected_agent_metrics,
+            }
+            if profile_changed:
+                # Scenario/reference-pack shape is profile-specific. Preserve only the cheap
+                # reference check and require regeneration from scenarios.
+                update["steps_done"] = [done for done in state.steps_done if done is Step.REFERENCE]
+            state = state.model_copy(update=update)
+            workspace.save_state(state)
+            inputs = workspace.load_inputs(run_id)
         needed = _PREREQUISITE.get(step)
         if needed is not None and needed not in state.steps_done:
             raise ConfigError(f"Run the '{needed.value}' step before '{step.value}'")
-        inputs = workspace.load_inputs(run_id)
         count = body.count if body else None
-        llm = TracingLLMClient.wrap(create_llm_client(settings))  # mock product calls traced too
+        if count is not None and count > settings.web.max_step_count:
+            raise ConfigError(f"Step count cannot exceed {settings.web.max_step_count}")
+        run_settings = _settings_for_question_complexity(settings, state.question_complexity)
+        llm = TracingLLMClient.wrap(
+            create_llm_client(run_settings)
+        )  # mock product calls traced too
         product = (
             _product_adapter(
-                settings,
+                run_settings,
                 llm,
                 state.contract,
                 workspace.connection_options(state),
                 inputs,
                 env=environ,
                 transport=transport,
+                sse_transport=sse_transport,
             )
             if step is Step.EXECUTE
             else UnavailableAdapter()
         )
         pipeline = SyntheticUserPipeline(
-            settings, llm, product, store, logger=get_run_logger("synthetic_user.web", run_id)
+            run_settings,
+            llm,
+            product,
+            store,
+            logger=get_run_logger("synthetic_user.web", run_id),
         )
         detail: dict[str, Any] = {}
 
@@ -264,7 +376,7 @@ def create_app(
             detail = {
                 "mode": reference_step.mode.value,
                 "reference_id": inputs.reference_id,
-                "reference_chars": len(reference.render()) if reference else 0,
+                "reference_chars": reference.rendered_chars() if reference else 0,
                 "warnings": reference_step.warnings,
             }
         if step is Step.SCENARIOS:
@@ -287,18 +399,31 @@ def create_app(
             }
         elif step is Step.EXECUTE:
             try:
-                execute_step = await pipeline.execute_questions(run_id, inputs, force=True)
+                execute_step = await pipeline.execute_questions(
+                    run_id,
+                    inputs,
+                    force=True,
+                    start_from_question=body.start_from_question if body else None,
+                )
             finally:
                 await pipeline.aclose()
             detail = {
                 "product": _product_label(state.contract, state.connection, product.name),
                 "executions": len(execute_step.executions),
+                "resumed_from_question": body.start_from_question if body else None,
             }
         elif step is Step.EVALUATE:
-            evaluate_step = await pipeline.evaluate_executions(run_id, inputs, force=True)
+            evaluate_step = await pipeline.evaluate_executions(
+                run_id,
+                inputs,
+                force=True,
+                evaluation_profile=state.evaluation_profile,
+                agent_metrics=state.agent_metrics,
+            )
             detail = {
                 "evaluations": len(evaluate_step.evaluations),
                 "bug_candidates": len(evaluate_step.bug_candidates),
+                "accuracy": evaluate_step.kpis.accuracy,
                 "task_success_rate": evaluate_step.kpis.task_success_rate,
             }
 
@@ -320,9 +445,10 @@ def create_app(
         if Step.SCENARIOS not in state.steps_done:
             raise ConfigError("Run the 'scenarios' step before editing reference packs")
         inputs = workspace.load_inputs(run_id)
+        run_settings = _settings_for_question_complexity(settings, state.question_complexity)
         pipeline = SyntheticUserPipeline(
-            settings,
-            create_llm_client(settings),
+            run_settings,
+            create_llm_client(run_settings),
             UnavailableAdapter(),
             store,
             logger=get_run_logger("synthetic_user.web", run_id),
@@ -354,19 +480,73 @@ def _product_adapter(
     settings: AppConfig,
     llm: LLMClient,
     contract: ProductContract | None,
-    connection: HttpJsonOptions | None,
+    connection: ParsedHttpConnection | None,
     inputs: RunInputs,
     *,
     env: Mapping[str, str],
     transport: Transport,
+    sse_transport: SseTransport,
 ) -> ProductAdapter:
-    """URL + uploaded contract -> the real product (http_json); mock contract -> mock product
-    behind it; else the configured product adapter."""
+    """Uploaded HTTP contract -> real product; mock contract -> mock; else configured adapter."""
     if connection is not None:
-        return HttpJsonAdapter(connection, env=env, transport=transport)
+        if isinstance(connection.options, HttpSseOptions):
+            return HttpSseAdapter(connection.options, env=env, transport=sse_transport)
+        return HttpJsonAdapter(connection.options, env=env, transport=transport)
     if contract is not None:
         return MockLLMAdapter(llm, contract, inputs.product, inputs.reference)
-    return create_adapter(settings)
+    return create_adapter(settings, env=env, transport=transport, sse_transport=sse_transport)
+
+
+def _settings_for_question_complexity(
+    settings: AppConfig, complexity: ComplexityPreference | None
+) -> AppConfig:
+    """Apply a UI complexity choice as the hard policy for one run.
+
+    The persisted persona file remains untouched. ``load_inputs`` applies the same choice to
+    the in-memory persona so scenario and question prompts agree with this policy.
+    """
+    if complexity is None:
+        return settings
+    if complexity is ComplexityPreference.SIMPLE:
+        allowed = [QuestionComplexity.SIMPLE]
+        max_deliverables = 1
+        max_sources = 1
+        allow_cross_source_comparison = False
+        agent_min_tool_calls = 1
+        agent_min_data_sources = 1
+    elif complexity is ComplexityPreference.MEDIUM:
+        allowed = [QuestionComplexity.SIMPLE, QuestionComplexity.MEDIUM]
+        max_deliverables = 2
+        max_sources = 1
+        allow_cross_source_comparison = False
+        agent_min_tool_calls = 1
+        agent_min_data_sources = 1
+    elif complexity is ComplexityPreference.COMPLEX:
+        allowed = [QuestionComplexity.COMPLEX]
+        max_deliverables = MAX_DELIVERABLES
+        max_sources = 2
+        allow_cross_source_comparison = True
+        agent_min_tool_calls = 2
+        agent_min_data_sources = 2
+    else:
+        allowed = list(QuestionComplexity)
+        max_deliverables = MAX_DELIVERABLES
+        max_sources = 2
+        allow_cross_source_comparison = True
+        agent_min_tool_calls = 1
+        agent_min_data_sources = 1
+    question = settings.generation.question.model_copy(
+        update={
+            "allowed_complexities": allowed,
+            "max_deliverables": max_deliverables,
+            "max_sources": max_sources,
+            "allow_cross_source_comparison": allow_cross_source_comparison,
+            "agent_min_tool_calls": agent_min_tool_calls,
+            "agent_min_data_sources": agent_min_data_sources,
+        }
+    )
+    generation = settings.generation.model_copy(update={"question": question})
+    return settings.model_copy(update={"generation": generation})
 
 
 def _product_label(

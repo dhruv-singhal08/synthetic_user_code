@@ -164,10 +164,10 @@ class FixtureAdapter:
         fixture = self._fixture
         if req.question_id in fixture.by_question_id:
             return fixture.by_question_id[req.question_id]
-        normalized = normalize_utterance(req.utterance)
+        normalized = normalize_utterance(req.report_utterance)
         if normalized in fixture.by_utterance:
             return fixture.by_utterance[normalized]
-        text = req.utterance.casefold()
+        text = req.report_utterance.casefold()
         for rule in fixture.rules:
             if all(word.casefold() in text for word in rule.contains):
                 return rule.response

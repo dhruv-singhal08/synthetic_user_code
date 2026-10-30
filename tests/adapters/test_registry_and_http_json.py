@@ -300,9 +300,11 @@ def test_lookup_dotted_paths() -> None:
 # --- env vars and secrets ---------------------------------------------------------------------
 
 
-def test_missing_env_var_names_variable_only() -> None:
+async def test_missing_env_var_names_variable_only() -> None:
+    # Headers are resolved per request, so a refreshed token is picked up without a restart.
+    adapter = HttpJsonAdapter.from_options(HTTP_OPTIONS, env={}, transport=StubTransport())
     with pytest.raises(ConfigError, match="PRODUCT_API_TOKEN") as info:
-        HttpJsonAdapter.from_options(HTTP_OPTIONS, env={}, transport=StubTransport())
+        await adapter.send(_req())
     assert SECRET not in str(info.value)
 
 

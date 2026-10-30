@@ -85,12 +85,9 @@ def _seed_run(
 def _q(utterance: str) -> dict[str, Any]:
     return {
         "utterance": utterance,
+        "plan": {"deliverables": [{"action": "rank", "subject": "employees by card spend"}]},
         "intent": {"task_type": "ranking"},
-        "question_characteristics": {
-            "style": "precise",
-            "ambiguity_level": "low",
-            "complexity": "simple",
-        },
+        "question_characteristics": {"style": "precise", "ambiguity_level": "low"},
         "expectations": {"expected_behavior": "answers", "success_criteria": ["answers"]},
     }
 

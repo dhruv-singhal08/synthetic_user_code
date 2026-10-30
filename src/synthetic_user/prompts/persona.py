@@ -43,13 +43,22 @@ def _complexity_rule(persona: Persona, unit: str) -> str:
     complexity = persona.question_preferences.complexity
     meanings = "; ".join(f"{c.value} = {m}" for c, m in COMPLEXITY_MEANING.items())
     if complexity is not ComplexityPreference.MIXED:
+        if unit == "questions":
+            return (
+                f"complexity preference is {complexity.value}: prefer {complexity.value} - "
+                f"{COMPLEXITY_MEANING[complexity]}. The application's hard question policy "
+                "wins if it requires a simpler question."
+            )
         return (
             f"complexity is {complexity.value}: every {unit[:-1]} is {complexity.value} - "
             f"{COMPLEXITY_MEANING[complexity]}."
         )
     if unit == "scenarios":
         return f"complexity is mixed: spread the scenarios across all three ({meanings})."
-    return f"complexity is mixed: use the one that fits the scenario's goal ({meanings})."
+    return (
+        f"complexity is mixed: use the one that fits the scenario's goal ({meanings}), within "
+        "the application's hard question policy."
+    )
 
 
 def _expertise_rule() -> str:
@@ -123,8 +132,8 @@ How to use the persona:
 - primary_motivation: the reason behind the question; it shapes what they ask for.
 - decision_inputs: the kinds of evidence they ask for or refer to (only those that fit the
   scenario and the product).
-- {_complexity_rule(persona, "questions")} Set question_characteristics.complexity to
-  simple | medium | complex for each question.
+- {_complexity_rule(persona, "questions")} Code computes the final complexity from the
+  structured question plan.
 - {follow_ups}
 - ambiguity: {ambiguity_rule}
 """

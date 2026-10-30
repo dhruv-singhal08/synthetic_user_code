@@ -1,12 +1,8 @@
-"""Node 2: generate scenarios (one LLM call per round), in two modes.
+"""Node 2: generate scenarios with profile-specific grounding.
 
-grounded (reference given): each scenario comes with its cheat sheet (reference_pack) picked
-in the same call; code keeps only the picks the reference has, copies the reference's text in
-(the others are recorded in the pack's rejected_items) and rejects the scenario when no table /
-document survives (D203).
-ungrounded (no reference): a pack must be absent (rejected otherwise), unsupported filter.
-Per-scenario checks decide accept / reject / duplicate. Short results are topped up at most
-``max_topup_rounds`` times and never padded.
+NL2SQL grounded scenarios carry a validated schema reference pack. Agent scenarios use only
+business, product, tool, and data-source context and never carry schema packs. Ungrounded
+scenarios have neither a reference nor a pack.
 """
 
 from __future__ import annotations
@@ -25,6 +21,8 @@ from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import StrictModel
+from synthetic_user.models.evaluation_profile import EvaluationProfile
+from synthetic_user.models.golden_set import GoldenSet
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference, ReferencePack, pack_id_for
@@ -47,6 +45,7 @@ SURPLUS = "surplus: more scenarios returned than requested"
 MISSING_PACK = "mode grounded requires a reference_pack"
 UNEXPECTED_PACK = "mode ungrounded must not have a reference_pack"
 UNKNOWN_TYPICAL_TASK = "typical_task is not one of the persona's typical_tasks"
+UNEXPECTED_AGENT_PACK = "Agent scenarios must not have a reference_pack"
 
 _STOPWORDS = frozenset(
     {
@@ -168,6 +167,8 @@ class ScenarioGenerator:
         *,
         count: int | None = None,
         existing_signatures: Sequence[str] = (),
+        evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL,
+        golden_set: GoldenSet | None = None,
     ) -> ScenarioGenerationResult:
         """mode = grounded if ``reference`` else ungrounded."""
         cfg = self._settings.generation.scenario
@@ -187,9 +188,19 @@ class ScenarioGenerator:
                 count=needed,
                 include_unsupported_scenarios=cfg.include_unsupported_scenarios,
                 diversity_preference=cfg.diversity_preference,
+                max_request_steps=self._settings.generation.question.max_deliverables,
+                agent_golden_examples=cfg.agent_golden_examples,
+                agent_min_tool_calls=self._settings.generation.question.agent_min_tool_calls,
+                agent_min_data_sources=self._settings.generation.question.agent_min_data_sources,
             )
             system, user = build_scenario_prompt(
-                persona, product, reference, options, avoid_signatures=state.signatures()
+                persona,
+                product,
+                reference,
+                options,
+                avoid_signatures=state.signatures(),
+                evaluation_profile=evaluation_profile,
+                golden_set=golden_set,
             )
             with trace_subject(f"round {round_no + 1}"):
                 batch = await generate_structured(
@@ -203,7 +214,7 @@ class ScenarioGenerator:
                 if len(result.accepted) >= requested:
                     result.rejected.append(RejectedScenario(payload=raw, reasons=[SURPLUS]))
                     continue
-                self._process(raw, persona, product, reference, state, result)
+                self._process(raw, persona, product, reference, evaluation_profile, state, result)
             self._log.info(
                 "Scenario round %d: %d returned; totals accepted=%d rejected=%d duplicates=%d",
                 round_no + 1,
@@ -226,6 +237,7 @@ class ScenarioGenerator:
         persona: Persona,
         product: ProductDescription,
         reference: Reference | None,
+        evaluation_profile: EvaluationProfile,
         state: _DedupState,
         result: ScenarioGenerationResult,
     ) -> None:
@@ -244,7 +256,10 @@ class ScenarioGenerator:
         typical_task = persona_task(persona, draft.typical_task)
         if draft.typical_task is not None and typical_task is None:
             reasons.append(f"{UNKNOWN_TYPICAL_TASK}: {draft.typical_task!r}")
-        if reference is None:
+        if evaluation_profile is EvaluationProfile.AGENT:
+            if draft.reference_pack is not None:
+                reasons.append(UNEXPECTED_AGENT_PACK)
+        elif reference is None:
             if draft.reference_pack is not None:
                 reasons.append(UNEXPECTED_PACK)
         elif draft.reference_pack is None:
@@ -281,6 +296,7 @@ class ScenarioGenerator:
             persona_id=persona.id,
             product_id=product.product_id,
             mode=GenerationMode.GROUNDED if reference is not None else GenerationMode.UNGROUNDED,
+            evaluation_profile=evaluation_profile,
             reference_id=reference.reference_id if reference is not None else None,
             reference_pack_id=pack_id_for(scenario_id) if pack is not None else None,
             business_goal=draft.business_goal,

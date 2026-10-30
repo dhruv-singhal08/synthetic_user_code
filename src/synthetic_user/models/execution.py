@@ -25,6 +25,36 @@ class ProductOutcome(StrEnum):
     TIMEOUT = "timeout"
 
 
+class ConversationRole(StrEnum):
+    USER = "user"
+    PRODUCT = "product"
+
+
+class ConversationTurnKind(StrEnum):
+    QUESTION = "question"
+    CLARIFICATION = "clarification"
+    CLARIFICATION_ANSWER = "clarification_answer"
+    ANSWER = "answer"
+    DENIAL = "denial"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+
+
+class ConversationTurn(StrictModel):
+    """One visible turn in the product conversation; transport details stay in raw responses."""
+
+    role: ConversationRole
+    kind: ConversationTurnKind
+    message: NonEmptyStr
+    latency_ms: float | None = Field(default=None, ge=0)
+
+
+class ClarificationReplyDraft(StrictModel):
+    """Persona-authored answer to one product clarification."""
+
+    reply: NonEmptyStr
+
+
 class ResponseArtifact(StrictModel):
     kind: NonEmptyStr = Field(description='e.g. "sql", "table", "text", "json"')
     content: str | dict[str, Any] | list[Any]
@@ -88,9 +118,11 @@ class ExecutionRecord(StrictModel):
     product_id: NonEmptyStr
     adapter: NonEmptyStr
     submitted_question: NonEmptyStr
+    session_id: str | None = None
     started_at: datetime
     latency_ms: float | None = Field(default=None, ge=0)
     response: ProductResponse
+    turns: list[ConversationTurn] = Field(default_factory=list)
     raw_response_path: str | None = None
 
     @model_validator(mode="before")

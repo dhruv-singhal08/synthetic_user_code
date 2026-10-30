@@ -3,7 +3,7 @@
 Config::
 
     product_adapter:
-      type: fixture | http_json | python
+      type: fixture | http_json | http_sse | python
       options: {...}
 
 or ``product_adapter: config/products/<product_id>.adapter.yaml`` (same shape in the file).
@@ -24,6 +24,11 @@ from pydantic import Field, ValidationError
 from synthetic_user.adapters.base import ProductAdapter
 from synthetic_user.adapters.fixture import FixtureAdapter
 from synthetic_user.adapters.http_json import HttpJsonAdapter, Transport, urllib_transport
+from synthetic_user.adapters.http_sse import (
+    HttpSseAdapter,
+    SseTransport,
+    aiohttp_sse_transport,
+)
 from synthetic_user.core.config import AppConfig, ProductAdapterType
 from synthetic_user.core.exceptions import ConfigError, format_validation_error
 from synthetic_user.models.base import NonEmptyStr, StrictModel
@@ -45,6 +50,7 @@ def create_adapter(
     *,
     env: Mapping[str, str] | None = None,
     transport: Transport = urllib_transport,
+    sse_transport: SseTransport = aiohttp_sse_transport,
 ) -> ProductAdapter:
     """Unknown type, invalid options or a bad import -> ConfigError."""
     config = settings.product_adapter
@@ -53,6 +59,8 @@ def create_adapter(
         return FixtureAdapter.from_file(_options(FixtureOptions, config.options, config.type).path)
     if config.type is ProductAdapterType.HTTP_JSON:
         return HttpJsonAdapter.from_options(config.options, env=environ, transport=transport)
+    if config.type is ProductAdapterType.HTTP_SSE:
+        return HttpSseAdapter.from_options(config.options, env=environ, transport=sse_transport)
     if config.type is ProductAdapterType.PYTHON:
         return _python_adapter(_options(PythonOptions, config.options, config.type))
     raise ConfigError(f"Unknown product_adapter.type: {config.type!r}")

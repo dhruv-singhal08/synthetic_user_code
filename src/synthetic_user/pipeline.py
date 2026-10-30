@@ -1,9 +1,11 @@
 """The single orchestrator: reference -> scenarios -> questions -> execute -> evaluate.
 
 The "reference" step only checks the user's reference file + usage guide (never generated
-here); without one the run is ungrounded. Grounded scenarios write reference_packs.json (the
-answer keys); a person may edit a pack before questions (update_reference_pack), which
-invalidates the later steps.
+here); without one the run is ungrounded. Grounded NL2SQL scenarios write reference_packs.json;
+Agent questions carry their answer keys as expected behaviour and success criteria instead.
+When a golden set is present, scenarios and questions are deterministic projections of its rows;
+their canonical tool/source definitions were validated against Reference data during setup.
+A person may edit an NL2SQL pack before questions, invalidating the later steps.
 
 Run artifacts live in ``<artifacts_dir>/runs/<run_id>/``. Existing artifacts are reused;
 a step is regenerated only when asked (from_step / force_steps), when its files are missing,
@@ -33,14 +35,21 @@ from synthetic_user.core.exceptions import (
     ArtifactIntegrityError,
     ArtifactNotFoundError,
 )
-from synthetic_user.core.identifiers import SequentialIdGenerator, new_run_id
+from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator, new_run_id
 from synthetic_user.core.trace import RUN_LOG, trace_step
 from synthetic_user.kpis import compute_kpis, kpis_csv
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.tracing import TracingLLMClient
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
+from synthetic_user.models.evaluation_profile import (
+    AgentMetric,
+    EvaluationProfile,
+    EvaluationProfileSelection,
+    resolve_evaluation_profile,
+)
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
+from synthetic_user.models.golden_set import GoldenSet
 from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
@@ -91,7 +100,7 @@ STEP_ARTIFACTS: dict[Step, dict[str, str]] = {
 }
 # Raw product responses (when the adapter supplies them): runs/<run_id>/raw/<execution_id>.json
 RAW_DIR = "raw"
-# Written only in grounded mode (ungrounded scenarios have no reference pack).
+# Written only for grounded NL2SQL scenarios.
 OPTIONAL_ARTIFACTS = frozenset({"reference_packs"})
 
 
@@ -101,6 +110,9 @@ class RunInputs:
     product: ProductDescription
     # The user's reference file (+ usage guide); None -> ungrounded run.
     reference: Reference | None = None
+    # SME-authored Agent examples used with Reference data to guide new scenario/question synthesis.
+    golden_set: GoldenSet | None = None
+    evaluation_profile: EvaluationProfile | None = None
 
     @property
     def mode(self) -> GenerationMode:
@@ -109,6 +121,13 @@ class RunInputs:
     @property
     def reference_id(self) -> str | None:
         return self.reference.reference_id if self.reference else None
+
+    @property
+    def profile(self) -> EvaluationProfile:
+        return (
+            self.evaluation_profile
+            or resolve_evaluation_profile(self.product, EvaluationProfileSelection.AUTO)[0]
+        )
 
 
 @dataclass(frozen=True)
@@ -204,6 +223,11 @@ def validate_run(
         owner = scenario_by_id.get(q.scenario_id)
         if owner is None:
             problems.append(f"{q.question_id} -> unknown scenario {q.scenario_id}")
+        elif q.evaluation_profile is not owner.evaluation_profile:
+            problems.append(
+                f"{q.question_id} profile {q.evaluation_profile} != scenario's "
+                f"{owner.evaluation_profile}"
+            )
         elif q.reference_pack_id != owner.reference_pack_id:
             problems.append(
                 f"{q.question_id} uses reference pack {q.reference_pack_id}, its scenario "
@@ -270,7 +294,7 @@ class SyntheticUserPipeline:
                 "Reference %s (%s, %d chars): mode grounded",
                 reference.reference_id,
                 reference.kind.value,
-                len(reference.render()),
+                reference.rendered_chars(),
             )
             if reference.instructions is None:
                 warnings.append(
@@ -301,12 +325,19 @@ class SyntheticUserPipeline:
                 reused=True,
             )
 
+        if inputs.golden_set is not None and inputs.reference is None:
+            raise ArtifactIntegrityError("Golden-guided generation requires Reference data")
         generator = ScenarioGenerator(
             self._llm, self._settings, self._log, id_generator=self._ids()
         )
         with self._trace(run_id, Step.SCENARIOS):
             result = await generator.generate(
-                inputs.persona, inputs.product, inputs.reference, count=count
+                inputs.persona,
+                inputs.product,
+                inputs.reference,
+                count=count,
+                evaluation_profile=inputs.profile,
+                golden_set=inputs.golden_set,
             )
         rejected = [*result.rejected, *result.duplicates]
         self._store.write_models(self._file(run_id, "scenarios"), result.accepted, Scenario)
@@ -314,11 +345,11 @@ class SyntheticUserPipeline:
             self._file(run_id, "scenarios_rejected"), rejected, RejectedScenario
         )
         skip: set[str] = set()
-        if inputs.reference is not None:
+        if result.packs:
             self._store.write_models(
                 self._file(run_id, "reference_packs"), result.packs, ReferencePack
             )
-        else:  # ungrounded: no reference_packs.json
+        else:  # Agent and ungrounded runs do not have schema reference packs.
             self._store.delete(self._file(run_id, "reference_packs"))
             skip.add("reference_packs")
         self._save_manifest(
@@ -329,6 +360,7 @@ class SyntheticUserPipeline:
                 product_id=inputs.product.product_id,
                 mode=inputs.mode,
                 reference_id=inputs.reference_id,
+                evaluation_profile=inputs.profile,
                 llm_provider=self._llm.provider_name,
                 llm_model=self._llm.model_name,
                 pipeline_version=__version__,
@@ -376,12 +408,30 @@ class SyntheticUserPipeline:
             )
             return QuestionStep(questions, rejected, reused=True)
 
+        golden_question_limit = (
+            self._settings.generation.question.agent_golden_max_questions_per_scenario
+        )
+        if inputs.golden_set is not None and count is not None and count > golden_question_limit:
+            raise ArtifactIntegrityError(
+                "Golden-guided runs accept at most "
+                f"{golden_question_limit} new questions per scenario"
+            )
+        resolved_count = (
+            golden_question_limit if inputs.golden_set is not None and count is None else count
+        )
         generator = QuestionGenerator(
             self._llm, self._settings, self._log, id_generator=self._ids()
         )
         with self._trace(run_id, Step.QUESTIONS):
             result = await generator.generate(
-                inputs.persona, inputs.product, scenarios, inputs.reference, packs, count=count
+                inputs.persona,
+                inputs.product,
+                scenarios,
+                inputs.reference,
+                packs,
+                count=resolved_count,
+                evaluation_profile=inputs.profile,
+                golden_set=inputs.golden_set,
             )
         self._store.write_models(self._file(run_id, "questions"), result.questions, QuestionCase)
         self._store.write_models(
@@ -391,39 +441,98 @@ class SyntheticUserPipeline:
         return QuestionStep(result.questions, result.rejected, reused=False)
 
     async def execute_questions(
-        self, run_id: str, inputs: RunInputs, *, force: bool = False
+        self,
+        run_id: str,
+        inputs: RunInputs,
+        *,
+        force: bool = False,
+        start_from_question: int | None = None,
     ) -> ExecuteStep:
         manifest = self._require_manifest(run_id, inputs)
         scenarios = self._load_scenarios(run_id)
         questions = self._load_questions(run_id)
         validate_run(scenarios=scenarios, questions=questions)
-        if not force and self._has(run_id, Step.EXECUTE):
+        if start_from_question is not None and not 1 <= start_from_question <= len(questions):
+            raise ArtifactIntegrityError(
+                f"start_from_question must be between 1 and {len(questions)}"
+            )
+        if not force and start_from_question is None and self._has(run_id, Step.EXECUTE):
             executions = self._load_executions(run_id)
             validate_run(scenarios=scenarios, questions=questions, executions=executions)
             return ExecuteStep(executions, reused=True)
 
         raw_dir = run_artifact(run_id, RAW_DIR)
-        for stale in sorted(self._store.path_for(raw_dir).glob("*.json")):
-            stale.unlink()  # raw responses of a previous execute step
+        preserved: list[ExecutionRecord] = []
+        selected_questions = questions
+        if start_from_question is None:
+            for stale in sorted(self._store.path_for(raw_dir).glob("*.json")):
+                stale.unlink()  # raw responses of a previous execute step
+        else:
+            previous = self._load_executions(run_id)
+            boundary = start_from_question - 1
+            if len(previous) < boundary:
+                raise ArtifactIntegrityError(
+                    f"Cannot resume from question {start_from_question}: only "
+                    f"{len(previous)} execution record(s) exist"
+                )
+            preserved = previous[:boundary]
+            for index, record in enumerate(preserved):
+                expected = questions[index].question_id
+                if record.question_id != expected:
+                    raise ArtifactIntegrityError(
+                        f"Cannot resume: execution {record.execution_id} is for "
+                        f"{record.question_id}, expected {expected}"
+                    )
+            for stale_record in previous[boundary:]:
+                if stale_record.raw_response_path:
+                    self._store.delete(run_artifact(run_id, stale_record.raw_response_path))
+            selected_questions = questions[boundary:]
+            self._log.info(
+                "Resuming execution from question %d: preserving %d, retrying %d",
+                start_from_question,
+                len(preserved),
+                len(selected_questions),
+            )
 
         def write_raw(execution_id: str, body: JsonValue) -> str:
             relative = raw_dir / f"{execution_id}.json"
             self._store.write_text(relative, json.dumps(body, indent=2, ensure_ascii=False))
             return f"{RAW_DIR}/{execution_id}.json"
 
+        ids = self._ids()
+        for _ in preserved:
+            ids.next(IdKind.EXECUTION)
         executor = ProductExecutor(
-            self._product, self._settings, self._log, id_generator=self._ids()
+            self._product,
+            self._settings,
+            self._log,
+            llm=self._llm,
+            id_generator=ids,
         )
+        scenario_by_id = {scenario.id: scenario for scenario in scenarios}
+        pack_by_id = {pack.pack_id: pack for pack in self._load_packs(run_id)}
         with self._trace(run_id, Step.EXECUTE):
-            executions = await executor.execute_many(
-                questions, product_id=inputs.product.product_id, raw_writer=write_raw
+            retried = await executor.execute_many(
+                selected_questions,
+                product_id=inputs.product.product_id,
+                persona=inputs.persona,
+                scenarios=scenario_by_id,
+                packs=pack_by_id,
+                raw_writer=write_raw,
             )
+        executions = [*preserved, *retried]
         self._store.write_models(self._file(run_id, "executions"), executions, ExecutionRecord)
         self._save_manifest(manifest, Step.EXECUTE)
         return ExecuteStep(executions, reused=False)
 
     async def evaluate_executions(
-        self, run_id: str, inputs: RunInputs, *, force: bool = False
+        self,
+        run_id: str,
+        inputs: RunInputs,
+        *,
+        force: bool = False,
+        evaluation_profile: EvaluationProfile | None = None,
+        agent_metrics: Sequence[AgentMetric] | None = None,
     ) -> EvaluateStep:
         manifest = self._require_manifest(run_id, inputs)
         scenarios = self._load_scenarios(run_id)
@@ -466,6 +575,8 @@ class SyntheticUserPipeline:
             self._settings,
             self._log,
             reference=inputs.reference,
+            profile=evaluation_profile or inputs.profile,
+            agent_metrics=agent_metrics,
             id_generator=self._ids(),
         )
         with self._trace(run_id, Step.EVALUATE):
@@ -512,7 +623,12 @@ class SyntheticUserPipeline:
         reference_id = inputs.reference_id
         manifest = self._manifest_or_none(run_id)
         cascade = manifest is not None and (
-            manifest.reference_id != reference_id or manifest.mode is not inputs.mode
+            manifest.reference_id != reference_id
+            or manifest.mode is not inputs.mode
+            or (
+                manifest.evaluation_profile is not None
+                and manifest.evaluation_profile is not inputs.profile
+            )
         )
         # "reused" = same reference (and mode) as the existing run; the check itself is cheap.
         note(Step.REFERENCE, manifest is not None and not cascade)
@@ -541,7 +657,10 @@ class SyntheticUserPipeline:
         cascade = cascade or not execute_step.reused
 
         evaluate_step = await self.evaluate_executions(
-            run_id, inputs, force=cascade or Step.EVALUATE in regenerate
+            run_id,
+            inputs,
+            force=cascade or Step.EVALUATE in regenerate,
+            evaluation_profile=inputs.profile,
         )
         note(Step.EVALUATE, evaluate_step.reused)
 
@@ -603,6 +722,14 @@ class SyntheticUserPipeline:
                 f"not {inputs.reference_id} (file or usage guide changed); regenerate from the "
                 "scenarios step"
             )
+        if (
+            manifest.evaluation_profile is not None
+            and manifest.evaluation_profile is not inputs.profile
+        ):
+            raise ArtifactIntegrityError(
+                f"Run {manifest.run_id} was built for {manifest.evaluation_profile.value}, not "
+                f"{inputs.profile.value}; regenerate from the scenarios step"
+            )
 
     @contextmanager
     def _trace(self, run_id: str, step: Step) -> Iterator[None]:
@@ -610,7 +737,12 @@ class SyntheticUserPipeline:
         if not self._settings.trace.enabled:
             yield
             return
-        with trace_step(self._store.path_for(run_artifact(run_id, RUN_LOG)), run_id, step.value):
+        with trace_step(
+            self._store.path_for(run_artifact(run_id, RUN_LOG)),
+            run_id,
+            step.value,
+            max_field_chars=self._settings.trace.max_field_chars,
+        ):
             yield
 
     def _save_manifest(

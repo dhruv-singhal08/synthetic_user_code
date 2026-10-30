@@ -1,17 +1,24 @@
-# NL2SQL product API ("nlsql agent"), from its Swagger page:
-#   POST /generate/sql/?timeout=10   body {"input": "<question>", "session_id": "<id>"}
+# NL2SQL product API ("nlsql agent") - QA / E2 deployment
+#   POST /generate/sql/?timeout=300   body {"input": "<question>", "session_id": "<id>"}
+#   Auth: Authorization: Bearer <BLUE_TOKEN>
 #   200 -> {"type": "sql", "result": "<SQL>", "widget_title": ..., "column_display_hints": [...],
 #           "message": "Here is the SQL query for: ...", "session_id": "<id>"}
 #
 # Web UI: upload this file as the contract in "Product connection" (the URL field wins over
 #   options.url below).
 # CLI:    product_adapter: ./config/products/generate_sql.adapter.yaml
+#
+# Before running (Mac/zsh):  export BLUE_TOKEN='<YOUR_BLUE_TOKEN>'   (token valid ~1 hour)
 type: http_json
 options:
-  url: http://127.0.0.1:8007/generate/sql/?timeout=10   # ?timeout = the product's own limit
+  url: https://gcsgenaiconvbi-qa.aexp.com/generate/sql/?timeout=300   # ?timeout = the product's own limit
   method: POST
-  timeout: 300                        # HTTP wait per question; the app config's
-                                      # product.timeout_seconds is also a limit (lower wins)
+  timeout: 320                        # HTTP wait per question; a bit above the product's 300s
+                                      # (the app config's product.timeout_seconds is also a limit; lower wins)
+  headers:
+    Authorization: "Bearer ${BLUE_TOKEN}"
+    accept: "*/*"
+    Content-Type: application/json
   request_template:
     input: "{utterance}"
     session_id: "{uuid}"              # a fresh session per question (no shared history)
@@ -24,9 +31,7 @@ options:
         path: widget_title
       - kind: column_display_hints
         path: column_display_hints
-    # `type` is "sql" for an answer. When you know the other values the product returns
-    # (e.g. for a clarification question or an unsupported request), map them so those replies
-    # are not judged as SQL answers - for example:
+    # `type` is "sql" for an answer. Map other values when known, e.g.:
     # clarification_when: "type == clarification"
     # clarification_message: message
     # denied_when: "type == unsupported"

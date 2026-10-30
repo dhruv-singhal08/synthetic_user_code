@@ -20,24 +20,34 @@ from synthetic_user.nodes.question_generator import SURPLUS, VAGUE_NOT_ALLOWED, 
 from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
 
 
+def plan_for(complexity: str, limit: int | None = None) -> dict[str, Any]:
+    """A structured plan whose computed complexity is ``complexity``."""
+    rank = {"action": "rank", "subject": "employees by card spend", "sources": [], "limit": limit}
+    trend = {"action": "trend", "subject": "monthly card spend", "sources": []}
+    deliverables = {"simple": [rank], "medium": [rank, trend], "complex": [rank, trend, rank]}
+    return {"deliverables": deliverables[complexity], "filters": [], "is_follow_up": False}
+
+
 def q(
     utterance: str,
     style: str = "precise",
     ambiguity: str = "low",
     complexity: str = "simple",
+    limit: int | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     return {
         "utterance": utterance,
+        "plan": plan_for(complexity, limit),
         "intent": {"task_type": "ranking"},
-        "question_characteristics": {
-            "style": style,
-            "ambiguity_level": ambiguity,
-            "complexity": complexity,
-        },
+        "question_characteristics": {"style": style, "ambiguity_level": ambiguity},
         "expectations": {
-            "expected_behavior": "Rank the top spenders, keeping currencies separate.",
-            "success_criteria": ["names the top spenders", "does not mix currencies"],
+            "expected_behavior": "Rank the spenders. If amounts use several currencies, keep "
+            "them separate.",
+            "success_criteria": [
+                "names the spenders in ranked order",
+                "if amounts use several currencies, keeps them separate",
+            ],
         },
         **extra,
     }
@@ -182,8 +192,8 @@ async def test_stable_order_under_concurrency(env: Env) -> None:
 async def test_leak_retried_then_clean_passes(env: Env) -> None:
     llm = FakeLLMClient(
         [
-            batch(q("Top 5 spenders in card_transactions?")),
-            batch(q("Who are our top 5 card spenders?")),
+            batch(q("Top 5 spenders in card_transactions?", limit=5)),
+            batch(q("Who are our top 5 card spenders?", limit=5)),
         ]
     )
     result = await env.run(llm, count=1)
@@ -377,9 +387,12 @@ async def test_question_owns_its_expectations(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Who are our biggest card spenders this quarter?"))])
     result = await env.run(llm, count=1)
     expectations = result.questions[0].expectations
-    assert expectations.success_criteria == ["names the top spenders", "does not mix currencies"]
+    assert expectations.success_criteria == [
+        "names the spenders in ranked order",
+        "if amounts use several currencies, keeps them separate",
+    ]
     assert expectations.success_criteria != env.scenarios[0].success_criteria
-    assert expectations.expected_behavior.startswith("Rank the top spenders")
+    assert expectations.expected_behavior.startswith("Rank the spenders")
 
 
 @pytest.mark.parametrize(
@@ -507,39 +520,45 @@ async def test_persona_ambiguity_overrides_config(env: Env) -> None:
     assert not refused.questions and refused.rejected[0].reasons == [VAGUE_NOT_ALLOWED]
 
 
-async def test_fixed_complexity_is_enforced_with_a_retry(env: Env) -> None:
-    simple_only = with_prefs(env.persona, complexity="simple")
-
-    def with_complexity(utterance: str, complexity: str | None) -> dict[str, Any]:
-        question = q(utterance)
-        if complexity:
-            question["question_characteristics"]["complexity"] = complexity
-        return question
-
+async def test_complexity_is_computed_and_hard_policy_enforced_with_a_retry(env: Env) -> None:
+    # Complexity comes from the structured plan, never from a model-provided label.
     llm = FakeLLMClient(
         [
-            batch(with_complexity("Who spent most last month?", "complex")),
-            batch(with_complexity("Who spent most last month?", "complex")),
+            batch(q("Who spent most, and how did spend trend?", complexity="medium")),
+            batch(q("Who spent most, and how did spend trend?", complexity="medium")),
             batch(
-                with_complexity("Who spent most last month?", "complex"),
-                with_complexity("Which team spent most?", "simple"),
+                q("Who spent most, and how did spend trend?", complexity="medium"),
+                q("Which team spent most?"),
             ),
         ]
     )
-    result = await env.run(llm, persona=simple_only, count=2)
-    assert "persona asks for simple questions" in llm.calls[1].user  # retry feedback
+    result = await env.run(llm, count=2, allowed_complexities=["simple"])
+    assert "computed complexity medium is not allowed" in llm.calls[1].user  # retry feedback
     assert [x.utterance for x in result.questions] == ["Which team spent most?"]
     assert result.questions[0].question_characteristics.complexity == "simple"
-    assert result.rejected[0].reasons == [
-        "complexity complex: the persona asks for simple questions"
-    ]
+    assert any("computed complexity medium" in r for r in result.rejected[0].reasons)
 
 
 async def test_mixed_complexity_accepts_any(env: Env) -> None:
+    question = q("Who spent most last month?", complexity="complex")
+    result = await env.run(
+        FakeLLMClient([batch(question, q("Which merchants?"))]),
+        allowed_complexities=["simple", "medium", "complex"],
+        max_deliverables=3,
+    )
+    assert not result.rejected
+    assert [x.question_characteristics.complexity for x in result.questions] == [
+        "complex",
+        "simple",
+    ]
+
+
+async def test_model_supplied_complexity_label_is_rejected(env: Env) -> None:
     question = q("Who spent most last month?")
     question["question_characteristics"]["complexity"] = "complex"
-    result = await env.run(FakeLLMClient([batch(question, q("Top merchants?"))]))
-    assert len(result.questions) == 2 and not result.rejected
+    result = await env.run(FakeLLMClient([batch(question)]), count=1)
+    assert not result.questions
+    assert "complexity: Extra inputs are not permitted" in result.rejected[0].reasons[0]
 
 
 def test_technical_knowledge_high_makes_the_persona_technical(sample_persona: Persona) -> None:
@@ -547,3 +566,70 @@ def test_technical_knowledge_high_makes_the_persona_technical(sample_persona: Pe
     assert not sample_persona.is_technical
     data["expertise"]["technical_knowledge"] = "high"
     assert Persona.model_validate(data).is_technical
+
+
+# --- hard question policy --------------------------------------------------------------------
+
+
+def _draft(utterance: str, **changes: Any) -> Any:
+    from synthetic_user.models.question import QuestionDraft
+
+    raw = q(utterance)
+    for path, value in changes.items():
+        target = raw
+        *parents, leaf = path.split("__")
+        for key in parents:
+            target = target[key]
+        target[leaf] = value
+    return QuestionDraft.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("utterance", "changes", "problem"),
+    [
+        (
+            "Show complaint themes?",
+            {"plan__deliverables": [{"action": "rank", "subject": "themes with comments"}]},
+            "combines multiple requested outputs",
+        ),
+        ("Who spent most and what did they buy?", {}, "appears to request a second output"),
+        ("Top 5 spenders?", {}, "do not record the same numeric limit"),
+        (
+            "Who spent most?",
+            {"expectations__expected_behavior": "Return the top 10 spenders."},
+            "invents a top-N",
+        ),
+        (
+            "Who spent most?",
+            {"expectations__success_criteria": ["shows amounts in USD"]},
+            "unconditional currency requirement",
+        ),
+        (
+            "Who spent most?",
+            {"plan__deliverables": [{"action": "rank", "subject": "spend", "sources": ["CRM"]}]},
+            "unknown product data sources",
+        ),
+        ("Who spent most?", {"plan__is_follow_up": True}, "follow-up questions are disabled"),
+        (" ".join(["word"] * 45), {}, "words; maximum is 40"),
+    ],
+)
+def test_hard_question_policy(
+    env: Env, utterance: str, changes: dict[str, Any], problem: str
+) -> None:
+    from synthetic_user.nodes.question_generator import question_policy_problems
+
+    problems = question_policy_problems(
+        _draft(utterance, **changes), env.product, env.settings.generation.question
+    )
+    assert any(problem in p for p in problems), problems
+
+
+def test_clean_question_has_no_policy_problems(env: Env) -> None:
+    from synthetic_user.nodes.question_generator import question_policy_problems
+
+    assert (
+        question_policy_problems(
+            _draft("Who spent most last month?"), env.product, env.settings.generation.question
+        )
+        == []
+    )

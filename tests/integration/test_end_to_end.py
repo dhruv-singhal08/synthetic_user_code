@@ -20,6 +20,7 @@ from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.scripted import ScriptedLLMClient
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
+from synthetic_user.models.evaluation_profile import EvaluationProfile
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
@@ -156,11 +157,11 @@ async def test_full_run_files_types_refs_and_outcomes(
         evaluations=evaluations,
     )
 
-    # the wrong join fails correctness + hallucination with a bug; clarification and denial
-    # are recorded only
+    # the wrong join fails rules adherence with a bug; clarification and denial are recorded only
     failed = [e for e in evaluations if e.verdict == "fail"]
     assert failed and all(e.bug_candidates for e in failed)
-    assert [f.category for e in failed for f in e.findings] == ["correctness", "hallucination_rate"]
+    assert [f.category for e in failed for f in e.findings] == ["rules_adherence"]
+    assert all(e.evaluation_profile == "nl2sql" for e in evaluations)
     recorded = [e.product_outcome for e in evaluations if e.verdict is None]
     assert sorted(recorded) == ["clarification", "denied"]
     assert [b.bug_id for b in bugs] == [b.bug_id for e in evaluations for b in e.bug_candidates]
@@ -168,19 +169,24 @@ async def test_full_run_files_types_refs_and_outcomes(
     # run KPIs (kpis.json / kpis.csv)
     kpis = RunKpis.model_validate_json((run_dir / "kpis.json").read_bytes())
     assert kpis == summary.kpis
-    assert (kpis.judged, kpis.task_success_rate, kpis.availability) == (1, 0.0, 1.0)
+    assert (kpis.judged, kpis.accuracy, kpis.task_success_rate, kpis.availability) == (
+        1,
+        0.0,
+        0.0,
+        1.0,
+    )
     means = {m.metric.value: m.mean for m in kpis.metrics}
     assert means == {
-        "relevancy": 1.0,
-        "correctness": 0.0,
-        "hallucination_rate": 0.333,
-        "completeness": 1.0,
+        "semantic_correctness": 1.0,
+        "rules_adherence": 0.0,
+        "schema_faithfulness": 1.0,
     }
     assert (kpis.new_bugs, kpis.new_bugs_by_severity["high"], kpis.known_gap_bugs) == (1, 1, 0)
     kpi_csv = (run_dir / "kpis.csv").read_text(encoding="utf-8")
-    assert "Hallucination rate (mean),0.333,1" in kpi_csv and "Groundedness" not in kpi_csv
+    assert "Rules Adherence (mean),0,1" in kpi_csv and "Accuracy,0,1" in kpi_csv
     judged = next(e for e in evaluations if e.metrics is not None)
-    assert judged.metrics is not None and judged.metrics.groundedness  # still computed (D206)
+    assert judged.metrics is not None
+    assert [c.tag for c in judged.criteria_results] == ["CRIT-01", "CRIT-02"]
 
     assert summary.steps_run == list(Step)
     assert summary.verdicts == {"pass": 0, "fail": 1, "inconclusive": 0, "recorded_only": 2}
@@ -209,7 +215,7 @@ async def test_from_step_regenerates_downstream_only(
     summary = await pipeline2.run(inputs, run_id=RUN_ID, from_step=Step.EXECUTE)
     assert summary.steps_run == [Step.EXECUTE, Step.EVALUATE]
     assert len(product2.asked) == 3
-    assert llm2.calls and all("You evaluate how well" in c.system for c in llm2.calls)
+    assert llm2.calls and all("three narrow NL2SQL comparisons" in c.system for c in llm2.calls)
 
 
 async def test_force_step_cascades(settings: AppConfig, inputs: RunInputs) -> None:
@@ -253,7 +259,8 @@ def test_cli_run_offline(fake_config: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "verdicts pass=0 fail=1 inconclusive=0 recorded_only=2" in result.output
     assert "bug_candidates=1" in result.output
-    assert "kpi correctness mean=0 pass_rate=0 n=1" in result.output
+    assert "kpi accuracy=0 judged=1" in result.output
+    assert "kpi rules_adherence mean=0 pass_rate=0 n=1" in result.output
     assert "run_folder=" in result.output
 
     again = CliRunner().invoke(
@@ -404,3 +411,35 @@ async def test_rerun_appends_to_the_run_log_and_it_can_be_off(
     pipeline, _llm, _product = _pipeline(off)
     await pipeline.execute_questions(RUN_ID, inputs, force=True)
     assert log_file.stat().st_size == size
+
+
+async def test_execute_resumes_from_a_question_keeping_earlier_records(
+    settings: AppConfig, inputs: RunInputs
+) -> None:
+    pipeline, _, _ = _pipeline(settings)
+    await pipeline.run(inputs, run_id=RUN_ID)
+    run_dir = settings.paths.artifacts_dir / "runs" / RUN_ID
+    first = _load(run_dir, "executions.json", TypeAdapter(list[ExecutionRecord]))
+
+    pipeline2, _, product2 = _pipeline(settings)
+    step = await pipeline2.execute_questions(RUN_ID, inputs, start_from_question=2)
+    assert len(product2.asked) == 2  # only questions 2 and 3 are sent again
+    assert [e.execution_id for e in step.executions] == ["EXE_001", "EXE_002", "EXE_003"]
+    assert step.executions[0] == first[0]  # question 1 kept as it was
+    with pytest.raises(ArtifactIntegrityError, match="start_from_question must be between"):
+        await pipeline2.execute_questions(RUN_ID, inputs, start_from_question=9)
+
+
+async def test_changing_the_evaluation_profile_invalidates_the_run(
+    settings: AppConfig, inputs: RunInputs
+) -> None:
+    pipeline, _, _ = _pipeline(settings)
+    await pipeline.run(inputs, run_id=RUN_ID)
+    agent_inputs = RunInputs(
+        persona=inputs.persona,
+        product=inputs.product,
+        reference=inputs.reference,
+        evaluation_profile=EvaluationProfile.AGENT,
+    )
+    with pytest.raises(ArtifactIntegrityError, match="was built for nl2sql, not agent"):
+        await pipeline.generate_questions(RUN_ID, agent_inputs)

@@ -1,8 +1,10 @@
-"""Reference data (design v4, D203): two fixed input formats and the per-scenario cheat sheet.
+"""Reference data: two content formats, optional Agent context and NL2SQL cheat sheets.
 
 - ``data_catalog``: tables (description, rules, columns), relationships (joins; ``verified``
   is stated by the user, never by the LLM) and catalog-wide rules (ids R1, R2, ... by order).
 - ``document_collection``: documents, each a name and a free-text summary.
+- ``agent_context``: optional structured tools, data sources, workflow stages and rules on either
+  format. Agent runs use this instead of exposing physical tables/columns to the evaluator.
 
 Each grounded scenario gets a Reference Pack (cheat sheet): the LLM PICKS items by name / id
 (tables + columns, joins, rule ids; or documents); code checks every pick exists and copies
@@ -14,6 +16,7 @@ reference.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
@@ -69,6 +72,128 @@ def _normal(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+# --- Agent operational context -------------------------------------------------------------
+
+
+class AgentDataSource(StrictModel):
+    """One user-visible source the Agent can select."""
+
+    name: NonEmptyStr
+    description: NonEmptyStr
+    aliases: list[NonEmptyStr] = Field(default_factory=list)
+    limitations: list[NonEmptyStr] = Field(default_factory=list)
+
+
+class AgentSourceGroup(StrictModel):
+    """A named combination such as ``both`` -> complaints + CSAT."""
+
+    name: NonEmptyStr
+    sources: list[NonEmptyStr] = Field(min_length=2)
+    aliases: list[NonEmptyStr] = Field(default_factory=list)
+
+
+class AgentTool(StrictModel):
+    """An observable tool/operation and the sources it is allowed to use."""
+
+    name: NonEmptyStr
+    description: NonEmptyStr
+    aliases: list[NonEmptyStr] = Field(default_factory=list)
+    data_sources: list[NonEmptyStr] = Field(default_factory=list)
+    constraints: list[NonEmptyStr] = Field(default_factory=list)
+
+
+class AgentWorkflowStage(StrictModel):
+    name: NonEmptyStr
+    description: NonEmptyStr
+
+
+class AgentContext(StrictModel):
+    """Authoritative Agent surface used to ground golden-set contracts.
+
+    Names and aliases are matched case-insensitively. Golden-set values are canonicalized to the
+    exact names below, so the evaluator never grades against an invented tool or source.
+    """
+
+    tools: list[AgentTool] = Field(default_factory=list)
+    data_sources: list[AgentDataSource] = Field(min_length=1)
+    source_groups: list[AgentSourceGroup] = Field(default_factory=list)
+    workflow: list[AgentWorkflowStage] = Field(default_factory=list)
+    rules: list[NonEmptyStr] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        problems: list[str] = []
+        source_names = self._index(self.data_sources, "data source", problems)
+        self._index(self.tools, "tool", problems)
+        group_names = self._index(self.source_groups, "source group", problems)
+        if overlap := sorted(set(source_names) & set(group_names)):
+            problems.append(f"source names/aliases overlap source groups: {overlap}")
+        for group in self.source_groups:
+            for source in group.sources:
+                if _normal(source) not in source_names:
+                    problems.append(
+                        f"source group {group.name!r} names unknown data source {source!r}"
+                    )
+        for tool in self.tools:
+            for source in tool.data_sources:
+                if _normal(source) not in source_names:
+                    problems.append(f"tool {tool.name!r} names unknown data source {source!r}")
+        if dupes := find_duplicates([_normal(stage.name) for stage in self.workflow]):
+            problems.append(f"duplicate workflow stage names: {dupes}")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
+
+    @staticmethod
+    def _index(
+        items: Sequence[AgentDataSource | AgentSourceGroup | AgentTool],
+        label: str,
+        problems: list[str],
+    ) -> dict[str, str]:
+        index: dict[str, str] = {}
+        for item in items:
+            for value in (item.name, *item.aliases):
+                key = _normal(value)
+                if key in index:
+                    problems.append(f"duplicate {label} name/alias {value!r}")
+                else:
+                    index[key] = item.name
+        return index
+
+    def tool(self, name: str) -> AgentTool | None:
+        key = _normal(name)
+        return next(
+            (
+                tool
+                for tool in self.tools
+                if key in (_normal(tool.name), *map(_normal, tool.aliases))
+            ),
+            None,
+        )
+
+    def data_source(self, name: str) -> AgentDataSource | None:
+        key = _normal(name)
+        return next(
+            (
+                source
+                for source in self.data_sources
+                if key in (_normal(source.name), *map(_normal, source.aliases))
+            ),
+            None,
+        )
+
+    def source_group(self, name: str) -> AgentSourceGroup | None:
+        key = _normal(name)
+        return next(
+            (
+                group
+                for group in self.source_groups
+                if key in (_normal(group.name), *map(_normal, group.aliases))
+            ),
+            None,
+        )
+
+
 # --- input format 1: data catalog ---------------------------------------------------------------
 
 
@@ -110,6 +235,7 @@ class DataCatalog(StrictModel):
     tables: list[CatalogTable] = Field(min_length=1)
     relationships: list[CatalogRelationship] = Field(default_factory=list)
     rules: list[NonEmptyStr] = Field(default_factory=list)  # catalog-wide; ids R1, R2, ...
+    agent_context: AgentContext | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -174,6 +300,7 @@ class DocumentCollection(StrictModel):
     name: NonEmptyStr
     description: NonEmptyStr | None = None
     documents: list[CatalogDocument] = Field(min_length=1)
+    agent_context: AgentContext | None = None
 
     @model_validator(mode="after")
     def _unique(self) -> Self:
@@ -202,6 +329,10 @@ class Reference(StrictModel):
     def kind(self) -> ReferenceKind:
         return self.content.kind
 
+    @property
+    def agent_context(self) -> AgentContext | None:
+        return self.content.agent_context
+
     def instructions_text(self) -> str:
         return self.instructions or DEFAULT_INSTRUCTIONS[self.kind]
 
@@ -211,6 +342,32 @@ class Reference(StrictModel):
         if isinstance(content, DataCatalog):
             return render_catalog(content)
         return render_documents(content)
+
+    def render_agent_context(self) -> str:
+        """Only the user-visible Agent contract; never tables, columns or joins."""
+        context = self.agent_context
+        if context is None:
+            return ""
+        lines = ["Agent tools:"]
+        for tool in context.tools:
+            sources = f" [sources: {', '.join(tool.data_sources)}]" if tool.data_sources else ""
+            lines.append(f"- {tool.name}: {tool.description}{sources}")
+            lines.extend(f"    constraint: {rule}" for rule in tool.constraints)
+        lines += ["", "Agent data sources:"]
+        for source in context.data_sources:
+            lines.append(f"- {source.name}: {source.description}")
+            lines.extend(f"    limitation: {item}" for item in source.limitations)
+        if context.workflow:
+            lines += ["", "Workflow:"]
+            lines.extend(f"- {stage.name}: {stage.description}" for stage in context.workflow)
+        if context.rules:
+            lines += ["", "Agent rules:"]
+            lines.extend(f"- {rule}" for rule in context.rules)
+        return "\n".join(lines)
+
+    def rendered_chars(self) -> int:
+        """Size of all promptable reference content across both evaluation profiles."""
+        return len(self.render()) + len(self.render_agent_context())
 
 
 def _head(kind: str, name: str, description: str | None) -> str:

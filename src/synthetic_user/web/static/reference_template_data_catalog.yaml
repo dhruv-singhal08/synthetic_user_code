@@ -4,6 +4,28 @@ kind: data_catalog
 name: My product's data                       # what this catalog covers
 description: Tables the product answers from   # (optional)
 
+# Required for Agent runs. This is the only part of a
+# data catalog the Agent evaluator receives; physical tables/columns remain NL2SQL-only.
+agent_context:
+  data_sources:
+    - name: transactions
+      aliases: [Transaction data]
+      description: Posted transaction records available to the Agent.
+  source_groups: []
+  tools:
+    - name: aggregate_transactions
+      description: Counts, groups, ranks, and trends posted transactions.
+      data_sources: [transactions]
+      constraints:
+        - Use only dimensions and periods supported by the product.
+  workflow:
+    - name: intent_planning
+      description: Resolves the request scope and selects the tools and arguments.
+    - name: response_synthesis
+      description: Produces the final answer from returned tool evidence.
+  rules:
+    - Do not state a fact that is unsupported by returned tool evidence.
+
 tables:
   - name: card_transactions
     description: One row per posted card transaction.          # (optional, recommended)

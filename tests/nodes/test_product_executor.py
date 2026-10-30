@@ -73,9 +73,9 @@ class ScriptedAdapter:
         self.sent: list[str] = []
 
     async def send(self, req: ProductRequest) -> ProductResponse:
-        self.sent.append(req.utterance)
-        await asyncio.sleep(self.delays.get(req.utterance, 0))
-        value = self.script[req.utterance]
+        self.sent.append(req.report_utterance)
+        await asyncio.sleep(self.delays.get(req.report_utterance, 0))
+        value = self.script[req.report_utterance]
         if isinstance(value, BaseException):
             raise value
         return value  # type: ignore[no-any-return]

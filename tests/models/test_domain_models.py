@@ -430,52 +430,68 @@ def _metric(score: float | None = 1.0, status: str = "scored") -> dict[str, Any]
 
 
 def _metrics(**overrides: dict[str, Any]) -> dict[str, Any]:
-    base = {name: _metric() for name in ("relevancy", "correctness", "groundedness")}
-    base |= {"hallucination_rate": _metric(0.0), "completeness": _metric()}
+    base = {
+        name: _metric()
+        for name in ("semantic_correctness", "rules_adherence", "schema_faithfulness")
+    }
     return {**base, **overrides}
 
 
 NA = _metric(None, "not_applicable")
 
 
-def test_evaluation_carries_metrics_and_claims() -> None:
-    result = EvaluationResult.model_validate(
-        _evaluation(
-            verdict="pass",
-            metrics=_metrics(),
-            claims=[{"text": "USD 250", "status": "supported", "reason": "in the policy"}],
-        )
-    )
-    assert result.metrics is not None
-    assert result.metrics.by_name()[MetricName.HALLUCINATION_RATE].score == 0.0
-    assert result.claims[0].status == "supported"
+def test_evaluation_carries_profile_metrics() -> None:
+    result = EvaluationResult.model_validate(_evaluation(verdict="pass", metrics=_metrics()))
+    assert result.metrics is not None and result.evaluation_profile == "nl2sql"
+    assert result.metrics.by_name()[MetricName.SCHEMA_FAITHFULNESS].score == 1.0
 
 
 def test_metric_score_iff_scored_and_bounded() -> None:
     with pytest.raises(ValidationError, match="score is set exactly when status is scored"):
         EvaluationResult.model_validate(
-            _evaluation(verdict="pass", metrics=_metrics(relevancy=_metric(None)))
+            _evaluation(verdict="pass", metrics=_metrics(semantic_correctness=_metric(None)))
         )
     with pytest.raises(ValidationError):
         EvaluationResult.model_validate(
-            _evaluation(verdict="pass", metrics=_metrics(relevancy=_metric(1.5)))
+            _evaluation(verdict="pass", metrics=_metrics(semantic_correctness=_metric(1.5)))
         )
 
 
-def test_ungrounded_evaluation_has_no_correctness_groundedness_or_reference_claims() -> None:
-    ok = _evaluation(
-        mode="ungrounded",
-        verdict="pass",
-        metrics=_metrics(correctness=NA, groundedness=NA),
-        claims=[{"text": "USD 250", "status": "unverified", "reason": "no ground truth"}],
+def test_each_profile_requires_its_own_metrics() -> None:
+    agent_only = {"relevance": _metric(), "completion": _metric()}
+    with pytest.raises(ValidationError, match="nl2sql evaluations require exactly"):
+        EvaluationResult.model_validate(_evaluation(verdict="pass", metrics=agent_only))
+    agent = EvaluationResult.model_validate(
+        {
+            **_evaluation(mode="ungrounded", verdict="pass", metrics=agent_only),
+            "evaluation_profile": "agent",
+        }
     )
-    assert EvaluationResult.model_validate(ok).mode is GenerationMode.UNGROUNDED
-    with pytest.raises(ValidationError, match="ungrounded evaluations have no correctness"):
-        EvaluationResult.model_validate({**ok, "metrics": _metrics(groundedness=NA)})
-    with pytest.raises(ValidationError, match="do not fit mode ungrounded"):
+    assert agent.metrics is not None and set(agent.metrics.by_name()) == {
+        MetricName.RELEVANCE,
+        MetricName.COMPLETION,
+    }
+    with pytest.raises(ValidationError, match="agent evaluations require required"):
         EvaluationResult.model_validate(
-            {**ok, "claims": [{"text": "x", "status": "supported", "reason": "r"}]}
+            {
+                **_evaluation(verdict="pass", metrics={"relevance": _metric()}),
+                "evaluation_profile": "agent",
+            }
         )
+
+
+def test_former_voc_profile_reads_as_agent() -> None:
+    result = EvaluationResult.model_validate(
+        {
+            **_evaluation(
+                verdict="pass",
+                metrics={"answer_relevance": _metric(), "answer_completeness": _metric()},
+            ),
+            "evaluation_profile": "voc",
+        }
+    )
+    assert result.evaluation_profile == "agent"
+    assert result.metrics is not None and result.metrics.relevance is not None
 
 
 def test_old_check_fields_are_gone() -> None:

@@ -1,5 +1,8 @@
-"""Scenarios: what the synthetic user wants to achieve; grounded ones have a Reference Pack
-(stored in reference_packs.json, linked by reference_pack_id)."""
+"""Scenarios: what the synthetic user wants to achieve.
+
+Grounded NL2SQL scenarios have a schema Reference Pack. Grounded Agent scenarios deliberately do
+not: their answer key is generated later on the question as expected behaviour and criteria.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +12,7 @@ from typing import Annotated, Any, Self
 from pydantic import Field, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
+from synthetic_user.models.evaluation_profile import EvaluationProfile
 from synthetic_user.models.reference import (
     CatalogPackDraft,
     DocumentPackDraft,
@@ -76,9 +80,11 @@ class ScenarioBatchDraft(StrictModel):
 
 class Scenario(StrictModel):
     id: NonEmptyStr = Field(pattern=r"^SCN_\d{3,}$")
+    golden_case_id: NonEmptyStr | None = Field(default=None, pattern=r"^GOLD_\d{3,}$")
     persona_id: NonEmptyStr
     product_id: NonEmptyStr
     mode: GenerationMode
+    evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL
     reference_id: NonEmptyStr | None = None
     reference_pack_id: NonEmptyStr | None = None
     business_goal: NonEmptyStr
@@ -96,8 +102,13 @@ class Scenario(StrictModel):
     def _reference_matches_mode(self) -> Self:
         problems = [
             mode_mismatch(self.mode, self.reference_id is not None, "a reference_id"),
-            mode_mismatch(self.mode, self.reference_pack_id is not None, "a reference_pack_id"),
         ]
+        if self.evaluation_profile is EvaluationProfile.NL2SQL:
+            problems.append(
+                mode_mismatch(self.mode, self.reference_pack_id is not None, "a reference_pack_id")
+            )
+        elif self.reference_pack_id is not None:
+            problems.append("Agent scenarios must not have a reference_pack_id")
         found = [p for p in problems if p]
         if found:
             raise ValueError(f"scenario {self.id}: {'; '.join(found)}")

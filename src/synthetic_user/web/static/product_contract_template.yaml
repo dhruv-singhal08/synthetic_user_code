@@ -10,12 +10,15 @@ headers:
   Authorization: "Bearer ${PRODUCT_API_TOKEN}"
 timeout: 300                          # HTTP seconds per question (product.timeout_seconds in
                                       # the app config also applies; the lower one wins)
+# Optional TLS trust bundle: `amexcerts`, a PEM file path, or `${PRODUCT_CA_BUNDLE}`.
+# Certificate and hostname verification remain enabled.
+# tls_ca_bundle: "${PRODUCT_CA_BUNDLE}"
 
 # Request body. {utterance} = the generated question; {uuid} = a fresh UUID per question
-# (use it for a session / request id); {session_id} = the tool's session (null in single-turn).
+# (use it for a request id); {session_id} = one stable id reused across clarification turns.
 request_template:
   question: "{utterance}"
-  session_id: "{uuid}"
+  session_id: "{session_id}"
 
 # Where the reply lives: dotted paths into the JSON body (list items by index, e.g. data.items.0).
 response_mapping:

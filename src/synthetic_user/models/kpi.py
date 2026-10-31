@@ -12,6 +12,9 @@ from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import MetricName, Severity
 from synthetic_user.models.run import GenerationMode
 
+# Example finding descriptions kept per consolidated issue.
+MAX_ISSUE_EXAMPLES = 3
+
 
 class MetricKpi(StrictModel):
     metric: MetricName
@@ -46,7 +49,7 @@ class ConsolidatedIssue(StrictModel):
     affected_question_ids: list[NonEmptyStr] = Field(min_length=1)
     # A timeout has no judge finding, but still belongs in the consolidated no-SQL issue.
     finding_ids: list[NonEmptyStr] = Field(default_factory=list)
-    examples: list[NonEmptyStr] = Field(min_length=1, max_length=3)
+    examples: list[NonEmptyStr] = Field(min_length=1, max_length=MAX_ISSUE_EXAMPLES)
     known_gap: bool = False
 
 

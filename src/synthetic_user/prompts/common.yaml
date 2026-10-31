@@ -1,0 +1,14 @@
+# Prompt text shared by every node; a literal dollar sign is written $$.
+
+# Introduces the compact output example of every structured call (D204, prompts/contracts.py).
+output_contract: >-
+  Return ONE JSON object shaped exactly like this example. <...> is a placeholder to fill;
+  <a | b> means one of those values. Use real JSON types (numbers, true / false, null), no
+  extra keys.
+
+# Appended to the user prompt when the previous reply failed validation (llm/structured.py).
+retry_feedback: "\n\nprevious output invalid: ${errors}"
+
+# The `smoke-llm` CLI command.
+smoke_system: You are a connectivity check. Reply with a single JSON object and nothing else.
+smoke_user: 'Return exactly this JSON object: {"status": "ok"}'

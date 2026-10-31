@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from synthetic_user.benchmark import load_cases, load_scenarios, run_benchmark
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import InputAssetError
 from synthetic_user.core.identifiers import SequentialIdGenerator
@@ -15,8 +14,9 @@ from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
 from synthetic_user.nodes.evaluator import Evaluator
+from synthetic_user.nodes.evaluator.benchmark import load_cases, load_scenarios, run_benchmark
 
-BENCH = Path(__file__).resolve().parent / "fixtures" / "benchmark"
+BENCH = Path(__file__).resolve().parents[1] / "fixtures" / "benchmark"
 
 
 def test_labeled_cases_are_valid() -> None:

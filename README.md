@@ -25,9 +25,41 @@ Persona + Product [+ Reference + instructions] ──> [reference check] ──>
 | 2 Scenarios | Business goal + success criteria (guidance) for tasks this persona would do with this product. Grounded: also a **cheat sheet** (Reference Pack) - the tables / columns / joins / rule ids, or the documents, a correct answer needs, picked by exact name; code checks every pick and copies the reference's own text in (unknown picks dropped and recorded; none valid -> scenario rejected). Saved in `reference_packs.json`, editable in the UI. | yes |
 | 3 Questions | Natural-language questions in the persona's voice, each with its own `expected_behavior` (written, including which readings are acceptable) and 1-4 `success_criteria`. The persona decides how it is phrased. Grounded: the cheat sheet + instructions inform the question; identifier-like names must not leak into it. | yes |
 | 4 Product executor | Sends each question through the configured product adapter and records answered (text + artifacts, e.g. SQL) / clarification / denied / error / timeout. Artifacts are **never executed**. | no |
-| 5 Evaluator | One generic judge per **answered** response, given only the evaluation contract (question, goal, expected behaviour, success criteria, product, full response with artifacts; grounded: the cheat sheet + usage instructions). It scores **answer relevancy** and **correctness** (0 / 0.5 / 1), rates each success criterion and labels each factual claim; code computes **completeness** and **hallucination rate**, the verdict and bug candidates. Each score comes with its reason (D206). Groundedness is still computed in `evaluations.json` but not reported for now. Clarification / denied / error / timeout are recorded only. Run KPIs (task success, metric means and pass rates, availability, latency, new vs known-gap bugs) go to `kpis.json` / `kpis.csv`. See design doc section 11. | yes |
+| 5 Evaluator | One judge per **answered** response, by evaluation profile (D207). **NL2SQL**: semantic correctness, rules adherence and schema faithfulness (0 / 0.5 / 1) against the question's contract and, when grounded, the cheat sheet. **Agent**: relevance and completion, plus the optional tool selection, faithfulness, context precision and context recall when the response exposes what they need. Each success criterion is rated; code computes the verdict and bug candidates, and each score comes with its reason. Clarification / denied / error / timeout are recorded only. Run KPIs (accuracy, metric means and pass rates, availability, latency, new vs known-gap bugs) go to `kpis.json` / `kpis.csv`. | yes |
 
 One orchestrator (`src/synthetic_user/pipeline.py`) runs the nodes; nodes are plain classes.
+
+### Code layout
+
+Each node is one package holding its code, the code that assembles its prompts, and the
+prompt text itself. Prompt text lives only in the `*.yaml` prompt files (never in Python);
+`${name}` marks a value the code fills in.
+
+```
+src/synthetic_user/
+  cli.py, pipeline.py         entry point (`synthetic-user`) and the one orchestrator
+  nodes/
+    scenario/                 [2] generator.py · prompt.py · prompt.yaml
+    question/                 [3] generator.py · prompt.py · prompt.yaml
+    executor/                 [4] executor.py · prompt.py · prompt.yaml (clarification reply,
+                                  "assume" instruction)
+    evaluator/                [5] evaluator.py (routing, bug candidates)
+                                  nl2sql.py · nl2sql_prompt.py · nl2sql_prompt.yaml
+                                  agent.py · agent_prompt.py · agent_prompt.yaml
+                                  kpis.py · trace_tags.py · no_sql.py · benchmark.py · plugins/
+  prompts/                    shared: templates.py (prompt-file loader), persona.py/.yaml,
+                              contracts.py, structured.py, smoke.py, common.yaml
+  adapters/                   ProductAdapter + fixture / http_json / http_sse / python / mock
+                              (mock_llm_prompt.yaml)
+  references/                 reference loader, cheat sheet (pack), leaks, golden sets
+  llm/                        LLMClient + gemini / safechain / fake, structured output
+  models/                     Pydantic models;  core/  config, errors, ids, logging, trace
+  storage/                    run artifacts;    web/   local FastAPI UI
+config/                       app*.yaml (every tunable), products/*.adapter.yaml
+```
+
+To change what the LLM is asked, edit the node's `*prompt.yaml`; to change a limit or a
+switch, edit `config/app.yaml`.
 
 ## Install
 
@@ -98,6 +130,9 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `product_adapter.type` | `fixture` | `fixture` \| `http_json` \| `python` (see "Product adapters") |
 | `product_adapter.options` | `{path: ./data/fixtures/product_responses/sample_responses.json}` | Per type; or set `product_adapter: <path to .adapter.yaml>` |
 | `product.timeout_seconds` | `30` | Per product call; exceeded -> `timeout` outcome |
+| `product.max_concurrency` | `1` | Questions sent to the product at once |
+| `product.clarification_policy` | `assume` | `assume` = hidden single-turn instruction; `ask` = the persona answers clarifications in the same session |
+| `product.ssl_verify` | `true` | **SSL on/off** for `http_json` / `http_sse` products. `false` = the product's TLS certificate and host name are NOT checked (self-signed test servers only; a warning is logged). A contract can also set `ssl_verify: false` for itself |
 | `reference.max_chars` | `200000` | Size limit of the reference as sent to prompts (the whole file goes in); larger files are refused |
 | `trace.enabled` | `true` | Write `runs/<run_id>/run.log` (every LLM / product call, prompt + output) |
 | `generation.scenario.scenario_count` | `10` | Scenarios requested per run |
@@ -182,7 +217,8 @@ Files with the previous names are refused with the new name: `not_supported_yet`
 
 A persona YAML (`data/personas/`; schema v2, D200) describes the synthetic user. Every field
 is read by the scenario and/or question prompt with an explicit rule
-(`prompts/persona.py`), so changing a value changes what is generated:
+(`prompts/persona.py`, text in `prompts/persona.yaml`), so changing a value changes what
+is generated:
 
 | Field | Required | Used by | How |
 |---|---|---|---|
@@ -324,7 +360,7 @@ models or the pipeline.
 | type | Use | Options |
 |---|---|---|
 | `fixture` | offline / captured answers | `path` |
-| `http_json` | any JSON-over-HTTP product, config only | `url`, `method`, `headers` (`${ENV_VAR}` filled from env), `timeout`, `request_template` (`{utterance}`, `{uuid}` = fresh per question, `{session_id}`), `response_mapping` (dotted paths + `path == value` rules) |
+| `http_json` | any JSON-over-HTTP product, config only | `url`, `method`, `headers` (`${ENV_VAR}` filled from env), `timeout`, `tls_ca_bundle` (`amexcerts`, a PEM path or `${ENV_VAR}`), `ssl_verify` (default `true`), `request_template` (`{utterance}`, `{uuid}` = fresh per question, `{session_id}`), `response_mapping` (dotted paths + `path == value` rules) |
 | `python` | anything else (SDK, websockets, custom auth) | `class: "pkg.module:Class"`, `init: {...}` (keyword args) |
 
 Examples: `config/products/sample_nl2sql.adapter.yaml` (fixture),

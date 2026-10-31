@@ -1,7 +1,8 @@
 """How the scenario and question prompts read the persona (persona schema v2, D200).
 
 Each persona field is shown to the LLM together with an explicit rule for using it, so a
-change in any value changes what is generated. ``id`` / ``version`` are never shown.
+change in any value changes what is generated. ``id`` / ``version`` are never shown. The text
+is in ``persona.yaml``.
 
 Scenarios use: identity, expertise, behavior.traits, typical_tasks, primary_motivation,
 decision_inputs, question_preferences.complexity.
@@ -13,15 +14,15 @@ example_utterances (style examples, never copied).
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from synthetic_user.models.persona import ComplexityPreference, Persona
+from synthetic_user.prompts.templates import prompts_beside
 
-COMPLEXITY_MEANING = {
-    ComplexityPreference.SIMPLE: "one fact, metric or item, with at most one filter or period",
-    ComplexityPreference.MEDIUM: "a breakdown, ranking or comparison with two or three conditions",
-    ComplexityPreference.COMPLEX: "several parts or dimensions at once: comparisons across "
-    "segments or periods, root causes, trade-offs or impact",
+PROMPTS = prompts_beside(__file__, "persona.yaml")
+COMPLEXITY_MEANING: dict[ComplexityPreference, str] = {
+    ComplexityPreference(level): meaning
+    for level, meaning in PROMPTS.data("complexity_meaning").items()
 }
 
 
@@ -37,36 +38,27 @@ def _expertise(persona: Persona) -> dict[str, Any]:
     return view
 
 
-def _complexity_rule(persona: Persona, unit: str) -> str:
+def _complexity_rule(persona: Persona, unit: Literal["scenarios", "questions"]) -> str:
     """``unit``: "scenarios" (one call writes them all, so they can be spread) or
     "questions" (one call per scenario, so each fits its scenario's goal)."""
     complexity = persona.question_preferences.complexity
-    meanings = "; ".join(f"{c.value} = {m}" for c, m in COMPLEXITY_MEANING.items())
     if complexity is not ComplexityPreference.MIXED:
+        meaning = COMPLEXITY_MEANING[complexity]
         if unit == "questions":
-            return (
-                f"complexity preference is {complexity.value}: prefer {complexity.value} - "
-                f"{COMPLEXITY_MEANING[complexity]}. The application's hard question policy "
-                "wins if it requires a simpler question."
+            return PROMPTS.text(
+                "complexity_fixed_questions", complexity=complexity.value, meaning=meaning
             )
-        return (
-            f"complexity is {complexity.value}: every {unit[:-1]} is {complexity.value} - "
-            f"{COMPLEXITY_MEANING[complexity]}."
+        return PROMPTS.text(
+            "complexity_fixed_scenarios",
+            complexity=complexity.value,
+            unit=unit.removesuffix("s"),
+            meaning=meaning,
         )
-    if unit == "scenarios":
-        return f"complexity is mixed: spread the scenarios across all three ({meanings})."
-    return (
-        f"complexity is mixed: use the one that fits the scenario's goal ({meanings}), within "
-        "the application's hard question policy."
+    meanings = "; ".join(
+        PROMPTS.text("complexity_meaning_item", complexity=level.value, meaning=meaning)
+        for level, meaning in COMPLEXITY_MEANING.items()
     )
-
-
-def _expertise_rule() -> str:
-    return (
-        "expertise.levels: per area, low | medium | high. In a high area use its specialist "
-        "vocabulary and go deep; in a low area stay basic and in plain words. expertise.notes "
-        "say what this person knows and does not know - respect them."
-    )
+    return PROMPTS.text(f"complexity_mixed_{unit}", meanings=meanings)
 
 
 def scenario_persona_block(persona: Persona) -> str:
@@ -79,23 +71,12 @@ def scenario_persona_block(persona: Persona) -> str:
         "decision_inputs": persona.decision_inputs,
         "question_complexity": persona.question_preferences.complexity.value,
     }
-    return f"""Persona (who pursues these goals):
-{json.dumps(view, indent=2)}
-
-How to use the persona:
-- typical_tasks: base each scenario on one of them and copy its exact text into
-  typical_task. Spread the scenarios over different typical tasks (use as many different
-  ones as the count allows before repeating one). typical_task is null only for another task
-  this persona would clearly do.
-- primary_motivation: frame each business_goal as a step towards it.
-- decision_inputs: the evidence this persona relies on. Prefer goals whose answer draws on
-  one of these AND that the product can provide (a goal needing evidence the product does
-  not have is an unsupported scenario).
-- traits: let them shape what each goal looks for and its success_criteria (e.g. "explores
-  root causes" -> a criterion about the cause, not only the number).
-- {_expertise_rule()}
-- question_complexity: {_complexity_rule(persona, "scenarios")}
-"""
+    return PROMPTS.text(
+        "scenario_block",
+        persona=json.dumps(view, indent=2),
+        expertise_rule=PROMPTS.text("expertise_rule"),
+        complexity_rule=_complexity_rule(persona, "scenarios"),
+    )
 
 
 def question_persona_block(persona: Persona, *, ambiguity_rule: str) -> str:
@@ -109,31 +90,16 @@ def question_persona_block(persona: Persona, *, ambiguity_rule: str) -> str:
         "decision_inputs": persona.decision_inputs,
         "question_preferences": prefs.model_dump(mode="json", exclude_none=True),
     }
-    follow_ups = (
-        "follow_up_questions is true: this person digs deeper (why, impact, risk, what next). "
-        "Each question is sent on its own with no conversation history, so write such a "
-        "question self-contained: restate the context, then ask the deeper question."
-        if prefs.follow_up_questions
-        else "follow_up_questions is false: write first questions only - no 'why did that "
-        "happen' or 'what about...' style follow-ups."
+    examples = "\n".join(
+        PROMPTS.text("style_example", utterance=utterance)
+        for utterance in persona.example_utterances
+    ) or PROMPTS.text("no_style_examples")
+    return PROMPTS.text(
+        "question_block",
+        persona=json.dumps(view, indent=2),
+        examples=examples,
+        expertise_rule=PROMPTS.text("expertise_rule"),
+        complexity_rule=_complexity_rule(persona, "questions"),
+        follow_ups=PROMPTS.text("follow_ups_on" if prefs.follow_up_questions else "follow_ups_off"),
+        ambiguity_rule=ambiguity_rule,
     )
-    examples = "\n".join(f"  - {u}" for u in persona.example_utterances) or "  - (none given)"
-    return f"""Persona (sound like this person):
-{json.dumps(view, indent=2)}
-
-Style examples - how this person writes (match their length, tone and vocabulary; NEVER copy
-or lightly reword them, copies are rejected):
-{examples}
-
-How to use the persona:
-- style: the tone and length of every question.
-- traits: every question must reflect at least one trait (what they ask about and how).
-- {_expertise_rule()}
-- primary_motivation: the reason behind the question; it shapes what they ask for.
-- decision_inputs: the kinds of evidence they ask for or refer to (only those that fit the
-  scenario and the product).
-- {_complexity_rule(persona, "questions")} Code computes the final complexity from the
-  structured question plan.
-- {follow_ups}
-- ambiguity: {ambiguity_rule}
-"""

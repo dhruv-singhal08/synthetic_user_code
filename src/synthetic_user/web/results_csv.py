@@ -32,7 +32,7 @@ from synthetic_user.models.execution import (
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import ReferencePack, render_join
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.no_sql import NO_SQL_REASON
+from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 
 BULLET = "• "
 

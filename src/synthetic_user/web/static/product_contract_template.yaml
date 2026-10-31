@@ -13,6 +13,9 @@ timeout: 300                          # HTTP seconds per question (product.timeo
 # Optional TLS trust bundle: `amexcerts`, a PEM file path, or `${PRODUCT_CA_BUNDLE}`.
 # Certificate and hostname verification remain enabled.
 # tls_ca_bundle: "${PRODUCT_CA_BUNDLE}"
+# SSL on/off. false = the certificate and host name are NOT checked: only for a test server
+# with a self-signed certificate. product.ssl_verify in the app config can also turn it off.
+# ssl_verify: true
 
 # Request body. {utterance} = the generated question; {uuid} = a fresh UUID per question
 # (use it for a request id); {session_id} = one stable id reused across clarification turns.

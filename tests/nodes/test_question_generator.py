@@ -16,8 +16,8 @@ from synthetic_user.models.question import QuestionGenerationResult
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario, TaskType
-from synthetic_user.nodes.question_generator import SURPLUS, VAGUE_NOT_ALLOWED, QuestionGenerator
-from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
+from synthetic_user.nodes.question.generator import SURPLUS, VAGUE_NOT_ALLOWED, QuestionGenerator
+from synthetic_user.nodes.question.prompt import QuestionPromptOptions, build_question_prompt
 
 
 def plan_for(complexity: str, limit: int | None = None) -> dict[str, Any]:
@@ -616,7 +616,7 @@ def _draft(utterance: str, **changes: Any) -> Any:
 def test_hard_question_policy(
     env: Env, utterance: str, changes: dict[str, Any], problem: str
 ) -> None:
-    from synthetic_user.nodes.question_generator import question_policy_problems
+    from synthetic_user.nodes.question.generator import question_policy_problems
 
     problems = question_policy_problems(
         _draft(utterance, **changes), env.product, env.settings.generation.question
@@ -625,7 +625,7 @@ def test_hard_question_policy(
 
 
 def test_clean_question_has_no_policy_problems(env: Env) -> None:
-    from synthetic_user.nodes.question_generator import question_policy_problems
+    from synthetic_user.nodes.question.generator import question_policy_problems
 
     assert (
         question_policy_problems(

@@ -37,7 +37,6 @@ from synthetic_user.core.exceptions import (
 )
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator, new_run_id
 from synthetic_user.core.trace import RUN_LOG, trace_step
-from synthetic_user.kpis import compute_kpis, kpis_csv
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.tracing import TracingLLMClient
 from synthetic_user.models.base import NonEmptyStr, StrictModel
@@ -58,9 +57,10 @@ from synthetic_user.models.reference import Reference, ReferencePack, ReferenceP
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
-from synthetic_user.nodes.product_executor import ProductExecutor
-from synthetic_user.nodes.question_generator import QuestionGenerator
-from synthetic_user.nodes.scenario_generator import ScenarioGenerator
+from synthetic_user.nodes.evaluator.kpis import compute_kpis, kpis_csv
+from synthetic_user.nodes.executor.executor import ProductExecutor
+from synthetic_user.nodes.question.generator import QuestionGenerator
+from synthetic_user.nodes.scenario.generator import ScenarioGenerator
 from synthetic_user.references.pack import edit_pack
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import MANIFEST, run_artifact
@@ -100,6 +100,8 @@ STEP_ARTIFACTS: dict[Step, dict[str, str]] = {
 }
 # Raw product responses (when the adapter supplies them): runs/<run_id>/raw/<execution_id>.json
 RAW_DIR = "raw"
+# Artifact integrity problems quoted in one error message.
+MAX_PROBLEMS_SHOWN = 10
 # Written only for grounded NL2SQL scenarios.
 OPTIONAL_ARTIFACTS = frozenset({"reference_packs"})
 
@@ -254,8 +256,12 @@ def validate_run(
             if chain != (ev.question_id, ev.scenario_id, ev.execution_id):
                 problems.append(f"{bug.bug_id} id chain does not match {ev.evaluation_id}")
     if problems:
-        shown = "; ".join(problems[:10])
-        more = f" (+{len(problems) - 10} more)" if len(problems) > 10 else ""
+        shown = "; ".join(problems[:MAX_PROBLEMS_SHOWN])
+        more = (
+            f" (+{len(problems) - MAX_PROBLEMS_SHOWN} more)"
+            if len(problems) > MAX_PROBLEMS_SHOWN
+            else ""
+        )
         raise ArtifactIntegrityError(f"Run artifacts are inconsistent: {shown}{more}")
 
 

@@ -1,0 +1,256 @@
+# Prompt text for Node 2 (scenarios). prompt.py picks the entries for the run's mode and
+# profile and fills every ${placeholder}; a literal dollar sign is written $$.
+#
+# Variants (system prompt = system + " " + the mode's suffix):
+#   ungrounded  no reference: business-level goals only, no reference_pack
+#   grounded    NL2SQL with a reference: the scenario's cheat sheet (reference_pack)
+#   agent       Agent with a reference: tools / data sources, never a reference_pack
+
+system: >-
+  You design realistic test scenarios for a synthetic user who will later test a
+  conversational product. You plan what the user wants to achieve with THIS product; you
+  never write the user's questions. You reply with a single JSON object and nothing else.
+
+system_grounded_suffix: >-
+  You ground every scenario in the reference supplied by the user and pick items from it
+  by their exact names; you never invent tables, columns, relationships, documents, facts
+  or rules it does not contain.
+
+system_ungrounded_suffix: >-
+  No data schema is available: you never invent tables, fields, data structures or numbers.
+
+system_agent_suffix: >-
+  This is an Agent evaluation: work in user-visible product, tool, and data-source terms.
+  Never request or emit database tables, columns, joins, SQL, or a reference_pack.
+
+# --- the common user prompt -----------------------------------------------------------------
+
+core: |
+  ## TASK
+  Write ${count} distinct scenario(s) this persona would realistically pursue WITH THIS
+  PRODUCT ("${product_name}"). For each: the business goal FIRST, then
+  ${parts}.
+
+  ## INPUT
+  ${persona}
+  Product:
+  ${product}
+
+  ${reference}Settings: count=${count}; diversity_preference=${diversity_preference}.
+
+  Existing scenario signatures to AVOID repeating:
+  ${avoid}
+
+  ## CONSTRAINTS
+  - Design each business goal so it can be asked and answered with no more than
+    ${max_request_steps} distinct deliverables. Outputs requested separately for different
+    sources count separately. Do not bundle a chain of analyses, follow-up investigations,
+    cross-source overlap analysis and supporting quotes into one scenario.
+  - business_goal is what the persona wants to achieve, in business terms. Write it first.
+  - The task must be something this persona would really do with this product; follow "How
+    to use the persona" above.
+  - capability_rationale must cite the specific product description item (supported /
+    not_supported / known_limitations) it relies on.
+  - Goals must be answerable from the product's data_sources (when listed); a goal that needs
+    data the product does not have is unsupported.
+  - typical_user_questions show what real users ask: use them to choose realistic goals and to
+    cover the product's main uses - never copy them (questions are written later).
+  - ${unsupported}
+  - success_criteria: 2-5 short, checkable statements of what a goal-complete answer must
+    contain (an evaluator will tick each one off), in business terms. Do not invent a result count,
+    top-N cutoff, currency conversion, filter, dimension or format that the business_goal does not
+    require. Express a reference-dependent safeguard as an explicit "If ..." condition when its
+    triggering data state is not guaranteed.
+  - question_intent: WHAT the user will ask for, in one plain sentence. Never suggest wording,
+    tone or phrasing: the question is written later, in the persona's own voice.
+  ${constraints}
+  - Vary task types and goals; do not repeat an avoided signature.
+
+  ## OUTPUT CONTRACT
+  ${contract}
+
+  ## PROHIBITED
+  - Writing the user's question, an example question or phrasing hints.
+  - ids, persona/product/reference ids, mode, signatures, timestamps.
+  ${prohibited}
+  - Any text outside the JSON object.
+
+  ## MISSING INFO
+  ${missing} Fewer good scenarios are better than padded ones.
+
+parts: >-
+  title, typical_task, task_type, capability with rationale, success_criteria, question_intent
+
+parts_with_pack: >-
+  title, typical_task, task_type, capability with rationale, success_criteria, question_intent
+  and the cheat sheet (reference_pack)
+
+unsupported_included: >-
+  Where the count allows, include scenarios the product does NOT support (see
+  not_supported / known_limitations) and classify them as unsupported.
+
+unsupported_excluded: Only produce scenarios the product supports.
+
+no_signatures_to_avoid: "- (none)"
+
+# The output example (D204). Each <a | b> choice list is filled in from the model's enums.
+scenario_example:
+  business_goal: "<what the persona wants to achieve, in business terms>"
+  title: "<short title>"
+  typical_task: "<one of the persona's typical_tasks, copied exactly, or null>"
+  task_type: "${task_types}"
+  capability: "${capabilities}"
+  capability_rationale: "<cites the product description item it relies on>"
+  success_criteria: ["<2-5 short, checkable statements in business terms>"]
+  question_intent: "<one sentence: what the user will ask for - not the wording>"
+
+# --- ungrounded -----------------------------------------------------------------------------
+
+ungrounded_constraints: |-
+  - There is NO reference: there is no reference_pack.
+  - Do not invent data structures, tables, fields, columns, IDs or numbers; describe goals and
+    success_criteria at business level only (what the user must learn or be able to do).
+
+ungrounded_prohibited: "- Internal names (tables, fields, IDs), code, schemas, made-up figures."
+
+ungrounded_missing: |-
+  If the product description does not say whether something is supported, classify the
+  capability as unknown and say what is missing in capability_rationale.
+
+# --- grounded (NL2SQL with a reference) -----------------------------------------------------
+
+grounded_reference: |
+  Reference (${label}; AUTHORITATIVE):
+  <<<REFERENCE
+  ${reference}
+  REFERENCE>>>
+
+  Usage instructions for the reference (follow them):
+  ${instructions}
+
+  ${golden_guidance}
+
+grounded_label: '${kind} "${source_name}"'
+
+kind_labels:
+  data_catalog: data catalog
+  document_collection: document collection
+
+grounded_constraints: |-
+  ${pack_rules}
+  - Base goals and success_criteria on what the reference actually contains. Golden-set patterns are optional guidance and never override Reference data.
+
+grounded_prohibited: >-
+  - Tables, columns, relationships, documents, facts or rules that are not in the reference.
+
+grounded_missing: |-
+  If the reference lacks something a goal needs, choose another goal, or classify the capability
+  as unknown and say what is missing in capability_rationale.
+
+# How to fill the cheat sheet, per reference format.
+pack_rules:
+  data_catalog: |-
+    - reference_pack is this scenario's cheat sheet: the answer key the evaluator will use. Pick
+      from the catalog by exact name; code copies the descriptions and rules in and drops any
+      name the catalog does not have.
+      - tables (1-4): every table a correct answer must use, with the columns it needs, and why.
+        Include columns used only inside a required aggregate, including a sensitive identifier needed
+        for COUNT(DISTINCT ...). Aggregate-only use does not expose the underlying identifier values.
+      - joins (0-3): the listed relationships needed to combine those tables, "from" / "to"
+        exactly as listed. Only listed relationships exist.
+      - rules (0-4): ids of the catalog rules the answer must respect (table rules come with
+        their table automatically).
+      - Only what the goal really needs; what merely could help is not part of the answer key.
+    - A goal that needs a table, column or join the catalog does not list is unsupported or
+      unknown: say what is missing in capability_rationale; never invent it.
+  document_collection: |-
+    - reference_pack is this scenario's cheat sheet: the answer key the evaluator will use.
+      - documents (1-3): the documents whose content answers the goal, names exactly as listed,
+        and why. Code copies their summaries in and drops any name the collection does not have.
+    - Goals must be answerable from what the summaries say the documents contain; a goal no
+      document covers is unsupported or unknown.
+    - success_criteria may name facts from the summaries the answer must get right.
+
+# The cheat-sheet part of the output example, per reference format.
+pack_examples:
+  data_catalog:
+    tables:
+      - table: "<table name, exactly as in the catalog>"
+        columns: ["<column name of that table the answer needs>"]
+        why: "<why the goal needs it>"
+    joins:
+      - from: "<table.column>"
+        to: "<table.column>"
+    rules: ["<catalog rule id, e.g. R1>"]
+  document_collection:
+    documents:
+      - name: "<document name, exactly as listed>"
+        why: "<why the goal needs it>"
+
+golden_guidance: |+
+  Optional SME golden set (INSPIRATION, not cases to replay):
+  Coverage across all uploaded examples:
+  ${summary}
+
+  Representative intent and evaluation patterns:
+  ${examples}
+
+  Use these patterns together with Persona, Product and the authoritative Reference to improve
+  coverage and success criteria. Create new business goals and intents; never copy or lightly
+  reword an uploaded question, expected behaviour, or success criterion.
+
+# --- agent (Agent profile with a reference) -------------------------------------------------
+
+agent_reference: |
+  Agent context (AUTHORITATIVE; no physical schema):
+  <<<AGENT_CONTEXT
+  ${context}
+  AGENT_CONTEXT>>>
+  ${inspiration}
+
+# Used when a data catalog has no agent_context: its description and catalog rules only.
+agent_catalog_title: "Operational reference: ${name}"
+agent_catalog_no_description: No additional operational description was supplied.
+agent_catalog_rules_title: "Product/tool constraints:"
+
+agent_inspiration: |
+
+  SME golden set (INSPIRATION, not test cases to replay):
+  Coverage across all uploaded cases:
+  ${summary}
+
+  Representative examples:
+  ${examples}
+
+  Use these examples to learn valid intents, evaluation detail, and realistic combinations. Create
+  NEW business goals and question intents. Do not copy or lightly reword a golden question, its
+  expected behaviour, or its success criteria.
+
+agent_constraints: |-
+  - There is no reference_pack for Agent scenarios. The evaluator will use each generated
+    question's expected_behavior and success_criteria as the answer key.
+  - Use only user-visible product capabilities, tools, and data sources. Never mention or select
+    database tables, columns, fields, joins, SQL, or other storage implementation details.
+  - Every supported goal must be achievable through at least one tool and data source in the Agent
+    context.
+  ${golden_constraint}
+  - For this run's selected complexity, every supported goal must genuinely require at least
+    ${min_data_sources} distinct Agent data source(s) and
+    ${min_tool_calls} operational tool call(s). A repeated tool is valid only when
+    separate calls with different sources or purposes are actually needed. Keep source results
+    separate when the operational rules prohibit blending them. Unsupported goals are exempt.
+
+agent_golden_constraint: |-
+  - Base goals and success_criteria on the product, operational context, and patterns in the optional golden set above.
+  - Generate novel coverage beyond the uploaded examples; do not replay a golden-set case.
+
+agent_no_golden_constraint: >-
+  - Base goals and success_criteria on the product and operational context.
+
+agent_prohibited: >-
+  - Database tables, columns, fields, joins, SQL, reference_pack, or physical-schema
+  requirements.
+
+agent_missing: |-
+  If the product description and operational context do not establish that a goal is supported,
+  classify it as unknown or unsupported and explain the missing capability.

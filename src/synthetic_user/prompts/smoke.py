@@ -1,6 +1,9 @@
-"""Prompts for the `smoke-llm` CLI command."""
+"""Prompts for the `smoke-llm` CLI command (text in ``common.yaml``)."""
 
 from __future__ import annotations
 
-SMOKE_SYSTEM = "You are a connectivity check. Reply with a single JSON object and nothing else."
-SMOKE_USER = 'Return exactly this JSON object: {"status": "ok"}'
+from synthetic_user.prompts.templates import prompts_beside
+
+PROMPTS = prompts_beside(__file__, "common.yaml")
+SMOKE_SYSTEM = PROMPTS.text("smoke_system")
+SMOKE_USER = PROMPTS.text("smoke_user")

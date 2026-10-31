@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import ConfigError
 from synthetic_user.llm.base import LLMClient
-from synthetic_user.nodes.evaluators.plugins.base import ArtifactPlugin
+from synthetic_user.nodes.evaluator.plugins.base import ArtifactPlugin
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 PluginFactory = Callable[[LLMClient, AppConfig, Logger], ArtifactPlugin]

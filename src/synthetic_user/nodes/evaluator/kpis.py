@@ -35,6 +35,7 @@ from synthetic_user.models.evaluation import (
 )
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
 from synthetic_user.models.kpi import (
+    MAX_ISSUE_EXAMPLES,
     ConsolidatedIssue,
     GroupKpi,
     IssueSummary,
@@ -43,7 +44,7 @@ from synthetic_user.models.kpi import (
 )
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
+from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
 
 _SEVERITY_RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2, Severity.CRITICAL: 3}
 METRIC_LABELS = {
@@ -307,7 +308,7 @@ def consolidate_findings(
                 occurrences=len(items),
                 affected_question_ids=questions,
                 finding_ids=[finding.finding_id for _, finding in items],
-                examples=descriptions[:3],
+                examples=descriptions[:MAX_ISSUE_EXAMPLES],
                 known_gap=all(finding.matches_known_gap for _, finding in items),
             )
         )

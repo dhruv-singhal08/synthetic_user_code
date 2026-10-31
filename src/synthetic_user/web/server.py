@@ -39,7 +39,6 @@ from synthetic_user.core.exceptions import (
 )
 from synthetic_user.core.identifiers import RUN_ID_PATTERN
 from synthetic_user.core.logging import get_run_logger
-from synthetic_user.golden_set import GOLDEN_SET, validate_agent_contract
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.tracing import TracingLLMClient
@@ -60,6 +59,7 @@ from synthetic_user.models.reference import (
     ReferencePackDraft,
 )
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline
+from synthetic_user.references.golden_set import GOLDEN_SET, validate_agent_contract
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.web.workspace import (
     GUIDE,
@@ -489,9 +489,14 @@ def _product_adapter(
 ) -> ProductAdapter:
     """Uploaded HTTP contract -> real product; mock contract -> mock; else configured adapter."""
     if connection is not None:
+        ssl_verify = settings.product.ssl_verify
         if isinstance(connection.options, HttpSseOptions):
-            return HttpSseAdapter(connection.options, env=env, transport=sse_transport)
-        return HttpJsonAdapter(connection.options, env=env, transport=transport)
+            return HttpSseAdapter(
+                connection.options, env=env, ssl_verify=ssl_verify, transport=sse_transport
+            )
+        return HttpJsonAdapter(
+            connection.options, env=env, ssl_verify=ssl_verify, transport=transport
+        )
     if contract is not None:
         return MockLLMAdapter(llm, contract, inputs.product, inputs.reference)
     return create_adapter(settings, env=env, transport=transport, sse_transport=sse_transport)

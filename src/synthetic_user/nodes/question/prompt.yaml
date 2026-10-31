@@ -1,0 +1,253 @@
+# Prompt text for Node 3 (questions). prompt.py picks the entries for the run's profile and
+# mode and fills every ${placeholder}; a literal dollar sign is written $$.
+
+system: >-
+  You role-play a real user typing questions into a conversational product, in their own words.
+  You never expose internal identifiers, IDs, code or query language unless the persona would
+  naturally do so. You reply with a single JSON object and nothing else.
+
+# --- the user prompt ----------------------------------------------------------------------
+
+core: |
+  ## TASK
+  Write ${count} question(s) this persona would type into the product to pursue the
+  scenario's business goal. Language: ${language}.
+
+  ## INPUT
+  ${persona}
+  Product:
+  ${product}
+
+  Scenario (WHAT the user wants):
+  ${scenario}
+  ${reference}
+  ## CONSTRAINTS
+  - HARD POLICY (overrides persona preferences): at most ${max_deliverables} deliverables,
+    ${max_sources} distinct data source(s), ${max_words} words, and
+    ${max_success_criteria} success criteria. Allowed computed complexities:
+    ${allowed_complexities}. Follow-ups are
+    ${follow_ups}; cross-source comparison is
+    ${cross_source_comparison}.
+  - Code computes complexity from plan.deliverables: simple = exactly one deliverable using at
+    most one distinct source; complex = two or more distinct sources across the deliverables, or
+    three or more deliverables; anything else is medium. Shape the plan (and the utterance) so the
+    computed complexity is one of the allowed values.
+  - plan.deliverables is the complete machine-checkable list of outputs requested by the utterance.
+    Each item has exactly one action and one subject. Do not combine actions such as "rank and quote"
+    in one item. Give each item only the source(s) it actually needs. Code counts this list.
+  - A separately requested list, metric, comparison, ranking, trend, breakdown, overlap analysis,
+    explanation, recommendation or set of quotes is one deliverable. The same output requested
+    separately for two sources counts as two. Journey, period and segment restrictions belong in
+    plan.filters and do not count as deliverables.
+  - Do not hide extra outputs in a subject. "Themes with representative comments" is two
+    deliverables (rank themes + quote comments). "Complaint volume and top categories" is two
+    deliverables (aggregate volume + rank categories), even when both use one source. When the
+    hard policy permits only one deliverable, ask for only one of those outputs.
+  - Set plan.is_follow_up honestly. The utterance must not ask for anything absent from the plan.
+  - Example of a prohibited five-deliverable question: asking for complaint themes, CSAT themes,
+    overlapping theme names, complaint quotes and CSAT quotes in one response. Generate only a
+    focused subset that fits the configured limit.
+  - The persona decides HOW the question is asked: wording, tone, length, complexity and
+    ambiguity come only from "How to use the persona". The scenario only says WHAT is wanted.
+  - Do not reuse the wording of the scenario's business_goal, title or question_intent; write
+    the question as this person would type it.
+  - ${identifiers_rule}
+  - Set question_characteristics style and ambiguity_level honestly. Code computes complexity from
+    the structured plan; do not output complexity.
+  - expected_behavior: 1-3 plain sentences: what the product should do for THIS question (what
+    it should return or do; whether asking for clarification or declining would be right or
+    wrong). If the question can fairly be read in more than one way, say which readings are
+    acceptable.
+  - expected_behavior and success_criteria must respect the product's expected_outputs and scope.
+    Do not require execution, returned data values, or another artifact that the product says it
+    does not provide. When the product returns an artifact that computes the requested answer,
+    require that artifact to be complete and valid for the request.
+  - success_criteria: 1-${max_success_criteria} short, checkable must-haves of a goal-complete
+    answer, refined from the scenario's success_criteria to this exact question. Every criterion
+    must be entailed by this exact question, its structured plan, the product answer contract or a
+    necessary rule in the supplied reference. A generally useful practice is not automatically a
+    must-have. Word each criterion so that every acceptable reading passes it.
+  ${profile_rules}
+  ${golden_rules}
+  - A ranking without a numeric plan.deliverables[].limit requires ordering, not an invented top-N
+    cutoff. Never require LIMIT, top N, top 5, top 10 or another result count unless that exact
+    limit is requested by the utterance and recorded in the plan.
+  - Do not add a currency, unit, conversion, precision, filter, grouping, dimension or output-format
+    requirement that this question does not request. If a reference rule is necessary only under a
+    condition not established by the question (for example, unnormalised multiple currencies),
+    write it explicitly as a conditional criterion beginning with "If ..."; never make it an
+    unconditional reason to fail.
+  - Negative criteria are allowed only when their prohibited behaviour would make the requested
+    result wrong. Do not add generic defensive checks merely because they sound prudent.
+  - A sensitive identifier used only inside COUNT or COUNT(DISTINCT) is not exposed by the result.
+    A privacy criterion may prohibit returning, grouping, or displaying raw identifier values, but
+    must not prohibit using a documented identifier internally to calculate a requested aggregate.
+  - The intended goal is the scenario's business_goal (code copies it; do not restate it).
+  - Questions must differ meaningfully from each other.
+
+  ## OUTPUT CONTRACT
+  ${contract}
+
+  ## PROHIBITED
+  - Copying or lightly rewording the persona's style examples.
+  - ids, goals, leak warnings, timestamps (code adds these).
+  - Any text outside the JSON object.
+
+  ## MISSING INFO
+  ${missing}
+
+# Values of ${follow_ups} / ${cross_source_comparison}.
+allowed: allowed
+not_allowed: not allowed
+
+identifiers_technical: >-
+  This persona is technical: internal names or identifiers are acceptable where they would
+  naturally use them, but plain language is still preferred.
+
+identifiers_plain: >-
+  Plain language only: no internal identifiers, IDs, field or table names, snake_case words,
+  code or query language.
+
+# The persona block's ambiguity rule (prompts/persona.yaml: ${ambiguity_rule}).
+ambiguity_rule: 'level "${level}" - ${style_mix} ${vague_rule}'
+
+style_mix:
+  low: Mostly precise questions; at most one vague or investigative one.
+  medium: A mix of precise, vague and investigative questions.
+  high: >-
+    Mostly vague or investigative questions that need interpretation or clarification.
+
+vague_allowed: Vague questions are allowed.
+
+vague_not_allowed: 'Do NOT write vague questions (style "vague" is not allowed).'
+
+# The output example (D204). Each <a | b> choice list is filled in from the model's enums.
+question_example:
+  questions:
+    - utterance: "<the question exactly as this persona would type it>"
+      plan:
+        deliverables:
+          - action: "${deliverable_actions}"
+            subject: "<one output the product must return>"
+            sources: ["<product data source, when needed>"]
+            limit: "<positive integer or null>"
+        filters: [{name: "<filter name>", value: "<filter value>"}]
+        is_follow_up: false
+      intent: {task_type: "${task_types}"}
+      question_characteristics:
+        style: "${styles}"
+        ambiguity_level: "${ambiguity_levels}"
+      expectations:
+        expected_behavior: "<1-3 sentences: what the product should do for this question>"
+        success_criteria: ["<1-${max_success_criteria} short, checkable must-haves>"]
+        expected_tools: ["<tool capability expected, or empty>"]
+        expected_journey: "<journey/domain scope expected, or null>"
+        expected_time_period: "<time period/duration expected, or null>"
+        expected_data_sources: ["<data source expected, or empty>"]
+        expected_context: ["<evidence/context expected, or empty>"]
+        prohibited_behaviors: ["<observable behavior that must not occur, or empty>"]
+        reference_context: []
+        golden_set_criteria: {}
+
+# --- ungrounded ---------------------------------------------------------------------------
+
+ungrounded_missing: |-
+  No reference data is available: do not invent names, fields or numbers. If the goal could
+  be read several ways, say in expected_behavior which readings are fine and whether the
+  product should ask for clarification.
+
+# --- grounded (NL2SQL with a reference pack) ----------------------------------------------
+
+grounded_reference: |
+
+  Cheat sheet of this scenario (for YOUR understanding only - never use its names):
+  ${pack}
+
+  Usage instructions of the reference (for YOUR understanding):
+  ${instructions}
+  ${golden_guidance}
+
+grounded_missing: |-
+  If the cheat sheet shows the goal depends on something ambiguous, say in expected_behavior
+  whether the product should ask or state its assumption. Do not guess silently.
+
+golden_guidance: |
+
+  Optional SME golden-set coverage:
+  ${summary}
+
+  Relevant intent and evaluation patterns (INSPIRATION only):
+  ${examples}
+
+  Use these patterns together with Persona, Product and the authoritative Reference to make the
+  new question realistic and its expected behavior and success criteria specific. Do not replay or
+  lightly reword any uploaded question or expected outcome. Reference data overrides any conflict.
+
+golden_rules: >-
+  - The optional golden set is guidance, not a replay list. Use relevant patterns to refine
+  expected_behavior and success_criteria, while keeping the new question and contract distinct
+  from every uploaded example.
+
+# --- agent ----------------------------------------------------------------------------------
+
+agent_reference: |
+  Agent operational reference (AUTHORITATIVE):
+  <<<AGENT_CONTEXT
+  ${context}
+  AGENT_CONTEXT>>>
+
+agent_no_context: No structured Agent context was supplied.
+
+agent_inspiration: |
+
+  Golden-set coverage across all uploaded examples:
+  ${summary}
+
+  Relevant SME examples (INSPIRATION only):
+  ${examples}
+
+  The uploaded examples teach valid intent patterns and how detailed an evaluation contract should
+  be. Generate a NEW question and a NEW contract for this scenario. Never copy or lightly reword a
+  golden question, expected behaviour, success criterion, or planner output.
+
+agent_missing: >-
+  The operational reference is the source of truth. If it does not establish a needed tool or
+  source, revise the question to use supported capabilities rather than inventing an
+  implementation detail.
+
+agent_rules: |-
+  - Agent answer key: expected_behavior and success_criteria must completely describe
+    the observable answer/action required by the exact question. Do not include tables, columns,
+    fields, joins, SQL, or physical-schema requirements.
+  ${operational_minimum}
+  - expected_tools: list the exact canonical tool name from AGENT_CONTEXT for every expected call,
+    in execution order. Repeat a tool name when separate calls are expected. Never use a capability
+    phrase or a golden-set label as a tool name.
+  - expected_data_sources: list exact canonical source names from AGENT_CONTEXT. These may differ
+    from the user-facing labels used in plan.deliverables[].sources.
+  - expected_journey and expected_time_period: capture the exact scope needed by this new question,
+    or null when absent. expected_context describes the evidence the tool results should expose.
+  - prohibited_behaviors: include only behaviours that would materially violate this question or
+    an applicable reference rule.
+  ${golden_rule}
+  - reference_context must be []; code fills it from the canonical tools and sources after
+    validating the generated contract against Reference data.
+
+agent_minimum_supported: |-
+  - COMPLEXITY FLOOR FOR THIS SUPPORTED AGENT SCENARIO: every
+    question must genuinely use at least ${min_data_sources} distinct Agent data
+    source(s) and require at least ${min_tool_calls} operational tool call(s). Repeating
+    a canonical tool name is valid only for separate calls with different sources or purposes.
+    Record every call in expected_tools, in execution order, and every source in
+    expected_data_sources. Do not pad either list.
+
+agent_minimum_unsupported: >-
+  - This scenario is unsupported: do not invent tool calls or data sources merely to meet a
+  complexity target. The expected behaviour should explain the limitation.
+
+agent_golden_rule: >-
+  - golden_set_criteria: adapt relevant organization-specific criterion LABELS from the SME
+  examples to this new question. Write new values; never copy an example value blindly.
+
+agent_no_golden_rule: >-
+  - golden_set_criteria must be {} because no golden set was supplied.

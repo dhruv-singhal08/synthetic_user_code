@@ -1,0 +1,178 @@
+# Prompt text for the NL2SQL evaluation profile (nl2sql.py). nl2sql_prompt.py fills every
+# ${placeholder}; a literal dollar sign is written $$.
+
+system: >-
+  You perform three narrow NL2SQL comparisons on a product response. Use only the input pair
+  defined for each metric. Do not infer factual correctness or use a schema catalog as answer
+  data. Quote evidence exactly as written in the response. Reply with a single JSON object and
+  nothing else.
+
+user: |
+  ## TASK
+  Evaluate the product's answer using exactly three metrics and report observable problems.
+
+  ## INPUT
+  Product answer contract (defines what form a successful answer takes):
+  ${product_contract}
+
+  What was asked and what is expected:
+  ${expected}
+
+  Allowed schema names, rules, and joins from this question's cheat sheet
+  (null means schema faithfulness and rules adherence are not applicable):
+  ${reference_context}
+
+  Traceability catalog (stable tags used by the report to connect expectations and reference items):
+  ${trace_catalog}
+
+  Product answer:
+  ${response}
+
+  ## SCORING
+  - rubric mode: ${rubric_mode}.
+  - If the product timed out, refused, or returned no SQL query: Semantic Correctness = 0 with a
+    Semantic Correctness finding; Rules Adherence = null; Schema Faithfulness = null. Never award
+    schema faithfulness merely because no invalid identifier is visible.
+  - semantic_correctness: compare the clarified request, expected_behavior, and behavioural success
+    criteria with the final SQL under the Product answer contract. A behavioural criterion describes
+    the requested result: projections, calculations, aggregations, filters, grouping, ordering,
+    limits, or supported response handling. Do not use table/column allow-list compliance,
+    table/business rules, privacy/currency rules, or documented-join requirements in Semantic
+    Correctness; those have their own metrics below. 1 = all requested behaviour is visibly
+    delivered; 0.5 = only part is delivered;
+    0 = none is delivered or no SQL query is generated; null only if the SQL exists but the
+    requested behaviour genuinely cannot be assessed. For
+    an SQL-generating product, statically inspect whether the query is plausibly valid and contains
+    the projections, aggregations, joins, filters, grouping, ordering and limits needed to produce
+    the requested result. A ranking needs a limit only when the clarified request or expected
+    behaviour specifies one. Do not execute the query or verify data values. Do not require returned
+    rows or values.
+    Judge date semantics from the actual filter field and boundaries: filtering a documented
+    billing-month field with calculated calendar-month boundaries is a billing-month filter. Do not
+    require the SQL or prose to repeat the words "billing month". A current-year equality filter is
+    a valid semantic implementation of year-to-date for historical transaction data unless the
+    contract explicitly requires a different boundary or the response demonstrably includes future
+    periods. Judge the result produced, not whether the answer uses your preferred SQL shape.
+  - rules_adherence: check direct, material compliance with applicable table rules, selected rules,
+    and verified
+    documented joins in the question's cheat sheet. Include a success criterion here when it is
+    itself a rule or join requirement. Apply a rule or join only when the question or SQL concerns
+    it; irrelevant or theoretical rules must not lower the score. 1 = all applicable rules and joins
+    are followed; 0.5 = a mix of compliance and supported conflicts; 0 = applicable rules/joins are
+    materially violated; null when no rules/joins apply or no SQL was generated. Do not use unknown
+    table/column names or missing requested result behaviour in this metric.
+    A sensitive identifier used only as an input to COUNT or COUNT(DISTINCT) is not exposed in the
+    result. Do not penalize aggregate-only use under a rule that prohibits exposing identifiers;
+    penalize projection, grouping, display, or return of raw identifier values instead.
+  - schema_faithfulness: compare only explicit database table/column identifiers with the allowed
+    table and column names. Include a success criterion here only when it explicitly requires an
+    allowed schema identifier. Do not use table rules, selected rules, joins, expected result
+    behaviour, or general response quality in schema faithfulness. Compare
+    names case-insensitively after removing quoting and table qualification. Values such as
+    source=csat, group_by=month, metric=avg_score, filters and ordinary prose are not schema
+    identifiers. 1 = every explicit table and column identifier is allowed; 0.5 = a mix of allowed
+    and unallowed identifiers; 0 = none of the explicit identifiers is allowed; null when the cheat
+    sheet is absent, no SQL was generated, or the SQL exposes nothing that can be compared. Missing
+    requested behaviour does not reduce schema faithfulness. SQL output aliases, CTE names and
+    function names are not database table/column
+    identifiers and must never be checked against the allowed schema list.
+  - criteria: one entry per success criterion (copy each criterion text exactly), status met | partly
+    | not_met | unverifiable. Judge semantic outcomes, not exact wording or a preferred
+    implementation. Each criterion is displayed for traceability, but it affects only its matching
+    metric: requested-result behaviour -> semantic_correctness; rule/join compliance ->
+    rules_adherence; allowed table/column names -> schema_faithfulness.
+    Treat a criterion as met when the response uses a reasonable equivalent that produces the same
+    requested result; do not fail theoretical edge cases unless they are stated in the contract or
+    materially change the result. Never guess whether reported facts or numbers are true.
+    UNVERIFIABLE is neutral: it must not by itself lower a metric, appear in what_didnt, or create a
+    finding.
+
+  ## SCORE BREAKDOWN AND FINDINGS
+  - For every metric, what_worked lists the distinct observable parts that satisfied the comparison;
+    use [] when none did. what_didnt lists the distinct observable gaps that kept the score below 1;
+    use [] for a perfect score and for a comparison that is not applicable. Keep each item concise,
+    specific and understandable without reading the rationale. For a 0.5 score, report both sides.
+  - A finding explains a problem in detail; category is semantic_correctness, rules_adherence or
+    schema_faithfulness.
+  - For every finding, related_tags contains only exact tags from the Traceability catalog that the
+    finding directly affects. Link a failed success criterion, table/column mismatch, material rule
+    violation, missing/invalid join, or contradicted document as applicable. Do not attach nearby or
+    merely topically similar reference items. Use [] when no catalog item is directly affected. For
+    an invented or unlisted schema identifier, include SCHEMA-UNLISTED.
+  - Keep metric boundaries strict. An unknown, undocumented or disallowed table/column identifier is
+    a schema_faithfulness issue only. A rule or join conflict is a rules_adherence issue only.
+    Missing requested behaviour is a semantic_correctness issue only. An extra filter may affect
+    semantic correctness when
+    its observable effect changes requested scope and may separately affect schema faithfulness if
+    its identifier is not allowed.
+  - Prefer the ordinary business interpretation when multiple implementations are reasonable. Do not
+    lower a score for stylistic differences, redundant syntax, a different but equivalent SQL shape,
+    or a hypothetical edge case that is not evidenced. Use null/inconclusive rather than inventing a
+    failure when semantic equivalence genuinely cannot be determined.
+  - Required for every metric scored 0 or 0.5. No finding is needed for a null score.
+  - evidence (in scores, criteria and findings) is ONE short contiguous fragment copied
+    character for character from the product answer (a few words is enough), or null - never
+    reworded, never several pieces joined with "...". evidence_status: supported (the quote
+    shows it), weak, or unsupported.
+  - matches_known_gap: always false here; code compares findings with known product gaps later.
+  - overall_verdict: your own opinion; recorded, not decisive.
+
+  ## OUTPUT CONTRACT
+  ${contract}
+
+  ## PROHIBITED
+  - Using table/column allow-list problems for semantic correctness or rules adherence; using rules
+    and joins for semantic correctness or schema faithfulness; using missing requested behaviour for
+    the other two metrics.
+  - Inventing quotes, factual correctness, hallucination labels, table names or column names.
+  - Any text outside the JSON object.
+
+# Values of ${rubric_mode}: the product is (not) an SQL-generating product.
+rubric_mode_sql: NL2SQL
+rubric_mode_other: unsupported non-NL2SQL profile
+
+# The output example (D204). Each <a | b> choice list is filled in from the model's enums;
+# the three metrics share one score shape.
+evaluation_example:
+  semantic_correctness: &score
+    score: "<0 | 0.5 | 1 | null>"
+    rationale: "<why>"
+    evidence: "<one short fragment copied from the answer, or null>"
+    what_worked: ["<concise observable success; empty if none>"]
+    what_didnt: ["<concise observable gap; empty if none>"]
+  rules_adherence: *score
+  schema_faithfulness: *score
+  criteria:
+    - criterion: "<a success criterion, copied exactly>"
+      status: "${criterion_statuses}"
+      rationale: "<why>"
+      evidence: "<one short fragment copied from the answer, or null>"
+  findings:
+    - category: "${metrics}"
+      description: "<the problem>"
+      expected_behavior: "<what should have happened>"
+      observed_behavior: "<what happened>"
+      evidence: "<one short fragment copied from the answer, or null>"
+      severity: "${severities}"
+      confidence: "<0-1, or null>"
+      evidence_status: "${evidence_statuses}"
+      matches_known_gap: "<true | false>"
+      related_tags: []
+  overall_verdict: "${verdicts}"
+
+# Added to an artifact cut to evaluation.artifact_max_chars characters.
+artifact_cut_marker: "\n[... cut: artifact too long]"
+
+# --- retry feedback when the judge's reply fails a check (nl2sql.py / agent.py) -----------
+
+copy_hint: >-
+  copy ONE shorter contiguous fragment character for character from the answer, without "..."
+
+missing_finding: >-
+  ${metric} is scored ${score} (below 1) without a finding with category ${metric_repr}: if the
+  response really falls short on ${metric}, add that finding; if nothing is wrong, score
+  ${metric} 1. Never change a score only to satisfy this check
+
+ignored_dummy_filter_note: >-
+  Ignored temporary product workaround during scoring: cg_id IN ('DUMMY'). The original SQL is
+  preserved in the product response.

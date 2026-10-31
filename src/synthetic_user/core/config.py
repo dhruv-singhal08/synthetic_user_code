@@ -105,6 +105,10 @@ class ProductSettings(_Section):
     # one stable session id. In assume mode it appends a transport-only instruction so the
     # product answers with reasonable assumptions. The generated/stored question is unchanged.
     clarification_policy: ClarificationPolicy = ClarificationPolicy.ASSUME
+    # SSL on / off for http_json and http_sse products. false = the product's TLS certificate and
+    # host name are NOT checked (a test server with a self-signed certificate only). A product
+    # contract can also turn it off for itself with ``ssl_verify: false``.
+    ssl_verify: bool = True
 
 
 class ProductAdapterSettings(_Section):

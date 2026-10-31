@@ -9,19 +9,6 @@ from typing import Any
 import pytest
 
 from synthetic_user.core.exceptions import InputAssetError
-from synthetic_user.evaluation_trace import (
-    attach_trace_links,
-    merge_finding_tags,
-    trace_catalog,
-)
-from synthetic_user.golden_set import (
-    golden_inspiration,
-    golden_set_preview,
-    ground_agent_expectations,
-    ground_golden_set,
-    parse_golden_set,
-    validate_agent_contract,
-)
 from synthetic_user.models.evaluation import EvaluationResult
 from synthetic_user.models.evaluation_profile import (
     AgentMetric,
@@ -33,6 +20,19 @@ from synthetic_user.models.evaluation_profile import (
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import Expectations, QuestionCase
 from synthetic_user.models.reference import AgentContext, Reference, ReferencePack
+from synthetic_user.nodes.evaluator.trace_tags import (
+    attach_trace_links,
+    merge_finding_tags,
+    trace_catalog,
+)
+from synthetic_user.references.golden_set import (
+    golden_inspiration,
+    golden_set_preview,
+    ground_agent_expectations,
+    ground_golden_set,
+    parse_golden_set,
+    validate_agent_contract,
+)
 from synthetic_user.references.loader import parse_reference
 
 AGENT_CONTEXT: dict[str, Any] = {

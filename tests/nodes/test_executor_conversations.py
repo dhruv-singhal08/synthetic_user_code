@@ -18,7 +18,7 @@ from synthetic_user.models.execution import (
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.nodes.product_executor import (
+from synthetic_user.nodes.executor.executor import (
     SINGLE_TURN_ASSUMPTION_INSTRUCTION,
     ProductExecutor,
 )

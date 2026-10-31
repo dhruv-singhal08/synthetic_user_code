@@ -25,19 +25,19 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.no_sql import NO_SQL_REASON
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
-from synthetic_user.nodes.evaluators.agent import (
+from synthetic_user.nodes.evaluator.agent import (
     check_agent_evaluation,
     compute_agent_metrics,
     plan_agent_metrics,
 )
-from synthetic_user.nodes.evaluators.generic import (
+from synthetic_user.nodes.evaluator.nl2sql import (
     compute_metrics,
     failing_metrics,
     without_ignored_sql_workarounds,
 )
-from synthetic_user.prompts.response_evaluation import build_response_evaluation_prompt
+from synthetic_user.nodes.evaluator.nl2sql_prompt import build_response_evaluation_prompt
+from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 
 CRITERIA = ["names the employees ranked by total card spend", "covers the requested time period"]
 JOIN = "c.employee_id = e.employee_id"

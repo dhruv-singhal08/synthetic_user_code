@@ -25,7 +25,6 @@ from synthetic_user.core.exceptions import (
 )
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
 from synthetic_user.core.trace import trace_subject
-from synthetic_user.golden_set import ground_agent_expectations
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import AmbiguityLevel, StrictModel
@@ -48,7 +47,8 @@ from synthetic_user.models.question import (
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import CapabilityClassification, Scenario
-from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
+from synthetic_user.nodes.question.prompt import QuestionPromptOptions, build_question_prompt
+from synthetic_user.references.golden_set import ground_agent_expectations
 from synthetic_user.references.leaks import find_leaks, pack_identifiers
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]

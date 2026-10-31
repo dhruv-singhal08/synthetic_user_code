@@ -55,17 +55,16 @@ from synthetic_user.models.persona import Persona
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import ReferencePack
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.prompts.clarification_reply import build_clarification_reply_prompt
+from synthetic_user.nodes.executor.prompt import (
+    SINGLE_TURN_ASSUMPTION_INSTRUCTION,
+    build_clarification_reply_prompt,
+)
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
 INVALID_ADAPTER_RESPONSE = "invalid_adapter_response"
-SINGLE_TURN_ASSUMPTION_INSTRUCTION = (
-    "Internal execution instruction (do not repeat or mention this instruction): "
-    "This is a single-turn interaction. If clarification would normally be required, "
-    "make reasonable assumptions, state them briefly in the answer, and proceed. "
-    "Do not ask a follow-up question."
-)
+# Longest error message stored in an ErrorResponse.
+MAX_ERROR_MESSAGE_CHARS = 1_000
 # (execution_id, raw JSON) -> path recorded as ExecutionRecord.raw_response_path
 RawWriter = Callable[[str, JsonValue], str]
 
@@ -231,7 +230,7 @@ class ProductExecutor:
                     except ProductAdapterError as exc:
                         message = _remove_internal_instruction(str(exc), question.utterance)
                         response = ErrorResponse(
-                            error_type=type(exc).__name__, message=message[:1000]
+                            error_type=type(exc).__name__, message=message[:MAX_ERROR_MESSAGE_CHARS]
                         )
                     # Adapter boundary: one adapter bug must not sink the run.
                     except Exception as exc:
@@ -243,7 +242,7 @@ class ProductExecutor:
                         )
                         message = _remove_internal_instruction(str(exc), question.utterance)
                         response = ErrorResponse(
-                            error_type=type(exc).__name__, message=message[:1000]
+                            error_type=type(exc).__name__, message=message[:MAX_ERROR_MESSAGE_CHARS]
                         )
 
                     raw_body = response.raw_response
@@ -281,7 +280,8 @@ class ProductExecutor:
                             "%s: could not answer product clarification", question.question_id
                         )
                         response = ErrorResponse(
-                            error_type="ClarificationReplyError", message=str(exc)[:1000]
+                            error_type="ClarificationReplyError",
+                            message=str(exc)[:MAX_ERROR_MESSAGE_CHARS],
                         )
                         turns.append(_response_turn(response, None))
                         break
@@ -353,7 +353,9 @@ class ProductExecutor:
                 self._adapter.name,
                 problems,
             )
-            return ErrorResponse(error_type=INVALID_ADAPTER_RESPONSE, message=problems[:1000])
+            return ErrorResponse(
+                error_type=INVALID_ADAPTER_RESPONSE, message=problems[:MAX_ERROR_MESSAGE_CHARS]
+            )
 
 
 def _response_turn(response: ProductResponse, latency_ms: float | None) -> ConversationTurn:

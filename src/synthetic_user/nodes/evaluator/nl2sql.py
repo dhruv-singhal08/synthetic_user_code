@@ -35,19 +35,18 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.no_sql import NO_SQL_REASON
-from synthetic_user.prompts.response_evaluation import (
+from synthetic_user.nodes.evaluator.nl2sql_prompt import (
+    COPY_HINT,
+    IGNORED_DUMMY_FILTER_NOTE,
     build_response_evaluation_prompt,
+    missing_finding_message,
     response_text,
 )
+from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
 METRIC_NAMES = tuple(m.value for m in NL2SQL_METRICS)
-# Added to quote errors so the retry knows how to fix them.
-COPY_HINT = (
-    'copy ONE shorter contiguous fragment character for character from the answer, without "..."'
-)
 _SCHEMA_ONLY_LANGUAGE = re.compile(
     r"\b(?:unknown|undefined|unspecified|undocumented|unlisted|unallowed|disallowed|"
     r"fabricated|hallucinated)\s+(?:database\s+)?(?:date\s+|time\s+|year\s+)?"
@@ -114,14 +113,10 @@ _DUMMY_CG_ID_AFTER_CONNECTOR = re.compile(
     rf"\s+(?:AND|OR)\s+{_DUMMY_CG_ID_PREDICATE}", re.IGNORECASE
 )
 _DUMMY_CG_ID_ONLY_WHERE = re.compile(rf"\bWHERE\s+{_DUMMY_CG_ID_PREDICATE}", re.IGNORECASE)
-_IGNORED_DUMMY_FILTER_NOTE = (
-    "Ignored temporary product workaround during scoring: cg_id IN ('DUMMY'). "
-    "The original SQL is preserved in the product response."
-)
 
 
 @dataclass
-class GenericJudgement:
+class Nl2SqlJudgement:
     draft: EvaluationDraft | None = None
     notes: list[str] = field(default_factory=list)
 
@@ -381,16 +376,6 @@ def check_evaluation(
     return errors
 
 
-def missing_finding_message(metric: str, score: float) -> str:
-    """Retry feedback that allows BOTH fixes. Naming only "add a finding" made a live judge lower
-    a correct score to 0 just to satisfy the check."""
-    return (
-        f"{metric} is scored {score:g} (below 1) without a finding with category {metric!r}: "
-        f"if the response really falls short on {metric}, add that finding; if nothing is "
-        f"wrong, score {metric} 1. Never change a score only to satisfy this check"
-    )
-
-
 def ignore_sql_output_alias_penalties(draft: EvaluationDraft, response: str) -> None:
     """Remove schema penalties that treat SQL output aliases as database columns."""
 
@@ -570,7 +555,7 @@ def _criterion_key(text: str) -> str:
 # --- evaluator --------------------------------------------------------------------------------
 
 
-class GenericEvaluator:
+class Nl2SqlEvaluator:
     def __init__(self, llm: LLMClient, settings: AppConfig, logger: Logger) -> None:
         self._llm = llm
         self._settings = settings
@@ -584,7 +569,7 @@ class GenericEvaluator:
         response: AnsweredResponse,
         grounding: tuple[ReferencePack, Reference] | None = None,
         conversation: Sequence[ConversationTurn] = (),
-    ) -> GenericJudgement:
+    ) -> Nl2SqlJudgement:
         ignored_workaround = False
         judged_response = response
         if self._settings.evaluation.ignore_dummy_cg_id_filter:
@@ -600,9 +585,7 @@ class GenericEvaluator:
             conversation,
             artifact_max_chars=self._settings.evaluation.artifact_max_chars,
         )
-        judgement = GenericJudgement(
-            notes=[_IGNORED_DUMMY_FILTER_NOTE] if ignored_workaround else []
-        )
+        judgement = Nl2SqlJudgement(notes=[IGNORED_DUMMY_FILTER_NOTE] if ignored_workaround else [])
         try:
 
             def validate(draft: EvaluationDraft) -> list[str]:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import ssl
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Self
@@ -15,6 +14,7 @@ from pydantic import ValidationError
 
 from synthetic_user.adapters.base import ProductRequest
 from synthetic_user.adapters.http_common import (
+    ERROR_SNIPPET_CHARS,
     HttpOptionsBase,
     HttpRequest,
     ResponseMapper,
@@ -22,9 +22,10 @@ from synthetic_user.adapters.http_common import (
     lookup,
     redact_json,
     render_template,
-    resolve_ca_bundle,
     resolve_headers,
     scrub_text,
+    ssl_context,
+    tls_settings,
 )
 from synthetic_user.core.exceptions import ConfigError, ProductAdapterError, format_validation_error
 from synthetic_user.core.trace import record_product_http
@@ -57,11 +58,7 @@ async def aiohttp_sse_transport(request: HttpRequest) -> SseHttpResult:
     """Open an SSE response and consume it line by line under one total timeout."""
 
     timeout = aiohttp.ClientTimeout(total=request.timeout)
-    context = (
-        ssl.create_default_context(cafile=request.tls_ca_bundle)
-        if request.tls_ca_bundle is not None
-        else None
-    )
+    context = ssl_context(request)
     try:
         async with (
             aiohttp.ClientSession(timeout=timeout) as session,
@@ -96,11 +93,12 @@ class HttpSseAdapter:
         options: HttpSseOptions,
         *,
         env: Mapping[str, str],
+        ssl_verify: bool = True,
         transport: SseTransport = aiohttp_sse_transport,
     ) -> None:
         self._options = options
         self._env = env
-        self._tls_ca_bundle = resolve_ca_bundle(options.tls_ca_bundle, env)
+        self._ssl_verify, self._tls_ca_bundle = tls_settings(options, env, ssl_verify=ssl_verify)
         self._transport = transport
         self._mapper = ResponseMapper(options.response_mapping)
 
@@ -110,6 +108,7 @@ class HttpSseAdapter:
         options: Mapping[str, Any],
         *,
         env: Mapping[str, str],
+        ssl_verify: bool = True,
         transport: SseTransport = aiohttp_sse_transport,
     ) -> Self:
         try:
@@ -118,7 +117,7 @@ class HttpSseAdapter:
             raise ConfigError(
                 f"Invalid product_adapter options for http_sse: {format_validation_error(exc)}"
             ) from exc
-        return cls(parsed, env=env, transport=transport)
+        return cls(parsed, env=env, ssl_verify=ssl_verify, transport=transport)
 
     def __repr__(self) -> str:
         count = len(self._options.headers)
@@ -140,6 +139,7 @@ class HttpSseAdapter:
             body=body,
             timeout=options.timeout,
             tls_ca_bundle=self._tls_ca_bundle,
+            ssl_verify=self._ssl_verify,
         )
         trace_request = {
             "method": options.method,
@@ -168,7 +168,7 @@ class HttpSseAdapter:
             )
             return ErrorResponse(error_type="AuthenticationError", message=message)
         if result.status >= 400:
-            snippet = "\n".join(result.lines)[:200]
+            snippet = "\n".join(result.lines)[:ERROR_SNIPPET_CHARS]
             message = scrub_text(f"HTTP {result.status}: {snippet}", resolved.secrets)
             record_product_http(
                 request=trace_request,

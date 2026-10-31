@@ -25,6 +25,7 @@ from synthetic_user.models.evaluation import Verdict
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
+    MAX_SUCCESS_CRITERIA,
     Expectations,
     QuestionCase,
     QuestionCharacteristics,
@@ -189,7 +190,7 @@ def build_evaluation_cases(
             ),
             expectations=Expectations(
                 expected_behavior=case.expected_behavior,
-                success_criteria=list(scenario.success_criteria)[:4],
+                success_criteria=list(scenario.success_criteria)[:MAX_SUCCESS_CRITERIA],
             ),
         )
         execution = ExecutionRecord.model_validate(

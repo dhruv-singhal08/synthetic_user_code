@@ -58,9 +58,16 @@ def create_adapter(
     if config.type is ProductAdapterType.FIXTURE:
         return FixtureAdapter.from_file(_options(FixtureOptions, config.options, config.type).path)
     if config.type is ProductAdapterType.HTTP_JSON:
-        return HttpJsonAdapter.from_options(config.options, env=environ, transport=transport)
+        return HttpJsonAdapter.from_options(
+            config.options, env=environ, ssl_verify=settings.product.ssl_verify, transport=transport
+        )
     if config.type is ProductAdapterType.HTTP_SSE:
-        return HttpSseAdapter.from_options(config.options, env=environ, transport=sse_transport)
+        return HttpSseAdapter.from_options(
+            config.options,
+            env=environ,
+            ssl_verify=settings.product.ssl_verify,
+            transport=sse_transport,
+        )
     if config.type is ProductAdapterType.PYTHON:
         return _python_adapter(_options(PythonOptions, config.options, config.type))
     raise ConfigError(f"Unknown product_adapter.type: {config.type!r}")

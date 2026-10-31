@@ -18,7 +18,9 @@ Persona + Product [+ Reference (data_catalog | document_collection) + optional i
      correctness / groundedness against the cheat sheet when grounded) -> Bug Candidates
 ```
 
-One orchestrator. Nodes are classes, not agents.
+One orchestrator. Nodes are classes, not agents. One package per node
+(`nodes/{scenario,question,executor,evaluator}/`): its code, the code that assembles its
+prompts (`*prompt.py`) and the prompt text (`*prompt.yaml`). Layout: README "Code layout".
 
 ## HARD RULES (v2.1)
 
@@ -52,7 +54,12 @@ One orchestrator. Nodes are classes, not agents.
 - Pydantic v2 everywhere, `extra="forbid"`, `StrEnum` enums.
 - Nodes depend only on `LLMClient` and `ProductAdapter` (`adapters/base.py`) Protocols.
 - Provider SDKs (gemini, safechain) imported lazily, only in `llm/*_adapter.py`.
-- Prompts only in `src/synthetic_user/prompts/*.py`.
+- Prompt TEXT only in YAML prompt files: `nodes/<node>/*prompt.yaml`,
+  `adapters/mock_llm_prompt.yaml`, shared pieces in `prompts/*.yaml`. Python only picks
+  entries and fills `${name}` placeholders (`prompts/templates.py`); no prompt strings in code.
+  A refactor must keep every rendered prompt byte-identical.
+- Tunables and switches (limits, counts, timeouts, `product.ssl_verify`) live in
+  `config/app*.yaml`; fixed limits tied to a model's schema are named constants, not literals.
 - All LLM output validated via `llm/structured.py` (bounded retry, typed error).
 - Never invent tables, columns, relationships, capabilities, verdicts.
   LLM can never mark a relationship "verified" unless the reference says so.

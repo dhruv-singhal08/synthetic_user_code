@@ -22,7 +22,7 @@ from synthetic_user.models.execution import (
 )
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.nodes.product_executor import INVALID_ADAPTER_RESPONSE, ProductExecutor
+from synthetic_user.nodes.executor.executor import INVALID_ADAPTER_RESPONSE, ProductExecutor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "data" / "fixtures" / "product_responses"

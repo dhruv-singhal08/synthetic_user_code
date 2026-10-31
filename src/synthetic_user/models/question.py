@@ -53,6 +53,9 @@ class QuestionCharacteristics(StrictModel):
 
 MAX_SUCCESS_CRITERIA = 4
 MAX_DELIVERABLES = 3
+# Canonical reference definitions / uploaded golden-set criteria kept per question.
+MAX_REFERENCE_CONTEXT = 40
+MAX_GOLDEN_SET_CRITERIA = 40
 
 
 class QuestionDeliverable(StrictModel):
@@ -104,12 +107,12 @@ class Expectations(StrictModel):
     prohibited_behaviors: list[NonEmptyStr] = Field(default_factory=list, max_length=12)
     reference_context: list[NonEmptyStr] = Field(
         default_factory=list,
-        max_length=40,
+        max_length=MAX_REFERENCE_CONTEXT,
         description="Canonical tool/source/workflow definitions copied from reference data",
     )
     golden_set_criteria: dict[NonEmptyStr, NonEmptyStr] = Field(
         default_factory=dict,
-        max_length=40,
+        max_length=MAX_GOLDEN_SET_CRITERIA,
         description="Every non-empty expected criterion preserved exactly from the uploaded row",
     )
 

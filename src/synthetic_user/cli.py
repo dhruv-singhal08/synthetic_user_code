@@ -27,7 +27,6 @@ from pydantic import TypeAdapter
 from synthetic_user.adapters.base import ProductAdapter, UnavailableAdapter
 from synthetic_user.adapters.fixture import fixture_template
 from synthetic_user.adapters.registry import create_adapter
-from synthetic_user.benchmark import load_cases, load_scenarios, run_benchmark
 from synthetic_user.core.config import (
     AppConfig,
     LLMProvider,
@@ -43,7 +42,6 @@ from synthetic_user.core.exceptions import (
 from synthetic_user.core.identifiers import RUN_ID_PATTERN, SequentialIdGenerator, new_run_id
 from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.core.logging import get_run_logger, setup_logging
-from synthetic_user.kpis import METRIC_LABELS, compute_kpis, kpis_csv
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.fake import FakeLLMClient
@@ -57,6 +55,8 @@ from synthetic_user.models.reference import DataCatalog, Reference, ReferencePac
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+from synthetic_user.nodes.evaluator.benchmark import load_cases, load_scenarios, run_benchmark
+from synthetic_user.nodes.evaluator.kpis import METRIC_LABELS, compute_kpis, kpis_csv
 from synthetic_user.pipeline import RunInputs, RunSummary, Step, SyntheticUserPipeline
 from synthetic_user.prompts.smoke import SMOKE_SYSTEM, SMOKE_USER
 from synthetic_user.references.convert import refidx_to_catalog
@@ -724,7 +724,7 @@ async def _benchmark(state: CliState, cases_path: Path | None, scenarios_path: P
     evaluator = Evaluator(
         create_llm_client(settings),
         settings,
-        get_run_logger("synthetic_user.benchmark", new_run_id()),
+        get_run_logger("synthetic_user.nodes.evaluator.benchmark", new_run_id()),
         reference=reference,
         id_generator=SequentialIdGenerator(),
     )

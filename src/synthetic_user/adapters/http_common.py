@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import re
+import ssl
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -26,6 +28,9 @@ from synthetic_user.models.execution import (
     ResponseArtifact,
 )
 
+_log = logging.getLogger(__name__)
+# Characters of an HTTP error body quoted in the ErrorResponse message.
+ERROR_SNIPPET_CHARS = 200
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _PLACEHOLDERS = ("utterance", "session_id", "uuid")
 _MISSING = object()
@@ -91,6 +96,9 @@ class HttpOptionsBase(StrictModel):
     headers: dict[NonEmptyStr, str] = Field(default_factory=dict)
     timeout: float = Field(default=30.0, gt=0)
     tls_ca_bundle: NonEmptyStr | None = None
+    # false = do not check the product's TLS certificate or host name (a test server with a
+    # self-signed certificate only). product.ssl_verify in the app config can also turn it off.
+    ssl_verify: bool = True
     request_template: dict[str, Any] | list[Any] = Field(
         default_factory=lambda: {"utterance": "{utterance}"}
     )
@@ -119,6 +127,7 @@ class HttpRequest:
     body: bytes | None
     timeout: float
     tls_ca_bundle: str | None = None
+    ssl_verify: bool = True
 
 
 @dataclass(frozen=True)
@@ -149,7 +158,7 @@ def resolve_headers(templates: Mapping[str, str], env: Mapping[str, str]) -> Res
 
 
 def resolve_ca_bundle(template: str | None, env: Mapping[str, str]) -> str | None:
-    """Resolve a configured TLS trust bundle without disabling certificate verification."""
+    """Resolve a configured TLS trust bundle (verification stays on)."""
 
     if template is None:
         return None
@@ -170,6 +179,35 @@ def resolve_ca_bundle(template: str | None, env: Mapping[str, str]) -> str | Non
     if not path.is_file():
         raise ConfigError(f"product_adapter TLS CA bundle not found: {path}")
     return str(path)
+
+
+def tls_settings(
+    options: HttpOptionsBase, env: Mapping[str, str], *, ssl_verify: bool
+) -> tuple[bool, str | None]:
+    """(verify, CA bundle path) for an HTTP adapter.
+
+    Verification is on unless the contract (``ssl_verify: false``) or the app config
+    (``product.ssl_verify: false``) turns it off; the CA bundle is only resolved when it is on.
+    """
+    verify = options.ssl_verify and ssl_verify
+    if not verify:
+        _log.warning(
+            "TLS certificate verification is OFF for %s (ssl_verify: false)", host(options.url)
+        )
+        return False, None
+    return True, resolve_ca_bundle(options.tls_ca_bundle, env)
+
+
+def ssl_context(request: HttpRequest) -> ssl.SSLContext | None:
+    """The TLS context for a request; None = the default (verify against the system CAs)."""
+    if not request.ssl_verify:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+    if request.tls_ca_bundle is not None:
+        return ssl.create_default_context(cafile=request.tls_ca_bundle)
+    return None
 
 
 def render_template(template: Any, req: ProductRequest) -> Any:

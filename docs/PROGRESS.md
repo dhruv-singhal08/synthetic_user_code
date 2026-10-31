@@ -371,3 +371,39 @@
 - Tests: +2 http_json timeout tests (stub + real socket), +1 prompt test, 2 evaluator tests updated. Gate: ruff / format pass; mypy (81 files) pass; pytest -W error 564 passed, 2 deselected; app.js parses.
 - Observed, not changed: flash-lite sometimes breaks the judge output contract 3 times -> question recorded inconclusive (honest, no invented scores); "complex" on a single-source product (card-spend NL2SQL) yields 0 questions in most live runs; Gemini free tier 15 req/min -> 429 retries slow steps; the web UI uses the per-format default instructions unless instructions are uploaded / typed (inputs.reference_guide_file is CLI only); a page reload drops the current run (reopen from Recent runs).
 - NOT verified: SafeChain and the real VoC / NL2SQL endpoints (Amex laptop); amexcerts TLS against a real https endpoint; screens below 1440 px.
+
+## Restructure: node-wise packages, prompts in YAML, no hardcoding, SSL on/off (2026-10-31) - user request
+
+- Files: one package per node, `nodes/{scenario,question,executor,evaluator}/`. Each holds its
+  code, `*prompt.py` (assembly) and `*prompt.yaml` (the prompt text). Shared prompt pieces
+  are in `prompts/` (`templates.py` loader, `persona.yaml`, `common.yaml`). The other
+  modules moved: kpis / no_sql / benchmark / evaluation_trace -> `nodes/evaluator/`,
+  golden_set -> `references/`, mock product prompt -> `adapters/mock_llm_prompt.*`.
+  `GenericEvaluator` was renamed `Nl2SqlEvaluator`. Tests now mirror `src`. See D209.
+- SSL on/off: `product.ssl_verify` (app config) and `ssl_verify` (per contract), both
+  default true. See D210.
+- Hardcoding: the remaining magic numbers are now named constants tied to model limits
+  (MAX_SUCCESS_CRITERIA, MAX_REFERENCE_CONTEXT, MAX_ISSUE_EXAMPLES, ...). All tunables were
+  already in `config/app*.yaml`.
+- Commands + results: ruff OK, format OK, mypy (85 files) OK, pytest -W error 589 passed.
+  There are 25 new tests: the prompt-file loader, the SSL flag, and a real self-signed
+  https server.
+- Verified:
+  - Prompts are byte-identical. 3,555 prompts rendered over every builder and option
+    combination (both profiles, all modes, golden sets, personas, metrics) match
+    before/after. So do the 267 prompts sent by the test suite.
+  - Live Gemini web matrix: W01 47/47, W02 48/48, W04 35/35, W05 26/26, W07 15/15,
+    W09 14/14, W10 10/10. W08 was 17/17 on the re-run; the first run's only question was
+    rejected by the LLM, so there was nothing to execute.
+  - Live SSL check against a self-signed https dummy product:
+    - verification on: `CERTIFICATE_VERIFY_FAILED`, recorded as error;
+    - contract off: answered 2/2;
+    - app config off: answered 2/2;
+    - the Agent judge then ran with Gemini.
+- NOT verified (external):
+  - SafeChain;
+  - real VoC / NL2SQL endpoints;
+  - the wheel build: no build tool offline here; YAML ships like the existing `web/static`
+    files.
+- Not touched: `notebooks/pipeline_walkthrough.ipynb` was already stale before this change
+  (it imports `load_catalog`, `sql_evaluator`, ...); only its module paths were updated.

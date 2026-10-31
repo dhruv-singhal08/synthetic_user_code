@@ -1,3 +1,3 @@
-"""Synthetic User that tests an NL2SQL product."""
+"""Synthetic User: automated testing of conversational products (NL2SQL, chatbot, agent, ...)."""
 
 __version__ = "0.1.0"

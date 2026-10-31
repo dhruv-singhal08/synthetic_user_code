@@ -44,6 +44,10 @@ class LLMOutputValidationError(SyntheticUserError):
         return f"{self.args[0]} (attempts={self.attempts}, errors={len(self.errors)})"
 
 
+class PromptTemplateError(SyntheticUserError):
+    """A prompt file (``*prompt.yaml``) is missing, malformed, or a placeholder is unfilled."""
+
+
 class ReferenceIntegrityError(SyntheticUserError):
     """A reference item contradicts the reference index (unknown table, column, relationship)."""
 

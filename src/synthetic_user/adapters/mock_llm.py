@@ -11,6 +11,7 @@ import re
 
 from synthetic_user.adapters.base import ProductRequest
 from synthetic_user.adapters.contract import ProductContract
+from synthetic_user.adapters.mock_llm_prompt import build_mock_product_prompt
 from synthetic_user.core.exceptions import LLMProviderError, ProductAdapterError
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.models.execution import (
@@ -23,7 +24,6 @@ from synthetic_user.models.execution import (
 )
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
-from synthetic_user.prompts.mock_product import build_mock_product_prompt
 
 _FENCED = re.compile(r"```([A-Za-z0-9_-]*)[ \t]*\n?(.*?)```", re.DOTALL)
 

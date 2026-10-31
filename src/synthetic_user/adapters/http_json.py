@@ -7,6 +7,7 @@ Options (``product_adapter.options``)::
     headers: {Authorization: "Bearer ${PRODUCT_TOKEN}"}   # ${ENV_VAR} filled from env
     timeout: 30
     tls_ca_bundle: amexcerts          # optional: amexcerts, a PEM path, or ${ENV_VAR}
+    ssl_verify: true                  # false = no certificate check (test servers only)
     request_template: {question: "{utterance}", session: "{session_id}", trace: "{uuid}"}
     response_mapping:
       text: data.answer               # dotted paths; list items by index, e.g. data.items.0
@@ -28,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable, Mapping
@@ -38,6 +38,7 @@ from pydantic import ValidationError
 
 from synthetic_user.adapters.base import ProductRequest
 from synthetic_user.adapters.http_common import (
+    ERROR_SNIPPET_CHARS,
     HttpOptionsBase,
     HttpRequest,
     HttpResult,
@@ -46,9 +47,10 @@ from synthetic_user.adapters.http_common import (
     lookup,
     redact_json,
     render_template,
-    resolve_ca_bundle,
     resolve_headers,
     scrub_text,
+    ssl_context,
+    tls_settings,
 )
 from synthetic_user.core.exceptions import ConfigError, ProductAdapterError, format_validation_error
 from synthetic_user.core.trace import record_product_http
@@ -90,13 +92,10 @@ def _urllib_send(request: HttpRequest) -> HttpResult:
     prepared = urllib.request.Request(
         request.url, data=request.body, headers=dict(request.headers), method=request.method
     )
-    context = (
-        ssl.create_default_context(cafile=request.tls_ca_bundle)
-        if request.tls_ca_bundle is not None
-        else None
-    )
     try:
-        with urllib.request.urlopen(prepared, timeout=request.timeout, context=context) as response:
+        with urllib.request.urlopen(
+            prepared, timeout=request.timeout, context=ssl_context(request)
+        ) as response:
             return HttpResult(response.status, response.read())
     except urllib.error.HTTPError as exc:
         return HttpResult(exc.code, exc.read())
@@ -126,11 +125,12 @@ class HttpJsonAdapter:
         options: HttpJsonOptions,
         *,
         env: Mapping[str, str],
+        ssl_verify: bool = True,
         transport: Transport = urllib_transport,
     ) -> None:
         self._options = options
         self._env = env
-        self._tls_ca_bundle = resolve_ca_bundle(options.tls_ca_bundle, env)
+        self._ssl_verify, self._tls_ca_bundle = tls_settings(options, env, ssl_verify=ssl_verify)
         self._transport = transport
         self._mapper = ResponseMapper(options.response_mapping)
 
@@ -140,6 +140,7 @@ class HttpJsonAdapter:
         options: Mapping[str, Any],
         *,
         env: Mapping[str, str],
+        ssl_verify: bool = True,
         transport: Transport = urllib_transport,
     ) -> Self:
         try:
@@ -148,7 +149,7 @@ class HttpJsonAdapter:
             raise ConfigError(
                 f"Invalid product_adapter options for http_json: {format_validation_error(exc)}"
             ) from exc
-        return cls(parsed, env=env, transport=transport)
+        return cls(parsed, env=env, ssl_verify=ssl_verify, transport=transport)
 
     def __repr__(self) -> str:
         count = len(self._options.headers)
@@ -172,6 +173,7 @@ class HttpJsonAdapter:
             body=body,
             timeout=options.timeout,
             tls_ca_bundle=self._tls_ca_bundle,
+            ssl_verify=self._ssl_verify,
         )
         trace_request = {
             "method": options.method,
@@ -205,7 +207,7 @@ class HttpJsonAdapter:
 
     def _to_response(self, result: HttpResult, secrets: tuple[str, ...]) -> ProductResponse:
         if result.status >= 400:
-            snippet = result.body[:200].decode("utf-8", errors="replace")
+            snippet = result.body[:ERROR_SNIPPET_CHARS].decode("utf-8", errors="replace")
             return ErrorResponse(
                 error_type="HttpError",
                 message=scrub_text(f"HTTP {result.status}: {snippet}", secrets),

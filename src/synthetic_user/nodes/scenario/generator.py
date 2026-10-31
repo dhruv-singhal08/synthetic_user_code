@@ -35,7 +35,7 @@ from synthetic_user.models.scenario import (
     ScenarioGenerationResult,
     TaskType,
 )
-from synthetic_user.prompts.scenario import ScenarioPromptOptions, build_scenario_prompt
+from synthetic_user.nodes.scenario.prompt import ScenarioPromptOptions, build_scenario_prompt
 from synthetic_user.references.pack import NO_VALID_ITEM, build_pack
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]

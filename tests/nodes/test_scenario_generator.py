@@ -13,7 +13,7 @@ from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
 from synthetic_user.models.scenario import ScenarioDraft, ScenarioGenerationResult, TaskType
-from synthetic_user.nodes.scenario_generator import (
+from synthetic_user.nodes.scenario.generator import (
     FILTERED_BY_CONFIG,
     MISSING_PACK,
     NO_VALID_ITEM,
@@ -24,7 +24,7 @@ from synthetic_user.nodes.scenario_generator import (
     scenario_signature,
     ungrounded_signature,
 )
-from synthetic_user.prompts.scenario import ScenarioPromptOptions, build_scenario_prompt
+from synthetic_user.nodes.scenario.prompt import ScenarioPromptOptions, build_scenario_prompt
 
 
 def _settings(app_config: AppConfig, **scenario: Any) -> AppConfig:

@@ -26,9 +26,8 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.nodes.evaluators.generic import missing_finding_message
-from synthetic_user.prompts.agent_response_evaluation import build_agent_evaluation_prompt
-from synthetic_user.prompts.response_evaluation import response_text
+from synthetic_user.nodes.evaluator.agent_prompt import build_agent_evaluation_prompt
+from synthetic_user.nodes.evaluator.nl2sql_prompt import missing_finding_message, response_text
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 

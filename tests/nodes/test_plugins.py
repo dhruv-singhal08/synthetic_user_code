@@ -9,7 +9,7 @@ import pytest
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import ConfigError
 from synthetic_user.llm.fake import FakeLLMClient
-from synthetic_user.nodes.evaluators.plugins.registry import PLUGINS, create_plugins
+from synthetic_user.nodes.evaluator.plugins.registry import PLUGINS, create_plugins
 
 
 def test_registry_is_empty_and_rejects_unknown_names(app_config: AppConfig) -> None:

@@ -13,7 +13,7 @@ from xml.etree import ElementTree as ET
 
 from synthetic_user.core.exceptions import InputAssetError
 from synthetic_user.models.golden_set import GoldenCase, GoldenSet, GoldenSetPreview
-from synthetic_user.models.question import Expectations
+from synthetic_user.models.question import MAX_REFERENCE_CONTEXT, MAX_SUCCESS_CRITERIA, Expectations
 from synthetic_user.models.reference import AgentContext, Reference
 
 GOLDEN_SET = "golden_set"
@@ -363,7 +363,7 @@ def _reference_context(tools: list[str], sources: list[str], context: AgentConte
         lines.extend(f"Data source {source.name} limitation: {item}" for item in source.limitations)
     lines.extend(f"Workflow {stage.name}: {stage.description}" for stage in context.workflow)
     lines.extend(f"Reference rule: {rule}" for rule in context.rules)
-    return list(dict.fromkeys(lines))[:40]
+    return list(dict.fromkeys(lines))[:MAX_REFERENCE_CONTEXT]
 
 
 def _rows_to_golden_set(rows: list[list[str]], source_name: str) -> GoldenSet:
@@ -425,7 +425,7 @@ def _rows_to_golden_set(rows: list[list[str]], source_name: str) -> GoldenSet:
                 expected_time_period=values.get("expected_time_period") or None,
                 expected_data_sources=_sources(source),
                 expected_behavior=values["expected_behavior"],
-                success_criteria=criteria[:4],
+                success_criteria=criteria[:MAX_SUCCESS_CRITERIA],
                 expected_tools=_list(values.get("expected_tools", "")),
                 expected_context=context,
                 prohibited_behaviors=_list(values.get("prohibited_behaviors", "")),
@@ -527,7 +527,7 @@ def _list(value: str) -> list[str]:
 
 def _criteria_from_behavior(value: str) -> list[str]:
     listed = _list(value)
-    return listed[:4] if len(listed) > 1 else [value.strip()]
+    return listed[:MAX_SUCCESS_CRITERIA] if len(listed) > 1 else [value.strip()]
 
 
 def _sources(value: str) -> list[str]:

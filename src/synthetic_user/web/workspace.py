@@ -30,15 +30,6 @@ from synthetic_user.core.exceptions import (
 )
 from synthetic_user.core.identifiers import RUN_ID_PATTERN, new_run_id
 from synthetic_user.core.loaders import parse_asset, parse_yaml_mapping
-from synthetic_user.evaluation_trace import attach_trace_links
-from synthetic_user.golden_set import (
-    GOLDEN_SET,
-    golden_set_preview,
-    ground_golden_set,
-    parse_golden_set,
-    validate_agent_contract,
-)
-from synthetic_user.kpis import consolidate_findings
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import EvaluationResult
 from synthetic_user.models.evaluation_profile import (
@@ -57,8 +48,17 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
 from synthetic_user.models.reference import DataCatalog, Reference, ReferenceKind, ReferencePack
 from synthetic_user.models.scenario import RejectedScenario, Scenario
-from synthetic_user.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
+from synthetic_user.nodes.evaluator.kpis import consolidate_findings
+from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
+from synthetic_user.nodes.evaluator.trace_tags import attach_trace_links
 from synthetic_user.pipeline import RunInputs, Step, steps_from
+from synthetic_user.references.golden_set import (
+    GOLDEN_SET,
+    golden_set_preview,
+    ground_golden_set,
+    parse_golden_set,
+    validate_agent_contract,
+)
 from synthetic_user.references.loader import GUIDE_SUFFIXES, parse_reference
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import RUNS_DIR, run_artifact

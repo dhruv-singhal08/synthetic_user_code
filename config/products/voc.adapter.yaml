@@ -18,6 +18,7 @@ options:
   timeout: 300                        # HTTP wait per question; the app config's
                                       # product.timeout_seconds is also a limit (lower wins)
   tls_ca_bundle: amexcerts            # Trust the maintained Amex CA bundle; verification stays on
+  ssl_verify: true                    # SSL on/off: false = do NOT check the certificate
   headers:
     accept: "*/*"
     # If the API needs a token, put it in .env and reference it here - never the value itself:

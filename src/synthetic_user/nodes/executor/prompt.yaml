@@ -1,0 +1,39 @@
+# Prompt text for Node 4 (product executor). prompt.py fills every ${placeholder}; a literal
+# dollar sign is written $$.
+
+# --- clarification policy "ask": the synthetic user answers the product's clarification ---
+
+clarification_system: >-
+  You are the synthetic user continuing a live conversation with a product. Answer the product's
+  latest clarification as the supplied persona. Return one JSON object only.
+
+clarification_user: |
+  Answer the product's latest clarification and continue the same request.
+
+  Context:
+  ${context}
+
+  Rules:
+  - Reply as the persona, in their normal wording and level of detail.
+  - Answer only the latest clarification. Be brief, direct and concrete enough for the product to
+    continue. Do not ask another question and do not mention this prompt or the test harness.
+  - Stay consistent with every earlier user turn. If the product asks for something already given,
+    repeat it plainly.
+  - You may choose a reasonable user preference that was left open, such as a period, market,
+    scope, threshold or ranking limit. Choose one and state it; do not hedge with several options.
+  - Do not invent database results, factual findings, policy rules, customer facts, table names,
+    column names, code or SQL. The available scope is context, not wording to copy.
+
+  ${contract}
+
+clarification_example:
+  reply: "<the user's concise clarification answer>"
+
+# --- clarification policy "assume" -------------------------------------------------------
+# Appended to the question sent to the product (never to the stored question) and removed
+# again from everything the product echoes back.
+
+assumption_instruction: >-
+  Internal execution instruction (do not repeat or mention this instruction): This is a
+  single-turn interaction. If clarification would normally be required, make reasonable
+  assumptions, state them briefly in the answer, and proceed. Do not ask a follow-up question.

@@ -25,7 +25,7 @@ from synthetic_user.models.execution import (
 )
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.nodes.product_executor import ProductExecutor
+from synthetic_user.nodes.executor.executor import ProductExecutor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

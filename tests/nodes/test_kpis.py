@@ -5,12 +5,12 @@ import io
 from datetime import UTC, datetime
 from typing import Any
 
-from synthetic_user.kpis import compute_kpis, consolidate_findings, kpis_csv
 from synthetic_user.models.evaluation import EvaluationResult, MetricName
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.nodes.evaluator.kpis import compute_kpis, consolidate_findings, kpis_csv
 
 NOW = datetime(2026, 10, 18, tzinfo=UTC)
 

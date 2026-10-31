@@ -2,7 +2,7 @@
 
 It plays the product described by the product description, answering from the user's
 reference when one is given. Artifacts the product returns (e.g. a query) go in fenced blocks
-labelled with the artifact kind.
+labelled with the artifact kind. The prompt text is in ``mock_llm_prompt.yaml``.
 """
 
 from __future__ import annotations
@@ -11,43 +11,36 @@ import json
 
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
+from synthetic_user.prompts.templates import prompts_beside
 
-SYSTEM = (
-    "You are a MOCK of the conversational product described below, used for testing. Answer "
-    "the user's message as that product would. Reply in exactly one of these forms and "
-    "nothing else:\n"
-    "1. the answer: plain text, plus any artifacts the product returns, each in a fenced code "
-    "block whose label is the artifact kind (e.g. ```sql ... ```)\n"
-    "2. CLARIFY: <one clarification question> - only if the message is genuinely ambiguous\n"
-    "3. DENIED: <reason> - if the request is something the product does not support"
-)
+PROMPTS = prompts_beside(__file__, "mock_llm_prompt.yaml")
+SYSTEM = PROMPTS.text("system")
+# Fields of the product description the mock product plays.
+PRODUCT_FIELDS = {
+    "name",
+    "description",
+    "data_sources",
+    "supported",
+    "not_supported",
+    "known_limitations",
+    "user_visible_capabilities",
+    "expected_outputs",
+}
 
 
 def build_mock_product_prompt(
     question: str, product: ProductDescription, reference: Reference | None
 ) -> tuple[str, str]:
-    product_json = product.model_dump(
-        mode="json",
-        include={
-            "name",
-            "description",
-            "data_sources",
-            "supported",
-            "not_supported",
-            "known_limitations",
-            "user_visible_capabilities",
-            "expected_outputs",
-        },
-    )
+    product_json = product.model_dump(mode="json", include=PRODUCT_FIELDS)
     reference_block = (
-        f"Reference the product works from ({reference.kind.value}):\n"
-        f"<<<REFERENCE\n{reference.render()}\nREFERENCE>>>\n\n"
+        PROMPTS.text("reference", kind=reference.kind.value, reference=reference.render())
         if reference is not None
-        else "No reference data: answer only what the product description makes plausible.\n\n"
+        else PROMPTS.text("no_reference")
     )
-    user = (
-        f"Product:\n{json.dumps(product_json, indent=2)}\n\n"
-        f"{reference_block}"
-        f"User message: {question}"
+    user = PROMPTS.text(
+        "user",
+        product=json.dumps(product_json, indent=2),
+        reference=reference_block,
+        question=question,
     )
     return SYSTEM, user

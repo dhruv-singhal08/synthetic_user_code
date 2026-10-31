@@ -2,7 +2,7 @@
 
 A plugin would add product-specific checks for one kind of response artifact (e.g. a query
 language, a chart spec) on top of the generic evaluation. Nothing calls plugins today: the
-evaluator (nodes/evaluator.py) runs only the generic judge, and the registry is empty. To
+evaluator (nodes/evaluator/evaluator.py) runs only the profile judges, and the registry is empty. To
 connect one later: implement ArtifactPlugin, register it in registry.py, and call the
 applicable plugins from the evaluator for grounded answers, combining verdicts with the
 "worst of" rule (fail > inconclusive > pass).

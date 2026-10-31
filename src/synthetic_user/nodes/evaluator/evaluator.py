@@ -1,15 +1,16 @@
 """Node 5: evaluate product executions (routing + assembly).
 
 Routing by outcome:
-- answered -> one LLM judgement, then semantic correctness, rules adherence, schema
-              faithfulness and the verdict computed by code (nodes/evaluators/generic.py).
-              A scenario Reference Pack supplies only allowed table/column names, not
+- answered -> one LLM judgement of the run's evaluation profile, then the scores and the
+              verdict computed by code:
+              NL2SQL (nl2sql.py): semantic correctness, rules adherence, schema faithfulness;
+              a scenario Reference Pack supplies only allowed table/column names, not
               factual answer ground truth.
+              Agent (agent.py): relevance, completion + the enabled optional metrics.
 - clarification / denied / error / timeout -> recorded_only, verdict None, no LLM call.
 
-Artifact plugins (nodes/evaluators/plugins/) are disconnected for now: every product goes
-through this one generic path. The LLM's own opinion is stored as llm_verdict and is never
-decisive.
+Artifact plugins (plugins/) are disconnected for now: no product-specific evaluation code.
+The LLM's own opinion is stored as llm_verdict and is never decisive.
 Bug candidates: one per failed evaluation, from its findings with severity >= medium and
 evidence supported (most severe first), status needs_review, carrying question / scenario /
 execution / finding ids, the reproduction utterance and the product_id.
@@ -29,7 +30,6 @@ from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import ArtifactIntegrityError
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
 from synthetic_user.core.trace import trace_subject
-from synthetic_user.evaluation_trace import criterion_tag, link_finding_tags, merge_finding_tags
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.models.evaluation import (
     AgentEvaluationDraft,
@@ -55,22 +55,33 @@ from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.no_sql import NO_SQL_REASON, no_sql_execution, product_expects_sql
-from synthetic_user.nodes.evaluators.agent import (
+from synthetic_user.nodes.evaluator.agent import (
     AgentEvaluator,
     AgentJudgement,
     compute_agent_metrics,
 )
-from synthetic_user.nodes.evaluators.generic import (
-    GenericEvaluator,
-    GenericJudgement,
+from synthetic_user.nodes.evaluator.nl2sql import (
+    Nl2SqlEvaluator,
+    Nl2SqlJudgement,
     compute_metrics,
     matches_known_gap,
     metrics_verdict,
 )
+from synthetic_user.nodes.evaluator.no_sql import (
+    NO_SQL_REASON,
+    no_sql_execution,
+    product_expects_sql,
+)
+from synthetic_user.nodes.evaluator.trace_tags import (
+    criterion_tag,
+    link_finding_tags,
+    merge_finding_tags,
+)
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
+# Longest bug candidate title.
+MAX_BUG_TITLE_CHARS = 200
 _SEVERITY_RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2, Severity.CRITICAL: 3}
 
 
@@ -99,7 +110,7 @@ class Evaluator:
         self._ids = id_generator or SequentialIdGenerator()
         self._reference = reference
         self._profile = profile
-        self._generic = GenericEvaluator(llm, settings, logger)
+        self._nl2sql = Nl2SqlEvaluator(llm, settings, logger)
         self._agent = AgentEvaluator(llm, settings, logger, enabled_metrics=agent_metrics)
 
     async def evaluate(self, case: EvaluationCase, product: ProductDescription) -> EvaluationResult:
@@ -130,7 +141,7 @@ class Evaluator:
         case: EvaluationCase,
         product: ProductDescription,
         semaphore: asyncio.Semaphore,
-    ) -> GenericJudgement | AgentJudgement | None:
+    ) -> Nl2SqlJudgement | AgentJudgement | None:
         response = case.execution.response
         if not isinstance(response, AnsweredResponse):
             return None  # clarification / denied / error / timeout: recorded only
@@ -142,7 +153,7 @@ class Evaluator:
         async with semaphore:
             with trace_subject(case.question.question_id):
                 evaluator = (
-                    self._agent if self._profile is EvaluationProfile.AGENT else self._generic
+                    self._agent if self._profile is EvaluationProfile.AGENT else self._nl2sql
                 )
                 return await evaluator.judge(
                     product,
@@ -166,7 +177,7 @@ class Evaluator:
     def _assemble(
         self,
         case: EvaluationCase,
-        judgement: GenericJudgement | AgentJudgement | None,
+        judgement: Nl2SqlJudgement | AgentJudgement | None,
         product: ProductDescription,
     ) -> EvaluationResult:
         ids: dict[str, Any] = {
@@ -207,7 +218,7 @@ class Evaluator:
                 metrics = compute_agent_metrics(draft, judgement.plan)
                 sql_generated = True
             else:
-                assert isinstance(judgement, GenericJudgement)
+                assert isinstance(judgement, Nl2SqlJudgement)
                 assert isinstance(draft, EvaluationDraft)
                 schema_applicable = bool(
                     case.pack is not None
@@ -306,7 +317,7 @@ class Evaluator:
         return [
             BugCandidate(
                 bug_id=self._ids.next(IdKind.BUG),
-                title=f"{lead.category}: {lead.description}"[:200],
+                title=f"{lead.category}: {lead.description}"[:MAX_BUG_TITLE_CHARS],
                 description="; ".join(f.description for f in qualifying),
                 reproduction_question=case.question.utterance,
                 product_id=product.product_id,

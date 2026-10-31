@@ -16,11 +16,11 @@ from synthetic_user.models.evaluation import MetricName
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.prompts.agent_response_evaluation import build_agent_evaluation_prompt
-from synthetic_user.prompts.question import QuestionPromptOptions, build_question_prompt
-from synthetic_user.prompts.scenario import ScenarioPromptOptions, build_scenario_prompt
+from synthetic_user.nodes.evaluator.agent_prompt import build_agent_evaluation_prompt
+from synthetic_user.nodes.question.prompt import QuestionPromptOptions, build_question_prompt
+from synthetic_user.nodes.scenario.prompt import ScenarioPromptOptions, build_scenario_prompt
 
-PERSONAS = Path(__file__).resolve().parents[1] / "data" / "personas"
+PERSONAS = Path(__file__).resolve().parents[2] / "data" / "personas"
 OPTIONS = QuestionPromptOptions(
     count=1, ambiguity_level=AmbiguityLevel.LOW, language="en", allow_vague_questions=False
 )
@@ -221,7 +221,7 @@ def test_product_fields_reach_the_prompts(sample_persona: Persona) -> None:
 
     from synthetic_user.models.execution import AnsweredResponse
     from synthetic_user.models.question import QuestionCase
-    from synthetic_user.prompts.response_evaluation import build_response_evaluation_prompt
+    from synthetic_user.nodes.evaluator.nl2sql_prompt import build_response_evaluation_prompt
 
     voc = ProductDescription.model_validate(
         yaml.safe_load(

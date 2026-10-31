@@ -15,13 +15,13 @@ from synthetic_user.models.evaluation import AgentEvaluationDraft, EvaluationDra
 from synthetic_user.models.question import QuestionBatchDraft
 from synthetic_user.models.reference import CatalogPackDraft, DocumentPackDraft, ReferenceKind
 from synthetic_user.models.scenario import ScenarioBatchDraft
-from synthetic_user.prompts.agent_response_evaluation import (
+from synthetic_user.nodes.evaluator.agent_prompt import (
     evaluation_example as agent_evaluation_example,
 )
+from synthetic_user.nodes.evaluator.nl2sql_prompt import evaluation_example
+from synthetic_user.nodes.question.prompt import QUESTION_EXAMPLE
+from synthetic_user.nodes.scenario.prompt import scenario_example
 from synthetic_user.prompts.contracts import render_contract
-from synthetic_user.prompts.question import QUESTION_EXAMPLE
-from synthetic_user.prompts.response_evaluation import evaluation_example
-from synthetic_user.prompts.scenario import scenario_example
 
 
 def _models(annotation: Any) -> list[type[BaseModel]]:

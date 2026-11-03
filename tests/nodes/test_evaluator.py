@@ -1044,3 +1044,22 @@ async def test_statuses_and_reasons_survive_serialization(
         "mrr": "retrieved_context",
         "faithfulness": "grounding_evidence",
     }
+
+
+def test_quotes_match_whatever_the_sql_spacing() -> None:
+    """A judge re-spaces SQL it reads JSON-encoded; the quote check must not loop on that
+    (live failure: 3 attempts rejected the same concat(...) quote)."""
+    from synthetic_user.nodes.evaluator.judge_common import quoted
+
+    quote = "concat(d.first_nm,' ',d.lst_nm) as cardmember_name, d.email_ad_tx as email_address"
+    for sql in (
+        "select concat(d.first_nm, ' ', d.lst_nm) as cardmember_name, d.email_ad_tx as "
+        "email_address from t d",
+        "SELECT\n  CONCAT(d.first_nm,' ',d.lst_nm) AS cardmember_name\n  ,d.email_ad_tx AS "
+        "email_address\nFROM t d",
+    ):
+        assert quoted(quote, sql)
+    assert quoted("cardmember_name,\\n  d.email_ad_tx", "cardmember_name,\n d.email_ad_tx")
+    # still exact otherwise: other characters, order and invented text are rejected
+    assert not quoted("concat(d.first_nm,' ',d.last_nm)", "concat(d.first_nm, ' ', d.lst_nm)")
+    assert not quoted("d.email_ad_tx as cardmember_name", "d.email_ad_tx as email_address")

@@ -101,8 +101,21 @@ def normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+# The judge reads artifacts JSON-encoded (newlines shown as \n), so it may copy an escape.
+_JSON_ESCAPES = (("\\n", " "), ("\\r", " "), ("\\t", " "), ('\\"', '"'))
+
+
+def _compact(text: str) -> str:
+    for escape, char in _JSON_ESCAPES:
+        text = text.replace(escape, char)
+    return re.sub(r"\s+", "", text).casefold()
+
+
 def quoted(fragment: str, source: str) -> bool:
-    return normalise(fragment) in normalise(source)
+    """The fragment occurs in the source, ignoring case, whitespace and JSON escapes: a judge
+    re-spacing SQL (``a,' ',b`` vs ``a, ' ', b``, a line break before a comma) still quotes it;
+    every other character must match in order."""
+    return _compact(fragment) in _compact(source)
 
 
 def check_scores_and_findings(

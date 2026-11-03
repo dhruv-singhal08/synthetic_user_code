@@ -523,3 +523,7 @@
   run one live evaluation; set `evaluation.sql_dialect` and, if wanted,
   `evaluation.catalog_namespaces` for the Insight product; business review of contradictory
   rules (reported as unresolved findings, never resolved by the tool).
+- Follow-up (same day, live error): General Judge output invalid after 3 attempts because a
+  re-spaced SQL quote (`concat(d.first_nm,' ',d.lst_nm) as cardmember_name, ...`) never
+  matched the response; quote matching now ignores whitespace and JSON escapes (D235).
+  Gate: 735 passed. NOT verified: the same question re-run on the Amex laptop.

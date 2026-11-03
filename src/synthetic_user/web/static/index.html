@@ -260,6 +260,22 @@
         </div>
       </article>
       <article class="card">
+        <div class="card-head"><div><h2>Evaluation guidance <span class="opt">optional</span></h2><p class="card-sub">Free text or a .txt / .md / .yaml file given to every judge call (e.g. approved exceptions) · never changes questions or product responses · editable any time; the next Evaluate step uses it</p></div></div>
+        <div class="card-body custom-grid">
+          <div>
+            <label class="label" for="guidance-text">Guidance</label>
+            <textarea id="guidance-text" rows="5" placeholder="e.g. Filtering every query to the caller's own tenant is an approved product requirement; do not penalise it."></textarea>
+          </div>
+          <div>
+            <label class="label" for="guidance-file">Or upload a file</label>
+            <input id="guidance-file" type="file" accept=".txt,.md,.markdown,.yaml,.yml">
+            <p class="help" id="guidance-status">No guidance saved.</p>
+            <button type="button" class="btn btn-sm" id="save-guidance" disabled>Save guidance</button>
+            <button type="button" class="btn btn-sm hidden" id="remove-guidance">Remove guidance</button>
+          </div>
+        </div>
+      </article>
+      <article class="card">
         <div class="card-head"><div><h2>Generation</h2><p class="card-sub">Applies to the whole run</p></div></div>
         <div class="card-body gen-grid">
           <div><label class="label" for="scenario-count">Scenarios</label><input id="scenario-count" type="number" min="1" max="50"></div>

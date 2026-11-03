@@ -5,6 +5,7 @@ Layout inside ``<artifacts_dir>/runs/<run_id>/``:
     inputs/reference/<file>                        (uploaded .json/.txt/.md; absent -> ungrounded)
     inputs/reference_guide/<file>                  (optional uploaded usage guide .md/.txt)
     inputs/custom_metrics/<file>                   (optional custom-metric workbook .xlsx/.csv)
+    inputs/evaluation_guidance/<file>              (optional evaluation guidance .txt/.md/.yaml)
     inputs/persona_queries.json                    (optional pasted queries)
     inputs/product_contract.yaml                   (uploaded product contract, when connected)
     ui_state.json, results.csv, + the normal pipeline artifacts
@@ -29,6 +30,7 @@ from synthetic_user.core.exceptions import (
     InputAssetError,
     format_validation_error,
 )
+from synthetic_user.core.guidance import TYPED_GUIDANCE, parse_evaluation_guidance
 from synthetic_user.core.identifiers import RUN_ID_PATTERN, new_run_id
 from synthetic_user.core.loaders import parse_asset, parse_yaml_mapping
 from synthetic_user.core.spreadsheet import SPREADSHEET_SUFFIXES
@@ -54,6 +56,7 @@ from synthetic_user.models.persona import ComplexityPreference, Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
 from synthetic_user.models.reference import DataCatalog, Reference, ReferenceKind, ReferencePack
+from synthetic_user.models.run import EvaluationGuidance
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.nodes.evaluator.kpis import consolidate_findings
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
@@ -67,6 +70,8 @@ from synthetic_user.web.results_csv import build_rows, columns_for, to_csv
 REFERENCE = "reference"  # data_catalog / document_collection (.yaml/.json); absent -> ungrounded
 GUIDE = "reference_guide"  # optional usage instructions (.md/.txt upload, or typed in the UI)
 CUSTOM_METRICS = "custom_metrics"  # optional custom-metric workbook (.xlsx / .csv)
+EVALUATION_GUIDANCE = "evaluation_guidance"  # optional guidance for the judges (.txt/.md/.yaml)
+TYPED_GUIDANCE_FILE = "guidance.md"  # file name used for guidance typed in the UI
 TYPED_INSTRUCTIONS = "instructions.md"  # file name used for instructions typed in the UI
 YAML_KINDS: dict[str, tuple[type[BaseModel], str]] = {
     "persona": (Persona, "Persona file"),
@@ -508,6 +513,55 @@ class Workspace:
         self.save_state(updated)
         return updated
 
+    # --- evaluation guidance (judges only; editable at any time) ---------------------------
+
+    def update_evaluation_guidance(
+        self, state: UiRunState, *, text: str, upload: Upload | None, remove: bool
+    ) -> UiRunState:
+        """Replace (or remove) the run's evaluation guidance: typed text OR a .txt / .md / .yaml
+        file, stored as given. Not part of the frozen metric selection, so it may change after
+        scenarios exist; the next evaluate step uses it (D237)."""
+        typed = text.strip()
+        if sum((bool(typed), upload is not None, remove)) > 1:
+            raise InputAssetError(
+                "Give the evaluation guidance as typed text or as a file (or remove it), not more"
+            )
+        max_chars = self._settings.evaluation.max_guidance_chars
+        new: Upload | None = None
+        if upload is not None:
+            if len(upload.content) > self._settings.web.max_upload_bytes:
+                raise InputAssetError(f"{upload.filename}: file is too large")
+            parse_evaluation_guidance(upload.content, source=upload.filename, max_chars=max_chars)
+            new = upload
+        elif typed:
+            parse_evaluation_guidance(typed, source=TYPED_GUIDANCE, max_chars=max_chars)
+            new = Upload(TYPED_GUIDANCE_FILE, typed.encode("utf-8"))
+        saved = self._single_file(state.run_id, EVALUATION_GUIDANCE)
+        if saved is not None:
+            saved.unlink()
+        source = "none"
+        if new is not None:
+            name = Path(new.filename).name
+            path = self._store.path_for(self._input(state.run_id, f"{EVALUATION_GUIDANCE}/{name}"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(new.content)  # kept byte for byte (its provenance)
+            source = TYPED_GUIDANCE if upload is None else f"uploaded: {upload.filename}"
+        updated = state.model_copy(
+            update={"sources": {**state.sources, EVALUATION_GUIDANCE: source}}
+        )
+        self.save_state(updated)
+        return updated
+
+    def evaluation_guidance(self, run_id: str) -> EvaluationGuidance | None:
+        saved = self._single_file(run_id, EVALUATION_GUIDANCE)
+        if saved is None:
+            return None
+        return parse_evaluation_guidance(
+            saved.read_bytes(),
+            source=TYPED_GUIDANCE if saved.name == TYPED_GUIDANCE_FILE else saved.name,
+            max_chars=self._settings.evaluation.max_guidance_chars,
+        )
+
     def unlock_evaluation(self, state: UiRunState) -> UiRunState:
         """Make the evaluation editable again; refused once scenarios froze the metric config."""
         if Step.SCENARIOS in state.steps_done:
@@ -602,6 +656,7 @@ class Workspace:
             product=product,
             reference=reference,
             metric_selection=state.metric_selection,
+            evaluation_guidance=self.evaluation_guidance(run_id),
         )
 
     def _single_file(self, run_id: str, kind: str) -> Path | None:
@@ -792,6 +847,11 @@ class Workspace:
             **details,
             "rejected_scenarios": [r.model_dump(mode="json") for r in rejected_scenarios or []],
             "rejected_questions": [r.model_dump(mode="json") for r in rejected_questions or []],
+            "evaluation_guidance": (
+                guidance.model_dump(mode="json")
+                if (guidance := self.evaluation_guidance(run_id)) is not None
+                else None
+            ),
             "artifacts": sorted(
                 p.name
                 for p in self._store.path_for(run_artifact(run_id, "")).iterdir()

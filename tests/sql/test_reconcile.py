@@ -138,6 +138,21 @@ def test_multiple_joins_are_checked_against_documented_relationships(
     assert set(rules.tables) == {"v_acct_delinquency", "v_emissions", "v_cardmember"}
 
 
+def test_extra_key_on_a_documented_join_is_not_an_undocumented_join(
+    index: CatalogIndex, pack: ReferencePack
+) -> None:
+    rec = run(
+        "SELECT 1 FROM v_lpc_details l JOIN v_acct_delinquency d ON l.acct_id = d.acct_id "
+        "AND l.bill_cycle_yr_mo_no = d.bill_cycle_yr_mo_no",
+        index,
+        pack,
+    )
+    assert [j.status for j in rec.joins] == [
+        JoinStatus.DOCUMENTED_VERIFIED,
+        JoinStatus.EXTRA_CONDITION,
+    ]
+
+
 def test_missing_selected_column_is_listed_not_failed(
     index: CatalogIndex, pack: ReferencePack
 ) -> None:

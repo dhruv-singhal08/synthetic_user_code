@@ -15,7 +15,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 
@@ -181,7 +181,10 @@ class IdentifierCheck(StrictModel):
 class JoinStatus(StrEnum):
     DOCUMENTED_VERIFIED = "documented_verified"
     DOCUMENTED_UNVERIFIED = "documented_unverified"
-    UNDOCUMENTED = "undocumented"  # validity not established by the reference
+    UNDOCUMENTED = "undocumented"  # no listed relationship between these tables is used
+    # An extra equality between two tables the SQL already joins over a listed relationship
+    # (a composite / additional join condition, not a new relationship).
+    EXTRA_CONDITION = "extra_condition"
     UNRESOLVED = "unresolved"  # an endpoint could not be resolved to a catalog column
 
 
@@ -216,3 +219,5 @@ class ReferenceCheckRecord(StrictModel):
     lookup_trace: list[LookupTraceEntry] = Field(default_factory=list)
     judge_lookup_requests: int = Field(default=0, ge=0)
     general_judge_calls: int = Field(default=0, ge=0)
+    # The judge's decisions on undocumented joins (D238), as returned: join, allowed, basis.
+    join_decisions: list[dict[NonEmptyStr, JsonValue]] = Field(default_factory=list)

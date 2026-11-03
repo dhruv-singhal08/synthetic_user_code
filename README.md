@@ -167,6 +167,7 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `evaluation.catalog_namespaces` | `null` | Qualifiers accepted on table names in generated SQL (`ns.table`): `null` = any qualifier is dropped before the exact catalog lookup; a list = only these (D230) |
 | `evaluation.reference_lookup.enabled` | `true` | The General Judge may request ONE batch of exact catalog lookups (one extra call) on SQL + data-catalog runs; `false` = one call, deterministic reconciliation only (D231) |
 | `evaluation.reference_lookup.max_requests` | `10` | Lookups allowed in that batch (1-50) |
+| `evaluation.max_guidance_chars` | `20000` | Maximum length of the optional evaluation guidance (D237) |
 | `evaluation.max_custom_metrics` | `20` | Custom metrics per run (text + workbook rows) |
 | `product.context_max_chunks` / `context_max_chunk_chars` | `50` / `4000` | Bounds of the stored retrieved context |
 | `generation.question.ambiguity_level` | `low` | `low` \| `medium` \| `high` mix of precise/vague/investigative |
@@ -177,6 +178,7 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `inputs.persona_path` | `./data/personas/finance_controller.yaml` | Persona |
 | `inputs.product_path` | `./data/products/sample_product.yaml` | Product description (schema v2, see [Product description](#product-description)) |
 | `inputs.reference_file` | `./data/references/sample_card_spend_catalog.yaml` | Your reference (data_catalog / document_collection, .yaml / .json); omit -> ungrounded |
+| `inputs.evaluation_guidance_file` | unset | Optional evaluation guidance (.txt / .md / .yaml) for CLI runs; `--evaluation-guidance` overrides it (D237) |
 | `inputs.reference_guide_file` | `./data/references/sample_card_spend_instructions.md` | Optional usage instructions (.md / .txt); omit -> default for the format |
 | `inputs.benchmark_cases_path` | `./tests/fixtures/benchmark/labeled_cases.jsonl` | `benchmark-evaluator` cases |
 | `inputs.benchmark_scenarios_path` | `./tests/fixtures/benchmark/scenarios.json` | `benchmark-evaluator` scenarios |
@@ -411,6 +413,25 @@ custom adapter: `examples/adapters/my_product_adapter.py`. HTTP errors and non-J
 become `error` outcomes with the status code; header secrets are never logged and are
 written to the run manifest only as their `${ENV_VAR}` template (literal values show `***`).
 
+## Evaluation guidance (optional, D237)
+
+Free text, or a `.txt` / `.md` / `.yaml` file, that tells the judges how to apply the metrics
+for this run (e.g. approved exceptions). UI: Evaluation tab -> "Evaluation guidance" (saved per
+run, editable any time, even after the evaluation is locked). CLI: `--evaluation-guidance` on
+`run` and `evaluate`, or `inputs.evaluation_guidance_file`.
+
+- Stored as given (`inputs/evaluation_guidance/<file>`; typed text as `guidance.md`); a YAML
+  file must parse, but its original text is kept. Length: `evaluation.max_guidance_chars`.
+- Evaluation node only: added to EVERY judge call (General Judge, its lookup follow-up, the
+  Retrieval/Grounding Judge) as an `EVALUATION GUIDANCE` section between the metric rubrics and
+  the rules. No extra LLM call; scenarios, questions, the product and its responses never see it.
+- The judge applies only guidance that concerns the response; it never awards a score by
+  itself. An approved exception is not penalised and creates no finding; the rationale names
+  it. Guidance never overrides the output contract, the evidence or safety constraints.
+- Not part of the frozen metric selection: changing it re-runs only the evaluate step. The run
+  manifest records the guidance and every evaluation its `evaluation_guidance_sha256`.
+- No guidance -> every judge prompt is unchanged. `benchmark-evaluator` runs without guidance.
+
 ## Reference: two formats, cheat sheet per scenario
 
 A reference (`inputs.reference_file` / `--reference` / the UI) is a YAML or JSON file in ONE
@@ -471,8 +492,13 @@ When a selected metric needs an SQL artifact and the run has a data catalog:
    lookups it needs in one batch; code runs them and makes ONE more call that must score.
    SQL-related custom metrics (compiled evidence includes `sql`) are scored in the same call
    with the same evidence; non-SQL custom metrics keep their path.
-5. **Record** `reference_checks` on each evaluation (catalog version, reconciliation, lookup
-   trace, judge calls). No new CSV columns.
+5. **Joins:** for every join over a relationship the reference does not list, the judge
+   returns a `join_decisions` entry (allowed + basis: reference / usage_instructions /
+   evaluation_guidance / not_established); code checks the schema score agrees with it
+   (not allowed -> below 1; not established -> unresolved finding). An extra equality on an
+   already listed join is `extra_condition` (composite key), not an undocumented join (D238).
+6. **Record** `reference_checks` on each evaluation (catalog version, reconciliation, lookup
+   trace, judge calls, join decisions). No new CSV columns.
 
 The SQL is judged exactly as generated. An unrequested filter that no contract, expectation or
 rule establishes (e.g. a tenant filter), and contradictory rules, are reported as findings with

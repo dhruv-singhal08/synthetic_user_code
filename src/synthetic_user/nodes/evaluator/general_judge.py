@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace
 from synthetic_user.core.exceptions import LLMOutputValidationError, LLMProviderError
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
-from synthetic_user.models.evaluation import GeneralJudgeDraft
+from synthetic_user.models.evaluation import GeneralJudgeDraft, JoinBasis
 from synthetic_user.models.lookup import LookupOrigin
 from synthetic_user.models.metrics import EvidenceKind, ReferenceAsset
 from synthetic_user.nodes.evaluator.general_prompt import GeneralJudgeInput, build_general_prompt
@@ -106,6 +106,58 @@ def check_general(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: s
                 f"response ({COPY_HINT})"
             )
     errors.extend(_non_base_identifier_findings(draft, data))
+    errors.extend(_unaddressed_undocumented_joins(draft, data))
+    return errors
+
+
+def _unaddressed_undocumented_joins(draft: GeneralJudgeDraft, data: GeneralJudgeInput) -> list[str]:
+    """Every undocumented join needs the judge's decision, and the schema score must agree
+    with it (D238). Code knows the join is not listed; only the judge can read whether the
+    reference, its usage instructions or the guidance allow it. Code never sets the score."""
+    wanted = data.undocumented_joins()
+    if not wanted:
+        return []
+
+    def key(text: str) -> frozenset[str]:
+        return frozenset(normalise(part) for part in text.split("="))
+
+    decisions = {key(d.join): d for d in draft.join_decisions}
+    errors: list[str] = []
+    missing = [j for j in wanted if key(j) not in decisions]
+    if missing:
+        errors.append(
+            f"join_decisions must decide every undocumented join; missing: {missing} (copy "
+            "each as 'left = right', with allowed and its basis)"
+        )
+    schema_metrics = [
+        d.metric_id
+        for d in data.definitions
+        if ReferenceAsset.CATALOG_SCHEMA in d.required_reference_assets
+        and EvidenceKind.SQL in d.required_execution_evidence
+    ]
+    for join in wanted:
+        decision = decisions.get(key(join))
+        if decision is None:
+            continue
+        for metric_id in schema_metrics:
+            judged = draft.metrics.get(metric_id)
+            if judged is None or judged.score is None:
+                continue
+            categories = {f.category: f for f in draft.findings if f.category == metric_id}
+            if not decision.allowed and decision.basis is not JoinBasis.NOT_ESTABLISHED:
+                if judged.score == 1:
+                    errors.append(
+                        f"join_decisions says {join} is not allowed ({decision.basis.value}) "
+                        f"but {metric_id} is scored 1: score it below 1 with a finding, or "
+                        "correct the decision"
+                    )
+            elif decision.basis is JoinBasis.NOT_ESTABLISHED and not any(
+                f.unresolved for f in categories.values()
+            ):
+                errors.append(
+                    f"join_decisions says the validity of {join} is not established: add an "
+                    f"unresolved finding with category {metric_id!r}"
+                )
     return errors
 
 
@@ -188,6 +240,7 @@ class GeneralJudge:
                 GeneralJudgeDraft,
                 max_retries=self._max_retries,
                 post_validate=lambda draft: check_general(draft, data, quotable),
+                cumulative_feedback=True,
             )
         except LLMOutputValidationError as exc:
             self._log.warning("%s: general judge output invalid", data.question.question_id)

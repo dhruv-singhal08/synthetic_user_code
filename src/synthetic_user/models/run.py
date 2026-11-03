@@ -29,6 +29,15 @@ def mode_mismatch(mode: GenerationMode, has_reference: bool, what: str) -> str |
     return None
 
 
+class EvaluationGuidance(StrictModel):
+    """Optional free-text evaluation guidance of a run (typed or a .txt / .md / .yaml file),
+    kept as the plain text the user gave. Read only by the evaluation judges (D237)."""
+
+    text: NonEmptyStr
+    source: NonEmptyStr  # "typed in the UI" or the uploaded / configured file name
+    sha256: NonEmptyStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class RunManifest(StrictModel):
     run_id: NonEmptyStr = Field(pattern=r"^RUN_\d{8}_\d{6}_[0-9a-f]{4}$")
     created_at: datetime
@@ -47,6 +56,8 @@ class RunManifest(StrictModel):
     pipeline_version: NonEmptyStr
     effective_config: dict[str, Any]
     artifacts: dict[NonEmptyStr, NonEmptyStr] = Field(default_factory=dict)
+    # The evaluation guidance the stored evaluations were judged with (None = none given).
+    evaluation_guidance: EvaluationGuidance | None = None
 
     @model_validator(mode="before")
     @classmethod

@@ -4,7 +4,7 @@
 # grouping only; they never decide which judge runs or which product can be tested.
 # Every metric is scored 0 / 0.5 / 1 (higher is better) or reported with a non-scored status.
 
-catalog_version: "2026.11-2"
+catalog_version: "2026.11-3"
 
 category_labels:
   answer_quality: Answer Quality / Task Fulfilment
@@ -281,9 +281,12 @@ metrics:
       every cheat-sheet column to appear); invalid ones do not exist in the catalog (table, or
       column in its resolved table); unresolved ones (ambiguous scope, unknown qualifier) are
       not proof of an error: request a lookup or record an unresolved finding. Check alias and
-      qualifier resolution, column scope and the join keys against documented relationships
-      (an undocumented join is not established by the reference: unresolved, not invalid; a
-      documented relationship is never mandatory). Output aliases, CTE names, functions and
+      qualifier resolution, column scope and the join keys against documented relationships:
+      a join over a relationship the reference does not list is invalid when the reference or
+      its usage instructions say tables can only be combined over listed relationships, or say
+      no relationship exists between those tables; only when they say neither is its validity
+      unestablished (an unresolved finding). A documented relationship is never mandatory.
+      Output aliases, CTE names, functions and
       derived-expression aliases are not database identifiers and must never be compared. Do
       not judge calculations, whether a valid filter was requested, or business rules here.
     score_anchors:

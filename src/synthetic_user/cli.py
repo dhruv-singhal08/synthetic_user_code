@@ -39,6 +39,7 @@ from synthetic_user.core.exceptions import (
     InputAssetError,
     SyntheticUserError,
 )
+from synthetic_user.core.guidance import load_evaluation_guidance
 from synthetic_user.core.identifiers import RUN_ID_PATTERN, SequentialIdGenerator, new_run_id
 from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.core.logging import get_run_logger, setup_logging
@@ -61,7 +62,7 @@ from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.metrics import MetricSelection, ResolvedMetricConfig
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import DataCatalog, Reference, ReferencePack
-from synthetic_user.models.run import GenerationMode, RunManifest
+from synthetic_user.models.run import EvaluationGuidance, GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluator.benchmark import load_cases, load_scenarios, run_benchmark
@@ -105,6 +106,14 @@ GuideOption = Annotated[
         "--reference-guide",
         help="Usage instructions (.md / .txt) for the reference (optional; a default per "
         "format is used). Default: inputs.reference_guide_file.",
+    ),
+]
+GuidanceOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--evaluation-guidance",
+        help="Evaluation guidance (.txt / .md / .yaml) shown to every judge call (optional). "
+        "Default: inputs.evaluation_guidance_file.",
     ),
 ]
 
@@ -517,6 +526,7 @@ def evaluate(
     ] = None,
     reference: ReferenceOption = None,
     guide: GuideOption = None,
+    guidance: GuidanceOption = None,
 ) -> None:
     """Evaluate executions with the run's frozen metric configuration; writes
     evaluations.json, bug_candidates.json and the KPIs."""
@@ -524,7 +534,7 @@ def evaluate(
     files = _EvaluateFiles(
         questions, executions, scenarios, reference_packs, out_dir, metric_config
     )
-    _guard(lambda: asyncio.run(_evaluate(state, run_id, files, reference, guide)))
+    _guard(lambda: asyncio.run(_evaluate(state, run_id, files, reference, guide, guidance)))
 
 
 @dataclass(frozen=True)
@@ -543,6 +553,7 @@ async def _evaluate(
     files: _EvaluateFiles,
     reference_path: Path | None,
     guide_path: Path | None,
+    guidance_path: Path | None = None,
 ) -> None:
     settings = load_config(state.config_path)
     questions_path, executions_path, scenarios_path = (
@@ -557,7 +568,9 @@ async def _evaluate(
     if run_id is not None:
         run_id = _valid_run_id(run_id)
         pipeline, store = _pipeline(settings, run_id)
-        inputs = _run_inputs(settings, store, run_id, reference_path, guide_path)
+        inputs = _run_inputs(
+            settings, store, run_id, reference_path, guide_path, guidance_path=guidance_path
+        )
         step = await pipeline.evaluate_executions(run_id, inputs, force=True)
         questions = store.read_models(run_artifact(run_id, "questions.json"), QuestionCase)
         _print_evaluation(
@@ -594,6 +607,7 @@ async def _evaluate(
         reference=reference,
         metric_config=frozen,
         id_generator=SequentialIdGenerator(),
+        evaluation_guidance=_guidance(settings, guidance_path),
     )
     results = await evaluator.evaluate_many(cases, product)
     bugs = [b for r in results for b in r.bug_candidates]
@@ -647,6 +661,7 @@ def run(
     ] = None,
     reference: ReferenceOption = None,
     guide: GuideOption = None,
+    guidance: GuidanceOption = None,
     metrics: MetricsOption = None,
     custom_metrics_text: CustomMetricsTextOption = None,
     custom_metrics_file: CustomMetricsFileOption = None,
@@ -667,6 +682,7 @@ def run(
                 reference,
                 guide,
                 selection,
+                guidance,
             )
         )
     )
@@ -682,6 +698,7 @@ async def _run(
     reference_path: Path | None,
     guide_path: Path | None,
     metric_args: _MetricArgs,
+    guidance_path: Path | None = None,
 ) -> None:
     settings = load_config(state.config_path)
     run_id = _valid_run_id(run_id or new_run_id())
@@ -690,6 +707,7 @@ async def _run(
         reference_path=reference_path,
         guide_path=guide_path,
         selection=_selection(settings, metric_args),
+        guidance_path=guidance_path,
     )
     pipeline, _store = _pipeline(settings, run_id, with_product=True)
     try:
@@ -930,6 +948,7 @@ def _inputs(
     guide_path: Path | None = None,
     *,
     selection: MetricSelection | None = None,
+    guidance_path: Path | None = None,
 ) -> RunInputs:
     """--reference, else inputs.reference_file; neither -> ungrounded (logged)."""
     return RunInputs(
@@ -937,6 +956,7 @@ def _inputs(
         product=load_product(product_path or settings.inputs.product_path),
         reference=_reference(settings, reference_path, guide_path),
         metric_selection=selection,
+        evaluation_guidance=_guidance(settings, guidance_path),
     )
 
 
@@ -946,6 +966,8 @@ def _run_inputs(
     run_id: str,
     reference_path: Path | None,
     guide_path: Path | None,
+    *,
+    guidance_path: Path | None = None,
 ) -> RunInputs:
     """Inputs of an EXISTING run: its frozen metric selection is reused (never re-chosen)."""
     path = run_artifact(run_id, "metric_config.json")
@@ -960,7 +982,11 @@ def _run_inputs(
             input_errors=list(frozen.input_errors),
         )
     return _inputs(
-        settings, reference_path=reference_path, guide_path=guide_path, selection=selection
+        settings,
+        reference_path=reference_path,
+        guide_path=guide_path,
+        selection=selection,
+        guidance_path=guidance_path,
     )
 
 
@@ -1004,6 +1030,14 @@ def _reference(
     guide = guide_path or (settings.inputs.reference_guide_file if path else None)
     return load_optional_reference(
         path, _log, max_chars=settings.reference.max_chars, guide_path=guide
+    )
+
+
+def _guidance(settings: AppConfig, path: Path | None) -> EvaluationGuidance | None:
+    """--evaluation-guidance, else inputs.evaluation_guidance_file; neither -> none."""
+    return load_evaluation_guidance(
+        path or settings.inputs.evaluation_guidance_file,
+        max_chars=settings.evaluation.max_guidance_chars,
     )
 
 

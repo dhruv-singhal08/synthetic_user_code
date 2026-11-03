@@ -91,3 +91,26 @@ async def test_provider_error_is_not_retried() -> None:
 async def test_negative_retries_rejected() -> None:
     with pytest.raises(ValueError, match="max_retries"):
         await generate_structured(FakeLLMClient(), SYSTEM, USER, Item, max_retries=-1)
+
+
+async def test_cumulative_feedback_lists_every_earlier_problem() -> None:
+    """Judges (D238): retry 2 still names attempt 1's problem, so fixing one problem does not
+    bring back another; other callers keep last-attempt feedback (unchanged prompts)."""
+    from pydantic import BaseModel
+
+    from synthetic_user.llm.fake import FakeLLMClient
+    from synthetic_user.llm.structured import generate_structured
+
+    class Reply(BaseModel):
+        value: int
+
+    def check(reply: Reply) -> list[str]:
+        return {1: ["problem A"], 2: ["problem B"]}.get(reply.value, [])
+
+    for cumulative, third in ((True, "problem A; problem B"), (False, "problem B")):
+        llm = FakeLLMClient([{"value": 1}, {"value": 2}, {"value": 3}])
+        result = await generate_structured(
+            llm, "s", "u", Reply, max_retries=2, post_validate=check, cumulative_feedback=cumulative
+        )
+        assert result.value == 3
+        assert llm.calls[2].user.endswith(f"previous output invalid: {third}")

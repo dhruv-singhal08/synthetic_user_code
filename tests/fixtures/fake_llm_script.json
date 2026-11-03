@@ -461,12 +461,15 @@
             ]
           },
           "schema_faithfulness": {
-            "score": 1,
-            "rationale": "Every identifier is allowed.",
+            "score": 0,
+            "rationale": "Joins card_transactions to employees over merchant_id = employee_id, a relationship the reference does not list (it lists only the listed relationships as valid joins).",
+            "evidence": "c.merchant_id = e.employee_id",
             "what_worked": [
-              "uses allowed identifiers"
+              "every table and column exists in the catalog"
             ],
-            "what_didnt": []
+            "what_didnt": [
+              "joins over a relationship the reference does not list"
+            ]
           }
         },
         "criteria": [
@@ -493,9 +496,27 @@
             "severity": "high",
             "evidence_status": "supported",
             "related_tags": []
+          },
+          {
+            "category": "schema_faithfulness",
+            "description": "Joins card_transactions.merchant_id to employees.employee_id, a relationship the reference does not list.",
+            "expected_behavior": "join only over listed relationships (card_transactions.employee_id = employees.employee_id)",
+            "observed_behavior": "JOIN ... ON c.merchant_id = e.employee_id",
+            "evidence": "c.merchant_id = e.employee_id",
+            "severity": "high",
+            "evidence_status": "supported",
+            "related_tags": []
           }
         ],
-        "overall_verdict": "fail"
+        "overall_verdict": "fail",
+        "join_decisions": [
+          {
+            "join": "card_transactions.merchant_id = employees.employee_id",
+            "allowed": false,
+            "basis": "reference",
+            "reason": "The reference lists only card_transactions.employee_id = employees.employee_id between these tables."
+          }
+        ]
       }
     },
     {

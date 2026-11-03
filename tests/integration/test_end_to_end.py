@@ -180,7 +180,11 @@ async def test_full_run_files_types_refs_and_outcomes(
     # (answer-level metrics only); the unresolved clarification is recorded only
     failed = [e for e in evaluations if e.verdict == "fail"]
     assert failed and all(e.bug_candidates for e in failed)
-    assert [f.category for e in failed for f in e.findings] == ["rules_adherence"]
+    # the planted wrong join: a rules finding and, as an unlisted relationship, a schema one (D238)
+    assert [f.category for e in failed for f in e.findings] == [
+        "rules_adherence",
+        "schema_faithfulness",
+    ]
     recorded = [e.product_outcome for e in evaluations if e.verdict is None]
     assert recorded == ["clarification"]
     by_outcome = {e.product_outcome.value: e for e in evaluations}
@@ -213,7 +217,7 @@ async def test_full_run_files_types_refs_and_outcomes(
         "correctness_completeness": 1.0,
         "semantic_correctness": 1.0,
         "rules_adherence": 0.0,
-        "schema_faithfulness": 1.0,
+        "schema_faithfulness": 0.0,  # the planted unlisted join (D238)
     }
     assert kpis.selected_metrics == config.selected_metric_ids
     assert kpis.response_classifications == {
@@ -522,3 +526,50 @@ async def test_custom_metrics_compile_once_per_run_and_never_block_others(
     pipeline2, llm2, _ = _pipeline(settings)
     await pipeline2.run(custom, run_id=RUN_ID)
     assert llm2.calls == []
+
+
+async def test_changing_evaluation_guidance_reruns_only_evaluation(
+    settings: AppConfig, inputs: RunInputs
+) -> None:
+    """Guidance is not part of the frozen metric selection (D237): changing it re-evaluates,
+    never regenerates; the same guidance is reused; manifest + evaluations record it."""
+    from dataclasses import replace
+
+    from synthetic_user.core.guidance import TYPED_GUIDANCE, parse_evaluation_guidance
+
+    pipeline, _, _ = _pipeline(settings)
+    await pipeline.run(inputs, run_id=RUN_ID)
+    guidance = parse_evaluation_guidance(
+        "Approved: tenant filters.", source=TYPED_GUIDANCE, max_chars=1000
+    )
+    guided = replace(inputs, evaluation_guidance=guidance)
+
+    pipeline2, llm2, product2 = _pipeline(settings)
+    summary = await pipeline2.run(guided, run_id=RUN_ID)
+    assert summary.steps_run == [Step.EVALUATE] and product2.asked == []
+    assert llm2.calls and all("## EVALUATION GUIDANCE" in c.user for c in llm2.calls)
+    run_dir = settings.paths.artifacts_dir / "runs" / RUN_ID
+    manifest = _load(run_dir, "manifest.json", TypeAdapter(RunManifest))
+    assert manifest.evaluation_guidance == guidance
+    evaluations = _load(run_dir, "evaluations.json", TypeAdapter(list[EvaluationResult]))
+    assert guidance is not None
+    assert {e.evaluation_guidance_sha256 for e in evaluations} == {guidance.sha256}
+
+    pipeline3, llm3, _ = _pipeline(settings)
+    again = await pipeline3.run(guided, run_id=RUN_ID)
+    assert again.steps_reused == list(Step) and llm3.calls == []
+
+
+async def test_first_evaluation_with_guidance_is_not_logged_as_a_change(
+    settings: AppConfig, inputs: RunInputs, caplog: pytest.LogCaptureFixture
+) -> None:
+    from dataclasses import replace
+
+    from synthetic_user.core.guidance import TYPED_GUIDANCE, parse_evaluation_guidance
+
+    guidance = parse_evaluation_guidance("Approved: x.", source=TYPED_GUIDANCE, max_chars=100)
+    pipeline, _, _ = _pipeline(settings)
+    with caplog.at_level("INFO"):
+        await pipeline.run(replace(inputs, evaluation_guidance=guidance), run_id=RUN_ID)
+    assert "Evaluation guidance applied to every judge call" in caplog.text  # captured
+    assert "Evaluation guidance changed" not in caplog.text

@@ -16,11 +16,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from synthetic_user.models.evaluation import CriterionStatus, FactualVerification, Verdict
+from synthetic_user.models.evaluation import (
+    CriterionStatus,
+    FactualVerification,
+    JoinBasis,
+    Verdict,
+)
 from synthetic_user.models.execution import ConversationTurn, DeniedResponse, ToolCall
 from synthetic_user.models.lookup import (
     ArtifactReconciliation,
     IdentifierStatus,
+    JoinStatus,
     LookupResult,
     LookupTool,
 )
@@ -32,6 +38,7 @@ from synthetic_user.nodes.evaluator.judge_common import (
     EvaluableResponse,
     bounded,
     finding_example,
+    guidance_block,
     metric_blocks,
     render_response,
     score_example,
@@ -83,10 +90,22 @@ class GeneralJudgeInput:
     max_lookup_requests: int = 0
     # Second call: the results of the judge's requested lookups.
     requested_lookups: Sequence[LookupResult] | None = None
+    # Optional run-level evaluation guidance (D237); None -> prompt unchanged.
+    guidance: str | None = None
 
     @property
     def reconciled(self) -> bool:
         return any(item.reconciliation is not None for item in self.sql)
+
+    def undocumented_joins(self) -> list[str]:
+        """``left = right`` of every undocumented join (the judge must decide each, D238)."""
+        return [
+            f"{join.left} = {join.right}"
+            for item in self.sql
+            if item.reconciliation is not None
+            for join in item.reconciliation.joins
+            if join.status is JoinStatus.UNDOCUMENTED
+        ]
 
 
 def cheat_sheet_view(
@@ -140,6 +159,7 @@ def judge_example(
     needs_classification: bool,
     unresolved_findings: bool = False,
     lookup_offer: bool = False,
+    join_decisions: bool = False,
 ) -> dict[str, Any]:
     ids = [d.metric_id for d in definitions]
     metrics: dict[str, Any] = {}
@@ -167,6 +187,8 @@ def judge_example(
     )
     if lookup_offer:
         out["evidence_requests"] = []
+    if join_decisions:
+        out["join_decisions"] = [PROMPTS.data("join_decision_example", bases=choices(JoinBasis))]
     return out
 
 
@@ -274,6 +296,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
         ),
         response=render_response(data.response, artifact_max_chars=data.artifact_max_chars),
         metric_rules=metric_blocks(marked),
+        guidance=guidance_block(data.guidance),
         factual_rule=PROMPTS.text("factual_rule_on" if factual else "factual_rule_off"),
         contract=render_contract(
             judge_example(
@@ -281,6 +304,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
                 needs_classification=data.needs_classification,
                 unresolved_findings=data.reconciled,
                 lookup_offer=data.max_lookup_requests > 0,
+                join_decisions=bool(data.undocumented_joins()),
             )
         ),
     )

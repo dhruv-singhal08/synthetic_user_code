@@ -18,6 +18,7 @@ from synthetic_user.metrics.registry import builtin_metric_config
 from synthetic_user.models.evaluation import (
     FindingDraft,
     GeneralJudgeDraft,
+    JoinDecisionDraft,
     JudgedScore,
     RetrievalJudgeDraft,
 )
@@ -112,15 +113,22 @@ def test_general_judge_example_matches_the_model(classify: bool) -> None:
         assert set(score) == keys, metric_id
     # "unresolved" and "evidence_requests" are offered only with a catalog reconciliation
     assert set(example["findings"][0]) == set(FindingDraft.model_fields) - {"unresolved"}
-    assert set(GeneralJudgeDraft.model_fields) - {"evidence_requests"} >= set(example)
+    assert set(GeneralJudgeDraft.model_fields) - {"evidence_requests", "join_decisions"} >= set(
+        example
+    )
 
 
 def test_reconciled_general_judge_example_shows_every_field() -> None:
     example = judge_example(
-        GENERAL, needs_classification=True, unresolved_findings=True, lookup_offer=True
+        GENERAL,
+        needs_classification=True,
+        unresolved_findings=True,
+        lookup_offer=True,
+        join_decisions=True,
     )
     assert set(example) == set(GeneralJudgeDraft.model_fields)
     assert example["evidence_requests"] == []
+    _assert_matches(example["join_decisions"][0], JoinDecisionDraft, "join_decision")
     _assert_matches(example["findings"][0], FindingDraft, "finding")
 
 

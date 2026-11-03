@@ -66,6 +66,11 @@ def missing_finding_message(metric: str, score: float) -> str:
     )
 
 
+def guidance_block(guidance: str | None) -> str:
+    """The EVALUATION GUIDANCE section, or "" without guidance (prompt unchanged, D237)."""
+    return PROMPTS.text("evaluation_guidance", guidance=guidance) if guidance else ""
+
+
 def metric_blocks(definitions: Iterable[MetricDefinition]) -> str:
     return "\n".join(
         PROMPTS.text(

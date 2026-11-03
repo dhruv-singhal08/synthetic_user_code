@@ -527,3 +527,44 @@
   re-spaced SQL quote (`concat(d.first_nm,' ',d.lst_nm) as cardmember_name, ...`) never
   matched the response; quote matching now ignores whitespace and JSON escapes (D235).
   Gate: 735 passed. NOT verified: the same question re-run on the Amex laptop.
+- Follow-up (live error): the General Judge quoted a reconciliation reason as evidence and ran
+  out of retries (all general metrics evaluation_error). Prompt rule added (D236). Open: retries
+  regenerate without the previous output and see only the last attempt's errors. Gate: 736 passed.
+
+## Evaluation guidance (2026-11-03) - user request
+
+- Files: core/guidance.py (new), models/run.py (EvaluationGuidance, manifest field),
+  models/evaluation.py (evaluation_guidance_sha256), nodes/evaluator/{judge_common(.py,
+  _prompt.yaml), general_prompt(.py,.yaml), retrieval_prompt(.py,.yaml), evaluator.py},
+  pipeline.py, cli.py, core/config.py, config/app.yaml, web/{workspace.py, server.py,
+  static/index.html, static/app.js}; tests (tests/nodes/test_evaluation_guidance.py, an
+  end-to-end and two web tests); README, DECISIONS (D237).
+- Commands + results: ruff OK, format OK, mypy (102 files) OK, `pytest -q -W error`
+  747 passed.
+- Verified: guidance in every judge call between METRICS and RULES with no extra call
+  (general, lookup follow-up, retrieval); no guidance -> slot renders empty; a guidance change
+  re-runs only evaluate and the same guidance is reused; UI endpoint (typed / file / YAML
+  validation / remove) and evaluations carry the sha.
+- NOT verified: the UI card in a real browser (app.js syntax-checked with the macOS JavaScript
+  engine; element ids and the endpoint are covered by tests); a live model honouring approved
+  exceptions.
+
+## Live Gemini check + fixes (2026-11-03) - user request
+
+- Live (scratch script, not committed; Gemini as judges, compiler, persona and mock SQL
+  product; card-spend catalog; 5 built-in + 1 custom SQL metric; evaluation guidance):
+  `pytest -m live -k gemini` 1 passed; 3 full runs + 3 re-evaluations of stored responses.
+- Verified live: guidance in every judge prompt (5/5) and in no generation / product prompt;
+  custom SQL metric compiled with `['sql']`, routed `general/sql`, scored in the same call;
+  reconciliation + deterministic lookups; no evaluation_error after the fixes.
+- Found live and fixed (D238): an unlisted join (merchants) passed; whack-a-mole judge retries
+  ended in evaluation_error; generated expectations beat an approved exception; a misleading
+  "guidance changed" log. After the fixes the same join is decided by the judge
+  (usage_instructions -> schema 0 -> FAIL on a fresh run; not_established -> unresolved ->
+  INCONCLUSIVE on a re-evaluation).
+- Commands + results: ruff OK, format OK, mypy (102 files) OK, `pytest -q -W error`
+  752 passed.
+- NOT verified / open: the judge's choice of basis varies between runs (once
+  not_established although the usage instructions forbid the join); in the fresh run one bad
+  join lowered three metrics (correctness, semantic, schema); SafeChain; the UI card in a
+  browser.

@@ -28,12 +28,18 @@ async def generate_structured(
     model_cls: type[ModelT],
     max_retries: int,
     post_validate: PostValidator[ModelT] | None = None,
+    *,
+    cumulative_feedback: bool = False,
 ) -> ModelT:
     """Call ``llm.generate_json`` and validate into ``model_cls``.
 
     On JSON, schema, or ``post_validate`` errors, retry with the same system prompt and the
     user prompt plus "previous output invalid: <errors>". At most ``max_retries`` retries.
     Provider errors (LLMProviderError) are not retried here and propagate unchanged.
+
+    ``cumulative_feedback`` (the evaluation judges, D238): each retry lists the problems of ALL
+    earlier attempts (deduplicated), not only the last one, so a reply that fixes one problem
+    does not bring back an earlier one. Off for every other caller (prompts unchanged).
     """
     if max_retries < 0:
         raise ValueError("max_retries must be >= 0")
@@ -57,7 +63,8 @@ async def generate_structured(
             attempts,
             "; ".join(errors),
         )
-        prompt = with_retry_feedback(user, errors)
+        feedback = list(dict.fromkeys(e.split(": ", 1)[1] for e in all_errors))
+        prompt = with_retry_feedback(user, feedback if cumulative_feedback else errors)
 
     raise LLMOutputValidationError(
         f"{model_cls.__name__}: LLM output invalid after {attempts} attempt(s)",

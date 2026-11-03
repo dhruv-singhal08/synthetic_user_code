@@ -20,6 +20,7 @@ from synthetic_user.nodes.evaluator.judge_common import (
     EvaluableResponse,
     bounded,
     finding_example,
+    guidance_block,
     metric_blocks,
     render_response,
     score_example,
@@ -44,6 +45,8 @@ class RetrievalJudgeInput:
     context: RetrievedContext
     tool_trace: Sequence[ToolCall] | None
     artifact_max_chars: int
+    # Optional run-level evaluation guidance (D237); None -> prompt unchanged.
+    guidance: str | None = None
 
     def checklist(self) -> list[str]:
         """The required-information items of the judged metrics (empty when none)."""
@@ -148,6 +151,7 @@ def build_retrieval_prompt(data: RetrievalJudgeInput) -> tuple[str, str]:
         ),
         chunks=json.dumps(chunks, indent=2),
         metric_rules=metric_blocks(definitions),
+        guidance=guidance_block(data.guidance),
         rules="".join(f"{rule}\n" for rule in rules),
         contract=render_contract(retrieval_example(data)),
     )

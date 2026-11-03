@@ -56,6 +56,7 @@ from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.web.workspace import (
     CUSTOM_METRICS,
+    EVALUATION_GUIDANCE,
     GUIDE,
     REFERENCE,
     RESULTS_CSV,
@@ -314,6 +315,25 @@ def create_app(
             question_count=questions_per_scenario,
             question_complexity=question_complexity,
             lock=lock,
+        )
+        return {"state": state.model_dump(mode="json"), **workspace.results(run_id)}
+
+    @app.post("/api/runs/{run_id}/evaluation-guidance")
+    async def save_evaluation_guidance(
+        run_id: str,
+        guidance_file: Annotated[UploadFile | None, File()] = None,
+        guidance_text: Annotated[str, Form()] = "",
+        remove: Annotated[bool, Form()] = False,
+    ) -> dict[str, Any]:
+        """Set, replace or remove the run's evaluation guidance (any time; judges only)."""
+        state = workspace.state(check_run_id(run_id))
+        upload = (
+            Upload(guidance_file.filename or EVALUATION_GUIDANCE, await guidance_file.read())
+            if guidance_file
+            else None
+        )
+        state = workspace.update_evaluation_guidance(
+            state, text=guidance_text, upload=upload, remove=remove
         )
         return {"state": state.model_dump(mode="json"), **workspace.results(run_id)}
 

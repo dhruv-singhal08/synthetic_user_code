@@ -348,6 +348,107 @@ async def test_documented_delinquency_join_is_valid(  # 27
     assert result.verdict is Verdict.PASS
 
 
+async def test_catalog_facts_are_never_accepted_as_quoted_evidence(
+    app_config: AppConfig, sample_product: ProductDescription, reference: Reference
+) -> None:
+    """Live failure: the judge quoted the reconciliation reason ("table ... is not in the
+    catalog") as evidence; the prompt says where evidence comes from and the check refuses it."""
+    sql = "SELECT SUM(net_lpc_charge_usd_am) FROM no_such_table"
+    bad = judge(
+        {"schema_faithfulness": 0},
+        [finding("schema_faithfulness", "table 'no_such_table' is not in the catalog")],
+    )
+    good = judge(
+        {"schema_faithfulness": 0},
+        [
+            finding(
+                "schema_faithfulness",
+                "no_such_table",
+                observed_behavior="table 'no_such_table' is not in the catalog",
+            )
+        ],
+    )
+    result, llm = await evaluate(app_config, sample_product, reference, sql, [bad, good])
+    prompt = " ".join(llm.calls[0].user.split())
+    assert "evidence is still copied ONLY from the product response" in prompt
+    assert "is not in the source" in llm.calls[1].user  # rejected, never silently accepted
+    assert result.findings[0].evidence == "no_such_table"
+    assert result.verdict is Verdict.FAIL
+
+
+UNDOCUMENTED_JOIN = "v_cardmember.acct_id = v_lpc_details.acct_id"
+CARDMEMBER_SQL = (
+    "SELECT c.cm_name, SUM(l.net_lpc_charge_usd_am) FROM v_lpc_details l "
+    "JOIN v_cardmember c ON c.acct_id = l.acct_id GROUP BY 1"
+)
+
+
+def decided(base: Callable[[str, str], Reply], **decision: Any) -> Callable[[str, str], Reply]:
+    def respond(system: str, user: str) -> Reply:
+        reply = base(system, user)
+        reply["join_decisions"] = [{"join": UNDOCUMENTED_JOIN, "reason": "r", **decision}]
+        return reply
+
+    return respond
+
+
+async def test_undocumented_join_needs_a_decision_the_schema_score_agrees_with(
+    app_config: AppConfig, sample_product: ProductDescription, reference: Reference
+) -> None:
+    """Live finding (D238): an undocumented join passed schema_faithfulness unaddressed.
+    The judge must decide every undocumented join; code checks only score/decision agreement."""
+    not_allowed = decided(judge(), allowed=False, basis="usage_instructions")
+    fixed = decided(
+        judge(
+            {"schema_faithfulness": 0.5},
+            [finding("schema_faithfulness", "JOIN v_cardmember c ON c.acct_id = l.acct_id")],
+        ),
+        allowed=False,
+        basis="usage_instructions",
+    )
+    result, llm = await evaluate(
+        app_config, sample_product, reference, CARDMEMBER_SQL, [judge(), not_allowed, fixed]
+    )
+    first = " ".join(llm.calls[0].user.split())
+    assert "For EVERY undocumented join add one join_decisions entry" in first
+    assert "Tables can only be combined over the listed relationships" in first  # default text
+    assert '"join_decisions"' in llm.calls[0].user  # in the output contract
+    assert "join_decisions must decide every undocumented join" in llm.calls[1].user
+    assert f"join_decisions says {UNDOCUMENTED_JOIN} is not allowed" in llm.calls[2].user
+    assert scores(result)["schema_faithfulness"] == 0.5 and result.verdict is Verdict.FAIL
+    checks = result.reference_checks
+    assert checks is not None and checks.join_decisions[0]["basis"] == "usage_instructions"
+
+
+async def test_approved_or_unestablished_join_decisions(
+    app_config: AppConfig, sample_product: ProductDescription, reference: Reference
+) -> None:
+    approved = decided(judge(), allowed=True, basis="evaluation_guidance")
+    result, llm = await evaluate(app_config, sample_product, reference, CARDMEMBER_SQL, [approved])
+    assert len(llm.calls) == 1 and scores(result)["schema_faithfulness"] == 1.0
+    unknown = decided(judge(), allowed=False, basis="not_established")
+    flagged = decided(
+        judge(
+            findings=[
+                finding(
+                    "schema_faithfulness",
+                    "JOIN v_cardmember c ON c.acct_id = l.acct_id",
+                    severity="low",
+                    evidence_status="weak",
+                    unresolved=True,
+                )
+            ]
+        ),
+        allowed=False,
+        basis="not_established",
+    )
+    result, llm = await evaluate(
+        app_config, sample_product, reference, CARDMEMBER_SQL, [unknown, flagged]
+    )
+    assert "add an unresolved finding with category 'schema_faithfulness'" in llm.calls[1].user
+    assert result.verdict is Verdict.INCONCLUSIVE and result.bug_candidates == []
+
+
 async def test_invalid_join_is_a_schema_finding(  # 28
     app_config: AppConfig, sample_product: ProductDescription, reference: Reference
 ) -> None:

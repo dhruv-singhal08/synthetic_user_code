@@ -27,7 +27,7 @@ user: |
 
   ## METRICS
   ${metric_rules}
-
+  ${guidance}
   ## RULES
   ${rules}- Score each listed metric 0, 0.5 or 1 (null only when it genuinely cannot be decided).
   - Every metric scored 0 or 0.5 needs a finding with that metric as category. evidence is ONE

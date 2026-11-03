@@ -82,7 +82,7 @@ from synthetic_user.models.metrics import (
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
-from synthetic_user.models.run import GenerationMode
+from synthetic_user.models.run import EvaluationGuidance, GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator.applicability import (
     MISSING_EVIDENCE_TEXT,
@@ -161,6 +161,7 @@ class Evaluator:
         id_generator: SequentialIdGenerator | None = None,
         sql_parser: SqlParser | None = None,
         verdict_policy: VerdictPolicy = DEFAULT_VERDICT_POLICY,
+        evaluation_guidance: EvaluationGuidance | None = None,
     ) -> None:
         self._settings = settings
         self._log = logger
@@ -178,6 +179,15 @@ class Evaluator:
         self._catalog = CatalogIndex.for_reference(
             reference, namespaces=settings.evaluation.catalog_namespaces
         )
+        # Run-level guidance for every judge call (no extra call); None -> prompts unchanged.
+        self._guidance = evaluation_guidance
+        if evaluation_guidance is not None:
+            logger.info(
+                "Evaluation guidance applied to every judge call: %s (sha256 %s, %d chars)",
+                evaluation_guidance.source,
+                evaluation_guidance.sha256[:12],
+                len(evaluation_guidance.text),
+            )
         custom = [d for d in metric_config.definitions if d.origin is MetricOrigin.CUSTOM]
         if custom:
             logger.info(
@@ -264,6 +274,7 @@ class Evaluator:
                 max_lookup_requests=lookup_settings.max_requests
                 if session is not None and lookup_settings.enabled
                 else 0,
+                guidance=self._guidance.text if self._guidance else None,
             )
             calls.append(self._run_general(case, general_input, semaphore, result, session))
         if plan.retrieval_call:
@@ -276,6 +287,7 @@ class Evaluator:
                 context=evidence.context,
                 tool_trace=evidence.tool_trace,
                 artifact_max_chars=artifact_max_chars,
+                guidance=self._guidance.text if self._guidance else None,
             )
             calls.append(self._run_retrieval(case, retrieval_input, semaphore, result))
         started = time.perf_counter()
@@ -309,6 +321,10 @@ class Evaluator:
                 lookup_trace=session.trace,
                 judge_lookup_requests=result.general.lookup_requests,
                 general_judge_calls=result.general.calls,
+                join_decisions=[
+                    d.model_dump(mode="json")
+                    for d in (result.general.draft.join_decisions if result.general.draft else [])
+                ],
             )
 
     async def _run_retrieval(
@@ -391,6 +407,7 @@ class Evaluator:
             "product_outcome": outcome,
             "mode": case.question.mode,
             "metric_config_id": self._config.config_id,
+            "evaluation_guidance_sha256": self._guidance.sha256 if self._guidance else None,
         }
         if judgements is None:
             clarification = outcome is ProductOutcome.CLARIFICATION

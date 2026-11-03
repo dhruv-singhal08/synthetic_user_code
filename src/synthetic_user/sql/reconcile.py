@@ -102,7 +102,9 @@ def reconcile(
         identifiers=checks,
         extra_tables=extra_tables,
         pack_items_not_used=not_used,
-        joins=[_join_check(key.left, key.right, index) for key in structure.join_keys],
+        joins=_with_extra_conditions(
+            [_join_check(key.left, key.right, index) for key in structure.join_keys]
+        ),
         rules_not_in_pack=rules_not_in_pack,
     )
 
@@ -264,3 +266,23 @@ def _join_check(left: SqlColumnRef, right: SqlColumnRef, index: CatalogIndex) ->
                 provenance=index.provenance(f"relationships[{position}]"),
             )
     return JoinCheck(left=ends[0], right=ends[1], status=JoinStatus.UNDOCUMENTED)
+
+
+def _with_extra_conditions(joins: list[JoinCheck]) -> list[JoinCheck]:
+    """An undocumented equality between two tables that the SQL also joins over a listed
+    relationship is an extra join condition, not an undocumented join."""
+
+    def pair(join: JoinCheck) -> frozenset[str]:
+        return frozenset(end.rsplit(".", 1)[0].casefold() for end in (join.left, join.right))
+
+    documented = {
+        pair(j)
+        for j in joins
+        if j.status in (JoinStatus.DOCUMENTED_VERIFIED, JoinStatus.DOCUMENTED_UNVERIFIED)
+    }
+    return [
+        j.model_copy(update={"status": JoinStatus.EXTRA_CONDITION})
+        if j.status is JoinStatus.UNDOCUMENTED and pair(j) in documented
+        else j
+        for j in joins
+    ]

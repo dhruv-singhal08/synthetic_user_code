@@ -756,3 +756,35 @@ def test_edit_reference_pack(client: TestClient) -> None:
     assert body["rows"][0]["cheat_sheet"] == "employees (full_name)"
     missing = client.put(f"/api/runs/{run_id}/reference_packs/RP_SCN_009", json=draft)
     assert missing.status_code == 404
+
+
+def test_evaluation_guidance_is_editable_any_time_and_used_by_evaluate(
+    client: TestClient,
+) -> None:
+    run_id = _run(client)  # evaluation already locked
+    url = f"/api/runs/{run_id}/evaluation-guidance"
+    typed = client.post(url, data={"guidance_text": "  Approved: tenant filters.  "})
+    assert typed.status_code == 200, typed.text
+    body = typed.json()
+    assert body["evaluation_guidance"]["text"] == "Approved: tenant filters."
+    assert body["state"]["sources"]["evaluation_guidance"] == "typed in the UI"
+    both = client.post(url, data={"guidance_text": "x"}, files={"guidance_file": ("g.md", b"y")})
+    assert both.status_code == 400 and "not more" in both.text
+    bad = client.post(url, files={"guidance_file": ("g.yaml", b"a: [b")})
+    assert bad.status_code == 400 and "not valid YAML" in bad.text
+    yaml_file = client.post(url, files={"guidance_file": ("g.yaml", b"exceptions: [tenant]\n")})
+    guidance = yaml_file.json()["evaluation_guidance"]
+    assert guidance["source"] == "g.yaml" and guidance["text"] == "exceptions: [tenant]"
+    final = _steps(client, run_id, "scenarios", "questions", "execute", "evaluate")
+    assert {e["evaluation_guidance_sha256"] for e in final["evaluations"]} == {guidance["sha256"]}
+    removed = client.post(url, data={"remove": "true"}).json()
+    assert removed["evaluation_guidance"] is None
+    assert removed["state"]["sources"]["evaluation_guidance"] == "none"
+
+
+def test_ui_has_the_evaluation_guidance_controls(client: TestClient) -> None:
+    page = client.get("/").text
+    script = client.get("/static/app.js").text
+    for element in ("guidance-text", "guidance-file", "guidance-status", "save-guidance"):
+        assert f'id="{element}"' in page and f"#{element}" in script, element
+    assert "/evaluation-guidance" in script

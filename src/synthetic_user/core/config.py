@@ -167,6 +167,8 @@ class EvaluationSettings(_Section):
     max_custom_metrics: int = Field(default=20, ge=1, le=100)
     max_custom_metric_chars: int = Field(default=2_000, ge=50)
     max_custom_metric_rows: int = Field(default=200, ge=1)
+    # Optional evaluation guidance (typed or .txt / .md / .yaml), shown to every judge call.
+    max_guidance_chars: int = Field(default=20_000, ge=100)
 
     @model_validator(mode="after")
     def _known_default_metrics(self) -> Self:
@@ -289,6 +291,8 @@ class InputsSettings(_Section):
     reference_file: Path | None = None
     # Optional usage guide (.md / .txt) telling the LLM how to read the reference.
     reference_guide_file: Path | None = None
+    # Optional evaluation guidance for CLI runs (.txt / .md / .yaml); judges only.
+    evaluation_guidance_file: Path | None = None
     benchmark_cases_path: Path | None = None
     benchmark_scenarios_path: Path | None = None
     # Product descriptions for benchmark cases (by product_id). Empty -> product_path only.

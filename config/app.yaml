@@ -52,6 +52,7 @@ evaluation:
   max_custom_metrics: 20     # custom metrics per run (free text + workbook rows)
   max_custom_metric_chars: 2000
   max_custom_metric_rows: 200
+  max_guidance_chars: 20000  # optional evaluation guidance shown to every judge call
 
 trace:
   enabled: true              # runs/<run_id>/run.log: every LLM / product call, prompt + output
@@ -96,6 +97,7 @@ inputs:
   product_path: ./data/products/sample_product.yaml
   reference_file: ./data/references/sample_card_spend_catalog.yaml   # data_catalog / document_collection (.yaml/.json); omit -> ungrounded
   reference_guide_file: ./data/references/sample_card_spend_instructions.md   # optional usage instructions (.md / .txt)
+  # evaluation_guidance_file: ./my_guidance.md   # optional evaluation guidance (.txt / .md / .yaml); judges only
   benchmark_cases_path: ./tests/fixtures/benchmark/labeled_cases.jsonl   # benchmark-evaluator
   benchmark_scenarios_path: ./tests/fixtures/benchmark/scenarios.json
   benchmark_product_paths: [./data/products/sample_product.yaml, ./data/products/sample_chatbot.yaml]

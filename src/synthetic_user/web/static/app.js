@@ -338,6 +338,38 @@ async function unlockEvaluation() {
     log("Evaluation unlocked for editing");
   });
 }
+// --- evaluation guidance (judges only; editable at any time, D237) -------------------------
+function fillGuidance() {
+  const g = state.guidance;
+  $("#guidance-text").value = g && g.source === "typed in the UI" ? g.text : "";
+  $("#guidance-file").value = "";
+}
+
+function renderGuidance() {
+  const g = state.guidance;
+  $("#guidance-status").textContent = !state.runId
+    ? "Start the run first; guidance is saved per run."
+    : g ? `Saved: ${g.source} · ${g.text.length} characters · sha256 ${g.sha256.slice(0, 12)}` : "No guidance saved.";
+  const given = $("#guidance-text").value.trim() || $("#guidance-file").files.length;
+  $("#save-guidance").disabled = !state.runId || state.busy || !given;
+  $("#remove-guidance").classList.toggle("hidden", !g);
+  $("#remove-guidance").disabled = state.busy;
+}
+
+async function saveGuidance(remove) {
+  const form = new FormData();
+  const file = $("#guidance-file").files[0];
+  if (remove) form.append("remove", "true");
+  else if (file) form.append("guidance_file", file);
+  else form.append("guidance_text", $("#guidance-text").value);
+  await withBusy(remove ? "Removing guidance" : "Saving guidance", async () => {
+    const body = await api(`/api/runs/${encodeURIComponent(state.runId)}/evaluation-guidance`, { method: "POST", body: form });
+    applyRun(body);
+    log(remove ? "Evaluation guidance removed" : `Evaluation guidance saved (${state.guidance.source})`);
+    toast(remove ? "Guidance removed" : "Guidance saved; the next Evaluate step uses it");
+  });
+}
+
 // Metrics whose evidence is retrieved context: the connection page then asks for its source.
 function needsContext() {
   if (state.metricConfig) return state.metricConfig.definitions.some((d) => (d.required_execution_evidence || []).some((k) => ["retrieved_context", "ranked_context", "citations", "grounding_evidence"].includes(k)));
@@ -347,6 +379,7 @@ function needsContext() {
 
 function renderEvaluation() {
   if (!state.config) return;
+  renderGuidance();
   const frozen = frozenSelection();
   const chosen = new Set(frozen ? frozen.selected_metrics : [...state.selectedMetrics]);
   const labels = state.config.metric_categories || {};
@@ -757,6 +790,8 @@ function applyRun(body) {
   state.questions = body.questions || [];
   state.metricConfig = body.metric_config || null;
   state.metricIds = body.metric_ids || [];
+  state.guidance = body.evaluation_guidance || null;
+  fillGuidance();
   if (state.run && state.run.metric_selection) state.selectedMetrics = new Set(state.run.metric_selection.selected_metrics);
   renderConnection();
   renderReport(body);
@@ -1298,6 +1333,10 @@ async function boot() {
   $("#lock-evaluation").addEventListener("click", lockEvaluation);
   $("#unlock-evaluation").addEventListener("click", unlockEvaluation);
   $("#custom-metrics-text").addEventListener("input", () => { renderEvaluation(); updateUi(); });
+  $("#guidance-text").addEventListener("input", renderGuidance);
+  $("#guidance-file").addEventListener("change", renderGuidance);
+  $("#save-guidance").addEventListener("click", () => saveGuidance(false));
+  $("#remove-guidance").addEventListener("click", () => saveGuidance(true));
   for (const b of $$("#context-source button")) b.addEventListener("click", () => setContextSource(b.dataset.source));
   setContextSource("response_field");
   $("#question-complexity").addEventListener("change", (e) => { state.questionComplexity = e.target.value; });

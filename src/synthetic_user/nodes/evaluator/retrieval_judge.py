@@ -153,6 +153,7 @@ class RetrievalJudge:
                 RetrievalJudgeDraft,
                 max_retries=self._max_retries,
                 post_validate=lambda draft: check_retrieval(draft, data),
+                cumulative_feedback=True,
             )
         except LLMOutputValidationError as exc:
             self._log.warning("%s: retrieval judge output invalid", data.question.question_id)

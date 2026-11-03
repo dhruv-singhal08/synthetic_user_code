@@ -220,6 +220,8 @@ class EvaluationResult(StrictModel):
     # Catalog reconciliation + exact lookups behind the judgement (data_catalog runs whose
     # selected metrics need an SQL artifact); None otherwise and in earlier artifacts.
     reference_checks: ReferenceCheckRecord | None = None
+    # sha256 of the run's evaluation guidance the judges saw (D237); None = no guidance.
+    evaluation_guidance_sha256: NonEmptyStr | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -366,6 +368,22 @@ class CriterionDraft(StrictModel):
     metric_id: NonEmptyStr | None = None
 
 
+class JoinBasis(StrEnum):
+    REFERENCE = "reference"  # the catalog itself (e.g. it lists the only valid joins)
+    USAGE_INSTRUCTIONS = "usage_instructions"
+    EVALUATION_GUIDANCE = "evaluation_guidance"
+    NOT_ESTABLISHED = "not_established"  # nothing says whether the join is allowed
+
+
+class JoinDecisionDraft(StrictModel):
+    """The judge's decision on one join the reconciliation marked undocumented (D238)."""
+
+    join: NonEmptyStr  # "<table.column> = <table.column>" as listed in the reconciliation
+    allowed: bool
+    basis: JoinBasis
+    reason: NonEmptyStr
+
+
 class GeneralJudgeDraft(StrictModel):
     """The General Judge's reply for one evaluable response."""
 
@@ -380,6 +398,8 @@ class GeneralJudgeDraft(StrictModel):
     # Only when the prompt offers the lookups: ALL extra evidence needed, in one batch, instead
     # of scoring. Code runs them and asks once more (no further requests).
     evidence_requests: list[LookupRequest] = Field(default_factory=list)
+    # One per undocumented join of the reconciliation (asked only when there is one).
+    join_decisions: list[JoinDecisionDraft] = Field(default_factory=list)
 
 
 class ChunkRelevanceDraft(StrictModel):

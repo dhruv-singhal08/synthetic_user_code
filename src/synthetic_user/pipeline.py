@@ -49,7 +49,7 @@ from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
 from synthetic_user.models.reference import Reference, ReferencePack, ReferencePackDraft
-from synthetic_user.models.run import GenerationMode, RunManifest
+from synthetic_user.models.run import EvaluationGuidance, GenerationMode, RunManifest
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluator.kpis import compute_kpis, kpis_csv
@@ -110,6 +110,9 @@ class RunInputs:
     reference: Reference | None = None
     # The run-level metric selection; None -> evaluation.default_metrics of the config.
     metric_selection: MetricSelection | None = None
+    # Optional evaluation guidance (judges only, D237). Not part of the frozen metric
+    # selection: changing it re-runs only the evaluate step, never generation.
+    evaluation_guidance: EvaluationGuidance | None = None
 
     @property
     def mode(self) -> GenerationMode:
@@ -551,7 +554,11 @@ class SyntheticUserPipeline:
         packs = self._load_packs(run_id)
         executions = self._load_executions(run_id)
         validate_run(scenarios=scenarios, packs=packs, questions=questions, executions=executions)
-        if not force and self._has(run_id, Step.EVALUATE):
+        guidance = inputs.evaluation_guidance
+        same_guidance = _guidance_sha(manifest.evaluation_guidance) == _guidance_sha(guidance)
+        if not same_guidance and self._has(run_id, Step.EVALUATE):
+            self._log.info("Evaluation guidance changed; re-evaluating")
+        if not force and same_guidance and self._has(run_id, Step.EVALUATE):
             evaluations = self._store.read_models(
                 self._file(run_id, "evaluations"), EvaluationResult
             )
@@ -589,6 +596,7 @@ class SyntheticUserPipeline:
             reference=inputs.reference,
             metric_config=metric_config,
             id_generator=self._ids(),
+            evaluation_guidance=guidance,
         )
         with self._trace(run_id, Step.EVALUATE):
             evaluations = await evaluator.evaluate_many(cases, inputs.product)
@@ -606,7 +614,9 @@ class SyntheticUserPipeline:
         self._store.write_models(self._file(run_id, "bug_candidates"), bugs, BugCandidate)
         self._store.write_model(self._file(run_id, "kpis"), kpis)
         self._store.write_text(self._file(run_id, "kpis_csv"), kpis_csv(kpis))
-        self._save_manifest(manifest, Step.EVALUATE)
+        self._save_manifest(
+            manifest.model_copy(update={"evaluation_guidance": guidance}), Step.EVALUATE
+        )
         return EvaluateStep(evaluations, bugs, kpis, reused=False)
 
     # --- full run ----------------------------------------------------------------------
@@ -788,3 +798,7 @@ class SyntheticUserPipeline:
         if not self._store.exists(relative):
             return []
         return self._store.read_models(relative, ReferencePack)
+
+
+def _guidance_sha(guidance: EvaluationGuidance | None) -> str | None:
+    return guidance.sha256 if guidance is not None else None

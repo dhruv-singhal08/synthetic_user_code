@@ -27,7 +27,7 @@ user: |
 
   ## METRICS
   ${metric_rules}
-
+  ${guidance}
   ## RULES
   - Score each listed metric 0, 0.5 or 1 (null only when it genuinely cannot be decided from
     the evidence). Keep metrics independent: a problem belongs to the metric whose comparison
@@ -117,12 +117,22 @@ section_reconciliation: |
   without evidence. Cheat-sheet items the SQL does not use are not failures by themselves: an
   equivalent calculation or a valid alternative is correct, a genuinely missing requested
   metric or dimension is not. Joins: documented_verified, documented_unverified (a result
-  relying on it is not reliable), undocumented (validity not established by the reference) or
-  unresolved. Do not claim runtime efficiency or performance from SQL text alone.
+  relying on it is not reliable), undocumented (no listed relationship: invalid when the
+  reference or its usage instructions allow only listed relationships or say none exists,
+  otherwise not established), extra_condition (another equality between two tables already
+  joined over a listed relationship) or unresolved. For EVERY undocumented join add one
+  join_decisions entry (join copied as "left = right"): allowed, and the basis - reference or
+  usage_instructions (what they say about joins), evaluation_guidance (it approves the join) or
+  not_established (nothing says either way). A join they do not allow lowers the schema metric
+  with a finding; not_established is an unresolved finding. Do not claim runtime efficiency or performance
+  from SQL text alone.
   An issue the evidence cannot settle either way (e.g. a filter the question did not request
   that neither the product contract, the expectations nor an applicable rule establishes;
   contradictory rules) is a finding with "unresolved": true, quoting the evidence: it does not
   lower a score by itself and is never assumed authorised or wrong.
+  evidence is still copied ONLY from the product response (e.g. the identifier or clause as
+  written in the SQL); facts from this reconciliation or the lookups (an identifier not in the
+  catalog, a rule id and its text) go in description / observed_behavior, never in evidence.
   ${reconciliation}
 
 section_catalog_evidence: |
@@ -178,6 +188,12 @@ criterion_example:
 factual_example: "${factual_values}"
 
 verdict_example: "${verdicts}"
+
+join_decision_example:
+  join: "<left = right, copied from the reconciliation>"
+  allowed: "<true | false>"
+  basis: "${bases}"
+  reason: "<what the reference, usage instructions or guidance say about this join>"
 
 unresolved_example: "<true only when the evidence cannot settle it, else false>"
 

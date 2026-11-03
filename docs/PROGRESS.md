@@ -407,3 +407,42 @@
     files.
 - Not touched: `notebooks/pipeline_walkthrough.ipynb` was already stale before this change
   (it imports `load_catalog`, `sql_evaluator`, ...); only its module paths were updated.
+
+## Run-level metric selection, two judge groups, telemetry capture, SQL parser (2026-11-03) - user request (instruction.md)
+
+- Files (see D211-D224):
+  - New: `models/metrics.py`, `metrics/` (catalog.yaml with the 11 built-in metrics,
+    catalog.py, registry.py, compiler.py + compiler_prompt.*, custom_input.py),
+    `core/spreadsheet.py`, `sql/parser.py`, `nodes/question/expectations.py`,
+    `nodes/evaluator/{applicability,general_judge,general_prompt,retrieval_judge,
+    retrieval_prompt,judge_common,verdict}.py` + their `*prompt.yaml`,
+    `storage/migrations.py`.
+  - Removed: `models/evaluation_profile.py`, `models/golden_set.py`,
+    `references/golden_set.py`, `nodes/evaluator/{nl2sql,agent}.py` + prompts.
+  - Rewritten / extended: models (question, scenario, evaluation, execution, kpi, run),
+    pipeline, scenario / question generators and prompts, executor, http adapters,
+    kpis, results_csv, web server / workspace / UI (Evaluation tab), CLI (`--metrics`,
+    `--custom-metrics-*`, `--metric-config`, `migrate-run`), config files, README.
+- LLM call budget per run (normal path): compiler 0 (built-ins only) or 1; scenarios 1;
+  questions 1 per accepted scenario (max 5 in parallel); evaluation 0-2 per evaluable
+  response (General Judge and/or Retrieval Judge, concurrent); no MRR, classifier or
+  validation calls. Validation retries stay bounded by `llm.max_validation_retries`.
+- Commands + results: ruff OK, format OK, mypy (97 files) OK, `pytest -q -W error`
+  676 passed (was 589). New suites: metrics catalog / registry / compiler / custom input,
+  SQL parser, context capture (adapter + executor), evaluator (routing, judges, MRR,
+  citations, tool trace, custom metrics, statuses, verdict), migrations.
+- Verified:
+  - Offline CLI `run` with config/app.fake.yaml: 3 scenarios / 3 questions; the denial is
+    judged (pass), the wrong join fails with a bug, the clarification is recorded only;
+    accuracy 0.5 over 2 judged.
+  - The UI script parses (esprima) and every element id it uses exists in index.html.
+  - The repository's 65 stored UI runs: 52 load in the new results view (50 before);
+    the same 13 pre-D204 runs fail as before.
+- NOT verified (external / not run here):
+  - Live LLM behaviour of the new prompts (Gemini / SafeChain): judges, compiler and
+    question metric expectations were only exercised with scripted fake LLMs.
+  - The UI in a real browser (no browser available in this session).
+  - `sqlglot==25.34.1` on Amex Artifactory and SafeChain's environment.
+  - Real context APIs / citation-exposing products: only stub transports were used.
+- Open questions for the user: see the end-of-phase report (verdict treatment of MRR,
+  grounded runs now always building a cheat sheet, the `cg_id` workaround as config).

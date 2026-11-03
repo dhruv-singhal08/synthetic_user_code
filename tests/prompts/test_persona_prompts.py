@@ -11,12 +11,12 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from synthetic_user.metrics.registry import builtin_metric_config
 from synthetic_user.models.base import AmbiguityLevel
-from synthetic_user.models.evaluation import MetricName
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.nodes.evaluator.agent_prompt import build_agent_evaluation_prompt
+from synthetic_user.nodes.evaluator.general_prompt import GeneralJudgeInput, build_general_prompt
 from synthetic_user.nodes.question.prompt import QuestionPromptOptions, build_question_prompt
 from synthetic_user.nodes.scenario.prompt import ScenarioPromptOptions, build_scenario_prompt
 
@@ -221,7 +221,6 @@ def test_product_fields_reach_the_prompts(sample_persona: Persona) -> None:
 
     from synthetic_user.models.execution import AnsweredResponse
     from synthetic_user.models.question import QuestionCase
-    from synthetic_user.nodes.evaluator.nl2sql_prompt import build_response_evaluation_prompt
 
     voc = ProductDescription.model_validate(
         yaml.safe_load(
@@ -272,19 +271,25 @@ def test_product_fields_reach_the_prompts(sample_persona: Persona) -> None:
             "expectations": {"expected_behavior": "b", "success_criteria": ["c"]},
         }
     )
-    # VoC is not an SQL product, so it is judged by the Agent prompt (product contract in full).
-    _system, judge = build_agent_evaluation_prompt(
-        voc,
-        scenario,
-        question,
-        AnsweredResponse(text="Themes: delays."),
-        [MetricName.RELEVANCE, MetricName.COMPLETION],
+    # Every product is judged by the same General Judge with the full product contract.
+    config = builtin_metric_config(["relevance", "correctness_completeness"])
+    _system, judge = build_general_prompt(
+        GeneralJudgeInput(
+            product=voc,
+            question=question,
+            response=AnsweredResponse(text="Themes: delays."),
+            definitions=config.definitions,
+            conversation=[],
+            pack=None,
+            reference=None,
+            sql=[],
+            tool_trace=None,
+            tool_definitions=False,
+            needs_classification=True,
+            sql_dialect=None,
+            artifact_max_chars=8000,
+        )
     )
     assert "should not be interpreted as confirmed causation" in judge  # known_limitations
     assert "Executive summaries" in judge  # expected_outputs
-    # The NL2SQL judge sees only the answer contract; known gaps are matched in code.
-    _system, nl2sql_judge = build_response_evaluation_prompt(
-        voc, scenario, question, AnsweredResponse(text="Themes: delays.")
-    )
-    assert "Executive summaries" in nl2sql_judge
-    assert "should not be interpreted as confirmed causation" not in nl2sql_judge
+    assert "SQL analysis" not in judge  # no SQL metric selected: no SQL section

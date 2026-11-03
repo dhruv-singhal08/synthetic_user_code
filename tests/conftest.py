@@ -12,13 +12,18 @@ import pytest
 
 from synthetic_user.core.config import AppConfig, load_config
 from synthetic_user.core.loaders import load_persona, load_product
+from synthetic_user.metrics.registry import builtin_metric_config
+from synthetic_user.models.metrics import ResolvedMetricConfig
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import CatalogPackDraft, Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.references.loader import load_reference
+from synthetic_user.references.loader import load_reference, parse_reference
 from synthetic_user.references.pack import build_pack
+from synthetic_user.storage.json_store import JsonArtifactStore
+from synthetic_user.storage.runs import run_artifact
+from tests_support import AGENT_CONTEXT, TOOL_CATALOG, scripted_retrieval_reply
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_CONFIG = REPO_ROOT / "config" / "app.yaml"
@@ -50,9 +55,36 @@ def _close_leftover_event_loop(request: pytest.FixtureRequest) -> None:
         asyncio.set_event_loop(None)
 
 
+DEFAULT_TEST_METRICS = ("relevance", "correctness_completeness")
+
+
+def seed_metric_config(
+    store: JsonArtifactStore, run_id: str, metric_ids: tuple[str, ...] = DEFAULT_TEST_METRICS
+) -> ResolvedMetricConfig:
+    """Write a built-in-only frozen metric_config.json into a hand-built test run."""
+    config = builtin_metric_config(list(metric_ids))
+    store.write_model(run_artifact(run_id, "metric_config.json"), config)
+    return config
+
+
+@pytest.fixture
+def seed_config() -> Callable[..., ResolvedMetricConfig]:
+    """``seed_config(store, run_id, metric_ids)`` -> writes a frozen built-in metric config."""
+    return seed_metric_config
+
+
 @pytest.fixture
 def app_config() -> AppConfig:
     return load_config(REPO_CONFIG, env={})
+
+
+@pytest.fixture
+def tool_reference() -> Reference:
+    """A data_catalog whose agent_context defines the canonical tools and data sources."""
+    import yaml
+
+    text = TOOL_CATALOG + yaml.safe_dump({"agent_context": AGENT_CONTEXT})
+    return parse_reference(text.encode(), source_name="voc.yaml", max_chars=MAX_CHARS)
 
 
 @pytest.fixture
@@ -206,40 +238,54 @@ def sample_scenarios(
 Judge = Callable[[str, str], dict[str, Any]]
 
 
-def scripted_judge(fail_on: str | None = None) -> Judge:
-    """A FakeLLM responder for both evaluation prompts: every metric passes (criteria copied
-    from the prompt), except answers containing ``fail_on``, which get semantic_correctness 0
-    (NL2SQL) or completion 0 (Agent) backed by a supported finding."""
+def general_metrics_in(user: str) -> list[str]:
+    """The metric ids a General Judge prompt asks for."""
+    line = user.split("on exactly these metric(s): ", 1)[1].split("\n", 1)[0]
+    return [m.strip().rstrip(".") for m in line.split(",")]
+
+
+def scripted_judge(
+    fail_on: str | None = None, *, failing: str | None = None, classification: str = "answered"
+) -> Judge:
+    """A FakeLLM responder for both judge prompts.
+
+    General Judge: every requested metric scores 1 (criteria copied from the prompt), except
+    answers containing ``fail_on``: then ``failing`` (default: semantic_correctness when
+    requested, else correctness_completeness, else the first metric) scores 0 with a supported
+    finding. The response classification is returned when the prompt asks for it.
+    Retrieval Judge: every requested metric 1, every chunk relevant, checklist covered.
+    """
 
     def judge(system: str, user: str) -> dict[str, Any]:
-        agent = "Agent response" in system
-        marker = (
-            "Question and expected behaviour:\n"
-            if agent
-            else "What was asked and what is expected:\n"
-        )
-        block = user.split(marker, 1)[1].split("\n\n", 1)[0]
+        if "Retrieval and Grounding Judge" in system:
+            return scripted_retrieval_reply(user)
+        metrics = general_metrics_in(user)
+        block = user.split("What was asked and what is expected:\n", 1)[1].split("\n\n", 1)[0]
         criteria = json.loads(block)["success_criteria"]
-        answer = user.split("Product answer" if not agent else "Product response", 1)[1]
+        answer = user.split("Product response (", 1)[1]
         bad = fail_on is not None and fail_on in answer
-        metrics = (
-            ("relevance", "completion")
-            if agent
-            else (
-                "semantic_correctness",
-                "rules_adherence",
-                "schema_faithfulness",
-            )
+        target = failing or next(
+            (m for m in ("semantic_correctness", "correctness_completeness") if m in metrics),
+            metrics[0],
         )
-        failing = "completion" if agent else "semantic_correctness"
         failed = {"score": 0, "rationale": "wrong", "evidence": fail_on, "what_didnt": ["wrong"]}
         ok = {"score": 1, "rationale": "fine", "what_worked": ["fine"]}
-        return {
-            **{m: failed if bad and m == failing else ok for m in metrics},
+        scores: dict[str, Any] = {}
+        for metric in metrics:
+            score = dict(failed if bad and metric == target else ok)
+            if (
+                f"- {metric} (" in user
+                and "[factual verification required]"
+                in user.split(f"- {metric} (", 1)[1].split("\n", 1)[0]
+            ):
+                score["factual_verification"] = "unverified"
+            scores[metric] = score
+        reply: dict[str, Any] = {
+            "metrics": scores,
             "criteria": [{"criterion": c, "status": "met", "rationale": "fine"} for c in criteria],
             "findings": [
                 {
-                    "category": failing,
+                    "category": target,
                     "description": "the answer is wrong",
                     "expected_behavior": "a correct answer",
                     "observed_behavior": "a wrong answer",
@@ -253,6 +299,9 @@ def scripted_judge(fail_on: str | None = None) -> Judge:
             else [],
             "overall_verdict": "fail" if bad else "pass",
         }
+        if "Also classify the response kind" in user:
+            reply["response_classification"] = classification
+        return reply
 
     return judge
 

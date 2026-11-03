@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from synthetic_user.adapters.http_json import HttpRequest, HttpResult
 from synthetic_user.core.config import load_config
-from synthetic_user.web.results_csv import COLUMNS
+from synthetic_user.web.results_csv import columns_for
 from synthetic_user.web.server import create_app
 from synthetic_user.web.workspace import Workspace
 
@@ -137,11 +137,19 @@ def test_config_and_samples(client: TestClient) -> None:
     assert config["llm_provider"] == "fake"
     assert config["steps"] == ["reference", "scenarios", "questions", "execute", "evaluate"]
     assert config["reference_max_chars"] == 200_000 and "sql_dialect" not in config
-    assert config["evaluation_profiles"] == [
-        {"id": "nl2sql", "enabled": True},
-        {"id": "agent", "enabled": True},
-    ]
-    assert config["agent_metrics"] == ["relevance", "completion"]
+    assert "evaluation_profiles" not in config and "agent_metrics" not in config
+    catalog = config["metric_catalog"]
+    assert len(catalog) == 11 and len({m["id"] for m in catalog}) == 11
+    assert {m["id"] for m in catalog if m["needs_context"]} == {
+        "context_precision",
+        "context_recall",
+        "mrr",
+        "faithfulness",
+        "citation_correctness",
+    }
+    assert config["metric_categories"]["sql_quality"] == "SQL Quality"
+    assert config["default_metrics"][:2] == ["relevance", "correctness_completeness"]
+    assert "max_parallel_scenarios" not in json.dumps(config)  # internal, not a UI control
     assert config["web"]["max_step_count"] == 100 and config["execution_resume"] is True
     samples = client.get("/api/samples").json()
     # Persona, product and reference all default to the files configured under inputs.
@@ -204,9 +212,12 @@ def test_create_run_with_upload_and_queries(client: TestClient, config_path: Pat
         "product": "uploaded: my_product.yaml",
         "reference": "off",
         "reference_guide": "off",
-        "golden_set": "none",
+        "custom_metrics": "none",
     }
-    assert state["evaluation_profile"] == "nl2sql"  # the sample product generates SQL
+    # no metric named in the request -> the configured defaults (the user's choice wins)
+    settings_defaults = load_config(config_path, env={}).evaluation.default_metrics
+    assert state["metric_selection"]["selected_metrics"] == settings_defaults
+    assert "evaluation_profile" not in state
     assert state["persona_queries"] == ["How much did we spend on travel?", "Top vendors?"]
 
     settings = load_config(config_path, env={})
@@ -249,25 +260,24 @@ def test_create_run_needs_uploaded_product_and_reference_when_switched_on(
         "product": "sample",
         "reference": "sample",
         "reference_guide": "default",
-        "golden_set": "none",
+        "custom_metrics": "none",
     }
 
 
 def test_document_reference_with_default_or_typed_instructions(
     client: TestClient, config_path: Path
 ) -> None:
+    # tool definitions are optional reference content: no profile demands them
     without_context = client.post(
         "/api/runs",
         files={"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.yaml", POLICY_DOCS)},
         data={"use_reference": "true"},
     )
-    assert without_context.status_code == 400  # the chatbot is auto-detected as Agent
-    assert "has no agent_context" in without_context.json()["detail"]
+    assert without_context.status_code == 200, without_context.text
     files = {"product": ("p.yaml", CHATBOT_YAML), "reference": ("policy.yaml", POLICY_DOCS_AGENT)}
     response = client.post("/api/runs", files=files, data={"use_reference": "true"})
     assert response.status_code == 200, response.text
     state = response.json()["state"]
-    assert state["evaluation_profile"] == "agent"
     assert state["sources"]["reference"] == "uploaded: policy.yaml"
     assert state["sources"]["reference_guide"] == "default"
     settings = load_config(config_path, env={})
@@ -440,13 +450,22 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
 
     final = _steps(client, run_id, "evaluate")
     verdicts = sorted(r["final_verdict"] or "-" for r in final["rows"])
-    assert verdicts == ["fail", "recorded_only", "recorded_only"]  # clarification + denial
+    # the substantive denial is judged; the unresolved clarification is recorded only
+    assert verdicts == ["fail", "pass", "recorded_only"]
     failed = next(r for r in final["rows"] if r["final_verdict"] == "fail")
     assert failed["bug_ids"] == "BUG_001"
     assert (failed["semantic_correctness"], failed["rules_adherence"]) == ("1", "0")
-    assert final["detail"]["accuracy"] == final["detail"]["task_success_rate"] == 0.0
+    assert failed["response_classification"] == "answered"
+    denied = next(r for r in final["rows"] if r["product_outcome"] == "denied")
+    assert denied["response_classification"] == "unable_to_answer"
+    assert (denied["semantic_correctness"], denied["semantic_correctness_status"]) == (
+        "",
+        "not_applicable",
+    )
+    assert final["detail"]["accuracy"] == final["detail"]["task_success_rate"] == 0.5
     assert final["issue_summary"]["issues"][0]["theme"] == "joins_and_relationships"
-    assert final["kpis"]["judged"] == 1 and final["kpis"]["new_bugs"] == 1
+    assert final["kpis"]["judged"] == 2 and final["kpis"]["new_bugs"] == 1
+    assert final["metric_config"]["selected_metric_ids"] == final["metric_ids"]
     assert {"kpis.json", "kpis.csv"} <= set(final["artifacts"])
     assert client.get(f"/api/runs/{run_id}/artifacts/kpis.csv").status_code == 200
     assert final["state"]["steps_done"] == [
@@ -460,7 +479,7 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     download = client.get(f"/api/runs/{run_id}/results.csv")
     assert download.status_code == 200
     rows = list(csv.DictReader(io.StringIO(download.text)))
-    assert list(rows[0]) == COLUMNS
+    assert list(rows[0]) == columns_for(final["metric_ids"]) == final["columns"]
     assert [r["question_id"] for r in rows] == [r["question_id"] for r in final["rows"]]
     assert {"results.csv", "evaluations.json", "ui_state.json"} <= set(final["artifacts"])
     assert client.get(f"/api/runs/{run_id}/artifacts/evaluations.json").status_code == 200
@@ -485,14 +504,133 @@ def test_execute_without_contract_uses_fixture_product(client: TestClient) -> No
     }
 
 
-def test_agent_run_without_reference_is_refused(client: TestClient) -> None:
+def test_any_product_runs_without_reference(client: TestClient) -> None:
+    """No profile: a non-SQL product without reference data is a normal ungrounded run."""
     response = client.post(
         "/api/runs",
         files={"product": ("p.yaml", CHATBOT_YAML)},
-        data={"use_reference": "false"},
+        data={"use_reference": "false", "selected_metrics": ["relevance", "faithfulness"]},
+    )
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize(
+    ("data", "files"),
+    [
+        ({"evaluation_profile": "agent"}, {}),
+        ({"agent_metrics": ["relevance"]}, {}),
+        ({}, {"golden_set": ("g.csv", b"Question\nq\n")}),
+    ],
+)
+def test_profile_era_fields_are_refused_with_a_migration_message(
+    client: TestClient, data: dict[str, Any], files: dict[str, Any]
+) -> None:
+    response = client.post(
+        "/api/runs", files={"product": ("p.yaml", PRODUCT_YAML), **files}, data=data
     )
     assert response.status_code == 400
-    assert "Agent runs require Reference data" in response.json()["detail"]
+    assert "Evaluation profiles were removed" in response.json()["detail"]
+
+
+def test_evaluation_tab_payload_is_frozen_and_drives_the_steps(client: TestClient) -> None:
+    response = client.post(
+        "/api/runs",
+        files={
+            "product": ("p.yaml", PRODUCT_YAML),
+            "custom_metrics": ("metrics.csv", b"Metric,Definition\nTone,Polite and brief\n"),
+        },
+        data={
+            "selected_metrics": ["relevance", "context_recall", "schema_faithfulness"],
+            "custom_metrics_text": "- Workflow adherence: follows the documented steps",
+            "scenario_count": "2",
+            "questions_per_scenario": "1",
+            "question_complexity": "simple",
+        },
+    )
+    assert response.status_code == 200, response.text
+    state = response.json()["state"]
+    selection = state["metric_selection"]
+    assert selection["selected_metrics"] == ["relevance", "context_recall", "schema_faithfulness"]
+    assert [(c["text"], c["provenance"]) for c in selection["custom_inputs"]] == [
+        ("Workflow adherence: follows the documented steps", "free text item 1"),
+        ("Metric: Tone; Definition: Polite and brief", "metrics.csv: row 2"),
+    ]
+    assert (state["scenario_count"], state["question_count"]) == (2, 1)
+    assert state["sources"]["custom_metrics"] == "uploaded: metrics.csv"
+    # counts are run selections: a step request may not override them
+    early = client.post(f"/api/runs/{state['run_id']}/steps/scenarios", json={"count": 5})
+    assert early.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("metric", "message"),
+    [
+        ("completion", "'completion' was replaced by correctness_completeness"),
+        ("tool_selection", "'tool_selection' was replaced by tool_correctness"),
+        ("bleu", "unknown built-in metric 'bleu'"),
+    ],
+)
+def test_unknown_or_legacy_metric_ids_are_refused(
+    client: TestClient, metric: str, message: str
+) -> None:
+    response = client.post(
+        "/api/runs",
+        files={"product": ("p.yaml", PRODUCT_YAML)},
+        data={"selected_metrics": [metric]},
+    )
+    assert response.status_code == 400 and message in response.json()["detail"]
+
+
+def test_custom_metric_workbook_preview_reports_bad_rows(client: TestClient) -> None:
+    content = b"Name,Definition\nTone,Polite\n,\n\nGrounding,Uses only sources\n"
+    preview = client.post("/api/preview/custom_metrics", files={"file": ("m.csv", content)})
+    assert preview.status_code == 200, preview.text
+    parsed = preview.json()["parsed"]
+    assert [m["provenance"] for m in parsed["metrics"]] == [
+        "m.csv: row 2",
+        "m.csv: row 5",
+    ]
+    assert parsed["errors"][0]["reason"] == "blank row(s) inside the metric table were skipped"
+
+
+CONTEXT_CONTRACT = (
+    CONTRACT_YAML
+    + b"""  context: {path: data.chunks, chunk_id: id, text: text, rank: rank}
+"""
+)
+
+
+def test_context_source_must_match_the_contract(client: TestClient) -> None:
+    response = client.post(
+        "/api/runs",
+        files={"product": ("p.yaml", PRODUCT_YAML)},
+        data={"selected_metrics": ["context_precision"]},
+    )
+    run_id = response.json()["state"]["run_id"]
+
+    def connect(contract: bytes, source: str) -> Any:
+        return client.post(
+            f"/api/runs/{run_id}/connection",
+            files={"contract": ("c.yaml", contract)},
+            data={"url": "https://p.example.com/ask", "context_source": source},
+        )
+
+    mismatch = connect(CONTRACT_YAML, "response_field")
+    assert mismatch.status_code == 400 and "response_mapping.context" in mismatch.json()["detail"]
+    api = connect(CONTEXT_CONTRACT, "context_api")
+    assert api.status_code == 400 and "context_api section" in api.json()["detail"]
+    ok = connect(CONTEXT_CONTRACT, "response_field")
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["state"]["connection"]["context_source"] == "response_field"
+    both = (
+        CONTEXT_CONTRACT
+        + b"""context_api:
+  url: https://p.example.com/context/{correlation_id}
+  context: {path: chunks, text: text}
+"""
+    )
+    refused = connect(both, "context_api")
+    assert refused.status_code == 400 and "choose ONE context source" in refused.json()["detail"]
 
 
 def test_ungrounded_run_has_no_reference_pack(client: TestClient) -> None:

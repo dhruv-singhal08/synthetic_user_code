@@ -19,6 +19,9 @@ typer = ">=0.12"
 fastapi = "^0.143.0"
 uvicorn = "^0.54.0"
 python-multipart = "^0.0.32"
+# SQL AST parser for the SQL metrics' evidence (pure Python, no dependencies). Not yet checked
+# against Amex Artifactory: the parser degrades to an explicit "parser unavailable" diagnostic.
+sqlglot = "25.34.1"
 
 [tool.poetry.group.gemini]
 optional = true

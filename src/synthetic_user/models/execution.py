@@ -1,6 +1,10 @@
 """Product execution: a generic ProductResponse union on ``outcome`` wrapped in an ExecutionRecord.
 
 Product-specific payloads (SQL, tables, JSON, ...) travel as ResponseArtifacts of an answer.
+Metric-driven telemetry is standardized here: an ordered tool-call trace, a normalized
+retrieved-context artifact (ranked chunks + citation mappings, from the response or a separate
+context API) and correlation ids. ``None`` / ``not_requested`` always means "not exposed",
+which is different from "exposed but empty".
 """
 
 from __future__ import annotations
@@ -23,6 +27,94 @@ class ProductOutcome(StrEnum):
     DENIED = "denied"
     ERROR = "error"
     TIMEOUT = "timeout"
+
+
+class ResponseClassification(StrEnum):
+    """Semantic kind of the terminal product response (separate from the transport outcome)."""
+
+    ANSWERED = "answered"
+    UNABLE_TO_ANSWER = "unable_to_answer"
+    CLARIFICATION = "clarification"
+    # No reliable typed field and no judge classified it: never assumed to be "answered".
+    UNKNOWN = "unknown"
+
+
+class ContextAvailability(StrEnum):
+    AVAILABLE = "available"  # fetched / read; may hold zero chunks (= nothing retrieved)
+    UNAVAILABLE = "unavailable"  # configured, but the response / API exposed no context
+    FAILED = "failed"  # the context API call or the mapping failed (error kept)
+    NOT_REQUESTED = "not_requested"  # no context source configured for this product
+
+
+class ContextSourceMode(StrEnum):
+    RESPONSE_FIELD = "response_field"
+    CONTEXT_API = "context_api"
+    NONE = "none"
+
+
+class RetrievedChunk(StrictModel):
+    chunk_id: NonEmptyStr
+    # Explicit retrieval rank (1 = best). None when the product does not expose a rank.
+    rank: int | None = Field(default=None, ge=1)
+    text: str
+    source_id: str | None = None
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class CitationRef(StrictModel):
+    """A citation exposed in the answer, resolved (or not) to one retrieved chunk."""
+
+    citation_id: str | None = None
+    chunk_id: str | None = None
+    source_id: str | None = None
+    claim: str | None = None  # the cited answer text, when the product exposes it
+    resolved: bool = False  # set by the executor: chunk_id names a retrieved chunk
+
+
+class RetrievedContext(StrictModel):
+    availability: ContextAvailability = ContextAvailability.NOT_REQUESTED
+    source_mode: ContextSourceMode = ContextSourceMode.NONE
+    retrieved_at: datetime | None = None
+    # Request / session / trace id tying the context to the same execution.
+    correlation_id: str | None = None
+    chunks: list[RetrievedChunk] = Field(default_factory=list)
+    citations: list[CitationRef] = Field(default_factory=list)
+    rank_exposed: bool = False  # chunk ranks are explicit (or list order is declared as rank)
+    citations_exposed: bool = False  # the adapter maps citations for this product
+    truncated: bool = False  # chunks / text were cut to the configured bounds
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        problems: list[str] = []
+        if self.availability in (ContextAvailability.FAILED, ContextAvailability.UNAVAILABLE):
+            if not self.error:
+                problems.append(f"{self.availability.value} context needs an error reason")
+        elif self.error is not None:
+            problems.append("only failed / unavailable context carries an error")
+        if self.availability is not ContextAvailability.AVAILABLE and (
+            self.chunks or self.citations
+        ):
+            problems.append("only available context carries chunks or citations")
+        ids = [chunk.chunk_id for chunk in self.chunks]
+        if len(set(ids)) != len(ids):
+            problems.append("chunk ids must be unique")
+        if self.rank_exposed and any(chunk.rank is None for chunk in self.chunks):
+            problems.append("rank_exposed requires a rank on every chunk")
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
+
+
+class ToolCall(StrictModel):
+    """One observable tool / function call, in execution order."""
+
+    order: int = Field(ge=1)
+    name: NonEmptyStr
+    operation: str | None = None
+    arguments: JsonValue = None
+    result: JsonValue = None
+    error: str | None = None
 
 
 class ConversationRole(StrEnum):
@@ -74,6 +166,23 @@ class AnsweredResponse(_ResponseBase):
     outcome: Literal[ProductOutcome.ANSWERED] = ProductOutcome.ANSWERED
     text: str | None = None
     artifacts: list[ResponseArtifact] = Field(default_factory=list)
+    # Typed response kind exposed by the adapter (answered / unable_to_answer); None = not typed.
+    response_classification: ResponseClassification | None = None
+    # Ordered tool calls when the adapter maps a trace; None = no trace exposed.
+    tool_trace: list[ToolCall] | None = None
+    # Context mapped from the response itself; the executor moves it to ExecutionRecord.context.
+    retrieved_context: RetrievedContext | None = None
+    correlation_id: str | None = None
+
+    @model_validator(mode="after")
+    def _typed_kind(self) -> Self:
+        if self.response_classification not in (
+            None,
+            ResponseClassification.ANSWERED,
+            ResponseClassification.UNABLE_TO_ANSWER,
+        ):
+            raise ValueError("an answered payload is typed answered or unable_to_answer")
+        return self
 
     @model_validator(mode="after")
     def _not_empty(self) -> Self:
@@ -124,6 +233,8 @@ class ExecutionRecord(StrictModel):
     response: ProductResponse
     turns: list[ConversationTurn] = Field(default_factory=list)
     raw_response_path: str | None = None
+    # The normalized retrieved context of the terminal answer (response field or context API).
+    context: RetrievedContext = Field(default_factory=RetrievedContext)
 
     @model_validator(mode="before")
     @classmethod

@@ -14,7 +14,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from synthetic_user.adapters.base import ProductAdapter, UnavailableAdapter
 from synthetic_user.adapters.contract import ProductContract, request_contract
@@ -42,15 +42,9 @@ from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.tracing import TracingLLMClient
-from synthetic_user.models.evaluation_profile import (
-    AGENT_EXPECTATION_METRIC_MAP,
-    ENABLED_EVALUATION_PROFILES,
-    AgentMetric,
-    EvaluationProfile,
-    EvaluationProfileSelection,
-    normalize_agent_metrics,
-    resolve_evaluation_profile,
-)
+from synthetic_user.metrics.catalog import builtin_definitions, category_labels
+from synthetic_user.models.execution import ContextSourceMode
+from synthetic_user.models.metrics import EvidenceKind
 from synthetic_user.models.persona import ComplexityPreference
 from synthetic_user.models.question import MAX_DELIVERABLES, QuestionComplexity
 from synthetic_user.models.reference import (
@@ -59,9 +53,9 @@ from synthetic_user.models.reference import (
     ReferencePackDraft,
 )
 from synthetic_user.pipeline import RunInputs, Step, SyntheticUserPipeline
-from synthetic_user.references.golden_set import GOLDEN_SET, validate_agent_contract
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.web.workspace import (
+    CUSTOM_METRICS,
     GUIDE,
     REFERENCE,
     RESULTS_CSV,
@@ -69,6 +63,7 @@ from synthetic_user.web.workspace import (
     ProductConnection,
     Upload,
     Workspace,
+    custom_input_limits,
     parse_upload,
 )
 
@@ -82,11 +77,29 @@ _PREREQUISITE = {
 }
 
 
+# Evidence kinds that need retrieved context: selecting such a metric shows the context-source
+# selector in the product connection UI.
+CONTEXT_EVIDENCE = frozenset(
+    {
+        EvidenceKind.RETRIEVED_CONTEXT,
+        EvidenceKind.RANKED_CONTEXT,
+        EvidenceKind.CITATIONS,
+        EvidenceKind.GROUNDING_EVIDENCE,
+    }
+)
+LEGACY_RUN_FIELDS = (
+    "Evaluation profiles were removed: choose metrics in the Evaluation tab "
+    "(selected_metrics / custom metrics); evaluation_profile, agent_metrics and golden_set "
+    "are no longer accepted."
+)
+
+
 class StepRequest(BaseModel):
-    count: int | None = Field(default=None, ge=1)
+    """Counts are run selections (Evaluation tab), not per-step overrides."""
+
+    model_config = ConfigDict(extra="forbid")
+
     start_from_question: int | None = Field(default=None, ge=1)
-    evaluation_profile: EvaluationProfileSelection | None = None
-    agent_metrics: list[AgentMetric] | None = None
 
 
 class ContractRequest(BaseModel):
@@ -133,25 +146,30 @@ def create_app(
             "reference_max_chars": settings.reference.max_chars,
             "scenario_count": settings.generation.scenario.scenario_count,
             "question_count": settings.generation.question.question_count,
-            "agent_golden_max_questions_per_scenario": (
-                settings.generation.question.agent_golden_max_questions_per_scenario
-            ),
             "execution_resume": True,
             "max_deliverables": settings.generation.question.max_deliverables,
             "web": settings.web.model_dump(mode="json"),
             "question_complexities": [item.value for item in ComplexityPreference],
-            "evaluation_profiles": [
+            "metric_categories": {k.value: v for k, v in category_labels().items()},
+            "metric_catalog": [
                 {
-                    "id": profile.value,
-                    "enabled": profile in ENABLED_EVALUATION_PROFILES,
+                    "id": d.metric_id,
+                    "display_name": d.display_name,
+                    "category": d.category.value,
+                    "description": d.description,
+                    "judge_group": d.judge_group.value,
+                    "needs_context": bool(CONTEXT_EVIDENCE & set(d.required_execution_evidence)),
+                    "needs_expectations": d.needs_expectations,
+                    "counts_toward_verdict": d.counts_toward_verdict,
                 }
-                for profile in EvaluationProfile
+                for d in builtin_definitions()
             ],
-            "agent_metrics": [metric.value for metric in settings.evaluation.agent_metrics],
-            "agent_expectation_metric_map": {
-                field: [metric.value for metric in metrics]
-                for field, metrics in AGENT_EXPECTATION_METRIC_MAP.items()
+            "default_metrics": list(settings.evaluation.default_metrics),
+            "custom_metric_limits": {
+                "max_metrics": settings.evaluation.max_custom_metrics,
+                "max_chars_per_metric": settings.evaluation.max_custom_metric_chars,
             },
+            "context_sources": [m.value for m in ContextSourceMode],
             "steps": [s.value for s in Step],
             # Used when no usage instructions are given (shown as the UI's placeholder).
             "default_instructions": {k.value: text for k, text in DEFAULT_INSTRUCTIONS.items()},
@@ -176,9 +194,10 @@ def create_app(
             upload,
             max_chars=settings.reference.max_chars,
             max_upload_bytes=settings.web.max_upload_bytes,
+            limits=custom_input_limits(settings),
         )
         parsed = model.model_dump(mode="json")
-        raw = None if kind == GOLDEN_SET else upload.content.decode("utf-8-sig")
+        raw = None if kind == CUSTOM_METRICS else upload.content.decode("utf-8-sig")
         return {"raw": raw, "parsed": parsed}
 
     @app.get("/api/contract-template", response_class=PlainTextResponse)
@@ -214,16 +233,22 @@ def create_app(
         product: Annotated[UploadFile | None, File()] = None,
         reference: Annotated[UploadFile | None, File()] = None,
         reference_guide: Annotated[UploadFile | None, File()] = None,
-        golden_set: Annotated[UploadFile | None, File()] = None,
+        custom_metrics: Annotated[UploadFile | None, File()] = None,
         reference_instructions: Annotated[str, Form()] = "",
         persona_queries: Annotated[str, Form()] = "",
         question_complexity: Annotated[ComplexityPreference | None, Form()] = None,
-        evaluation_profile: Annotated[EvaluationProfileSelection, Form()] = (
-            EvaluationProfileSelection.AUTO
-        ),
-        agent_metrics: Annotated[list[AgentMetric] | None, Form()] = None,
+        selected_metrics: Annotated[list[str] | None, Form()] = None,
+        custom_metrics_text: Annotated[str, Form()] = "",
+        scenario_count: Annotated[int | None, Form()] = None,
+        questions_per_scenario: Annotated[int | None, Form()] = None,
         use_reference: Annotated[bool, Form()] = False,
+        # Profile-era fields: refused with a migration message (never a hidden fallback).
+        evaluation_profile: Annotated[str | None, Form()] = None,
+        agent_metrics: Annotated[list[str] | None, Form()] = None,
+        golden_set: Annotated[UploadFile | None, File()] = None,
     ) -> dict[str, Any]:
+        if evaluation_profile is not None or agent_metrics is not None or golden_set is not None:
+            raise ConfigError(LEGACY_RUN_FIELDS)
         if len(reference_instructions) > settings.web.max_reference_instructions_chars:
             raise ConfigError(
                 "Reference instructions are longer than "
@@ -235,15 +260,17 @@ def create_app(
             ("product", product),
             (REFERENCE, reference),
             (GUIDE, reference_guide),
-            (GOLDEN_SET, golden_set),
+            (CUSTOM_METRICS, custom_metrics),
         ):
             uploads[kind] = Upload(file.filename or kind, await file.read()) if file else None
         state = workspace.create_run(
             uploads,
             persona_queries,
             question_complexity=question_complexity,
-            evaluation_profile=evaluation_profile,
-            agent_metrics=agent_metrics,
+            selected_metrics=selected_metrics,
+            custom_metrics_text=custom_metrics_text,
+            scenario_count=scenario_count,
+            question_count=questions_per_scenario,
             use_reference=use_reference,
             reference_instructions=reference_instructions,
         )
@@ -263,15 +290,17 @@ def create_app(
         run_id: str,
         contract: Annotated[UploadFile, File()],
         url: Annotated[str, Form()] = "",
+        context_source: Annotated[ContextSourceMode | None, Form()] = None,
     ) -> dict[str, Any]:
-        """Real product: product URL + uploaded http_json/http_sse contract for execute."""
+        """Real product: product URL + uploaded http_json/http_sse contract for execute.
+        ``context_source`` = where retrieved context comes from (must match the contract)."""
         if len(url) > settings.web.max_product_url_chars:
             raise ConfigError(
                 f"Product URL is longer than {settings.web.max_product_url_chars:,} characters"
             )
         state = workspace.state(check_run_id(run_id))
         upload = Upload(contract.filename or "contract.yaml", await contract.read())
-        state = workspace.connect(state, url, upload)
+        state = workspace.connect(state, url, upload, context_source)
         return {"state": state.model_dump(mode="json")}
 
     @app.delete("/api/runs/{run_id}/connection")
@@ -302,43 +331,17 @@ def create_app(
     async def run_step(run_id: str, step: Step, body: StepRequest | None = None) -> dict[str, Any]:
         state = workspace.state(check_run_id(run_id))
         inputs = workspace.load_inputs(run_id)
-        if body is not None and (
-            body.evaluation_profile is not None or body.agent_metrics is not None
-        ):
-            try:
-                resolved_profile, profile_reason = resolve_evaluation_profile(
-                    inputs.product,
-                    body.evaluation_profile or state.evaluation_profile_selection,
-                )
-                selected_agent_metrics = normalize_agent_metrics(
-                    body.agent_metrics or state.agent_metrics
-                )
-            except ValueError as exc:
-                raise ConfigError(str(exc)) from exc
-            if resolved_profile is EvaluationProfile.AGENT:
-                validate_agent_contract(inputs.reference)
-            profile_changed = resolved_profile is not state.evaluation_profile
-            update: dict[str, Any] = {
-                "evaluation_profile": resolved_profile,
-                "evaluation_profile_selection": (
-                    body.evaluation_profile or state.evaluation_profile_selection
-                ),
-                "evaluation_profile_reason": profile_reason,
-                "agent_metrics": selected_agent_metrics,
-            }
-            if profile_changed:
-                # Scenario/reference-pack shape is profile-specific. Preserve only the cheap
-                # reference check and require regeneration from scenarios.
-                update["steps_done"] = [done for done in state.steps_done if done is Step.REFERENCE]
-            state = state.model_copy(update=update)
-            workspace.save_state(state)
-            inputs = workspace.load_inputs(run_id)
         needed = _PREREQUISITE.get(step)
         if needed is not None and needed not in state.steps_done:
             raise ConfigError(f"Run the '{needed.value}' step before '{step.value}'")
-        count = body.count if body else None
-        if count is not None and count > settings.web.max_step_count:
-            raise ConfigError(f"Step count cannot exceed {settings.web.max_step_count}")
+        # The user's run selections win; server defaults apply when the run left them out.
+        count = (
+            state.scenario_count
+            if step is Step.SCENARIOS
+            else state.question_count
+            if step is Step.QUESTIONS
+            else None
+        )
         run_settings = _settings_for_question_complexity(settings, state.question_complexity)
         llm = TracingLLMClient.wrap(
             create_llm_client(run_settings)
@@ -383,11 +386,16 @@ def create_app(
             scenario_step = await pipeline.generate_scenarios(
                 run_id, inputs, count=count, force=True
             )
+            config = scenario_step.metric_config
             detail = {
                 **detail,
                 "accepted": len(scenario_step.accepted),
                 "rejected": len(scenario_step.rejected),
                 "reference_packs": len(scenario_step.packs),
+                "metric_config_id": config.config_id,
+                "metrics": list(config.selected_metric_ids),
+                "metric_compiler_called": config.compiler_called,
+                "unavailable_metrics": [d.metric_id for d in config.unavailable()],
             }
         elif step is Step.QUESTIONS:
             question_step = await pipeline.generate_questions(
@@ -413,13 +421,7 @@ def create_app(
                 "resumed_from_question": body.start_from_question if body else None,
             }
         elif step is Step.EVALUATE:
-            evaluate_step = await pipeline.evaluate_executions(
-                run_id,
-                inputs,
-                force=True,
-                evaluation_profile=state.evaluation_profile,
-                agent_metrics=state.agent_metrics,
-            )
+            evaluate_step = await pipeline.evaluate_executions(run_id, inputs, force=True)
             detail = {
                 "evaluations": len(evaluate_step.evaluations),
                 "bug_candidates": len(evaluate_step.bug_candidates),
@@ -517,37 +519,27 @@ def _settings_for_question_complexity(
         max_deliverables = 1
         max_sources = 1
         allow_cross_source_comparison = False
-        agent_min_tool_calls = 1
-        agent_min_data_sources = 1
     elif complexity is ComplexityPreference.MEDIUM:
         allowed = [QuestionComplexity.SIMPLE, QuestionComplexity.MEDIUM]
         max_deliverables = 2
         max_sources = 1
         allow_cross_source_comparison = False
-        agent_min_tool_calls = 1
-        agent_min_data_sources = 1
     elif complexity is ComplexityPreference.COMPLEX:
         allowed = [QuestionComplexity.COMPLEX]
         max_deliverables = MAX_DELIVERABLES
         max_sources = 2
         allow_cross_source_comparison = True
-        agent_min_tool_calls = 2
-        agent_min_data_sources = 2
     else:
         allowed = list(QuestionComplexity)
         max_deliverables = MAX_DELIVERABLES
         max_sources = 2
         allow_cross_source_comparison = True
-        agent_min_tool_calls = 1
-        agent_min_data_sources = 1
     question = settings.generation.question.model_copy(
         update={
             "allowed_complexities": allowed,
             "max_deliverables": max_deliverables,
             "max_sources": max_sources,
             "allow_cross_source_comparison": allow_cross_source_comparison,
-            "agent_min_tool_calls": agent_min_tool_calls,
-            "agent_min_data_sources": agent_min_data_sources,
         }
     )
     generation = settings.generation.model_copy(update={"question": question})

@@ -24,12 +24,8 @@ from pydantic import (
 from synthetic_user.core.exceptions import ConfigError, format_validation_error
 from synthetic_user.core.loaders import read_yaml_mapping
 from synthetic_user.core.trace import MAX_FIELD_CHARS
+from synthetic_user.metrics.catalog import builtin_ids
 from synthetic_user.models.base import AmbiguityLevel
-from synthetic_user.models.evaluation_profile import (
-    DEFAULT_AGENT_METRICS,
-    AgentMetric,
-    normalize_agent_metrics,
-)
 from synthetic_user.models.question import (
     MAX_DELIVERABLES,
     MAX_SUCCESS_CRITERIA,
@@ -74,6 +70,15 @@ class _Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def _refuse_removed(data: Any, removed: Mapping[str, str], section: str) -> Any:
+    """Keys of earlier versions are refused with what replaced them (never silently ignored)."""
+    if isinstance(data, dict):
+        found = [f"{section}.{key}: {why}" for key, why in removed.items() if key in data]
+        if found:
+            raise ValueError("removed setting(s): " + "; ".join(found))
+    return data
+
+
 class LLMSettings(_Section):
     provider: LLMProvider = LLMProvider.FAKE
     model: str = Field(default="fake", min_length=1)
@@ -109,6 +114,10 @@ class ProductSettings(_Section):
     # host name are NOT checked (a test server with a self-signed certificate only). A product
     # contract can also turn it off for itself with ``ssl_verify: false``.
     ssl_verify: bool = True
+    # Bounds for the retrieved context stored per execution (metric telemetry). Chunks beyond
+    # the limit / text beyond the length are cut and the context is marked truncated.
+    context_max_chunks: int = Field(default=50, ge=1, le=1_000)
+    context_max_chunk_chars: int = Field(default=4_000, ge=100)
 
 
 class ProductAdapterSettings(_Section):
@@ -126,21 +135,47 @@ class ReferenceSettings(_Section):
 
 
 class EvaluationSettings(_Section):
-    # Temporary product workaround: omit only the exact cg_id IN ('DUMMY') predicate from the
-    # judge's copy of SQL. The original product response and SQL remain stored unchanged.
-    ignore_dummy_cg_id_filter: bool = False
-    # Per response artifact included in an evaluator prompt. The stored response is unchanged.
+    # Built-in metric ids used when a run does not choose its own (CLI runs, UI default ticks).
+    # The run's choice always wins; it is frozen in metric_config.json before scenarios.
+    default_metrics: list[str] = Field(
+        default_factory=lambda: ["relevance", "correctness_completeness"], min_length=1
+    )
+    # Explicit SQL dialect for the SQL parser (sqlglot name, e.g. "bigquery"); never guessed.
+    sql_dialect: str | None = None
+    # Predicates removed from the JUDGE's copy of generated SQL only (exact AST match), e.g. a
+    # temporary product workaround filter. Stored responses and SQL are never changed.
+    ignored_sql_predicates: list[str] = Field(default_factory=list)
+    # Per response artifact / tool trace / retrieved chunk included in a judge prompt.
     artifact_max_chars: int = Field(default=DEFAULT_ARTIFACT_MAX_CHARS, ge=1_000)
-    # Relevance and completion are mandatory. The other Agent metrics can be disabled here and
-    # overridden per UI run. Enabled optional metrics become not_applicable when the response
-    # does not expose the tool/retrieval information they require.
-    agent_metrics: list[AgentMetric] = Field(default_factory=lambda: list(DEFAULT_AGENT_METRICS))
+    # Custom metric input bounds (free text + workbook), checked before the compiler call.
+    max_custom_metrics: int = Field(default=20, ge=1, le=100)
+    max_custom_metric_chars: int = Field(default=2_000, ge=50)
+    max_custom_metric_rows: int = Field(default=200, ge=1)
 
     @model_validator(mode="after")
-    def _valid_agent_metrics(self) -> Self:
-        normalized = normalize_agent_metrics(self.agent_metrics)
-        object.__setattr__(self, "agent_metrics", normalized)
+    def _known_default_metrics(self) -> Self:
+        known = builtin_ids()
+        unknown = [m for m in self.default_metrics if m not in known]
+        if unknown or len(set(self.default_metrics)) != len(self.default_metrics):
+            raise ValueError(
+                f"default_metrics must be distinct built-in metric ids ({', '.join(known)}); "
+                f"unknown: {unknown}"
+            )
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed(cls, data: Any) -> Any:
+        return _refuse_removed(
+            data,
+            {
+                "agent_metrics": "metrics are chosen per run (default_metrics / the Evaluation "
+                "tab); there are no evaluation profiles",
+                "ignore_dummy_cg_id_filter": "use ignored_sql_predicates, e.g. "
+                "[\"cg_id IN ('DUMMY')\"]",
+            },
+            "evaluation",
+        )
 
 
 class TraceSettings(_Section):
@@ -167,21 +202,24 @@ class ScenarioGenerationSettings(_Section):
     scenario_count: int = Field(default=10, ge=1)
     include_unsupported_scenarios: bool = True
     diversity_preference: str = Field(default="balanced", min_length=1)
-    max_topup_rounds: int = Field(default=1, ge=0)
-    # Bounded representative SME examples sent to scenario generation when uploaded.
-    agent_golden_examples: int = Field(default=12, ge=1, le=50)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed(cls, data: Any) -> Any:
+        return _refuse_removed(
+            data,
+            {
+                "max_topup_rounds": "scenario generation is one LLM call (no top-up rounds)",
+                "agent_golden_examples": "the golden set was removed",
+            },
+            "generation.scenario",
+        )
 
 
 class QuestionGenerationSettings(_Section):
     question_count: int = Field(default=1, ge=1)
-    # Golden-guided runs default to this value and reject larger per-scenario batches.
-    agent_golden_max_questions_per_scenario: int = Field(default=2, ge=1)
-    # Most relevant SME examples sent to each question-generation call when uploaded.
-    agent_golden_examples: int = Field(default=6, ge=1, le=20)
-    # Minimum operational breadth for supported golden-guided Agent questions. Complexity
-    # overrides can raise these per run; unsupported scenarios are exempt.
-    agent_min_tool_calls: int = Field(default=1, ge=0, le=12)
-    agent_min_data_sources: int = Field(default=1, ge=0, le=2)
+    # Internal: concurrent per-scenario question-generation calls (not a UI control).
+    max_parallel_scenarios: int = Field(default=5, ge=1, le=64)
     # Hard policy: persona preferences can shape a question only inside these limits.
     max_deliverables: int = Field(default=2, ge=1, le=MAX_DELIVERABLES)
     max_sources: int = Field(default=1, ge=0, le=2)
@@ -197,7 +235,23 @@ class QuestionGenerationSettings(_Section):
     language: str = Field(default="en", min_length=1)
     allow_vague_questions: bool = False
     reject_reference_leaks: bool = True
-    near_duplicate_threshold: float = Field(default=0.8, gt=0.0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed(cls, data: Any) -> Any:
+        golden = "the golden set was removed"
+        return _refuse_removed(
+            data,
+            {
+                "agent_golden_max_questions_per_scenario": golden,
+                "agent_golden_examples": golden,
+                "agent_min_tool_calls": "tool expectations come from the selected metrics",
+                "agent_min_data_sources": "tool expectations come from the selected metrics",
+                "near_duplicate_threshold": "only exact duplicates are rejected (no similarity "
+                "heuristics)",
+            },
+            "generation.question",
+        )
 
 
 class GenerationSettings(_Section):

@@ -1,33 +1,34 @@
-"""Profile-specific evaluation of one product execution.
+"""Evaluation of one product execution against the run's frozen metric configuration.
 
-NL2SQL judges semantic correctness, rules adherence, and schema faithfulness. Agent always
-judges relevance and completion against the question's expected behaviour and success criteria;
-tool/context metrics are optional and apply only when the response exposes their telemetry.
+No evaluation profiles: every selected metric gets exactly one ``MetricResult`` keyed by its
+metric id, with an explicit status when it was not scored (the status taxonomy below). Two
+separate result columns describe the response: ``product_outcome`` (the executor's typed
+transport result, never overwritten) and ``response_classification`` (its semantic kind).
 
-Clarifications, denials, errors, and timeouts are recorded without a verdict.
+Error, timeout and unresolved clarification are recorded only (no judge call, verdict None).
+A substantive typed denial IS judged (schema_version 2); earlier artifacts (schema_version 1)
+recorded denials only and stay readable unchanged.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Self
+from typing import Any, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
-from synthetic_user.models.evaluation_profile import AgentMetric, EvaluationProfile
-from synthetic_user.models.execution import ProductOutcome
+from synthetic_user.models.execution import ProductOutcome, ResponseClassification
+from synthetic_user.models.metrics import JUDGED_SCALE, JudgeGroup
 from synthetic_user.models.run import GenerationMode
 
-# Outcomes that are recorded but not judged: verdict None exactly for these.
+EVALUATION_SCHEMA_VERSION = 2
+# Outcomes that are recorded but never judged (verdict None exactly for these).
 RECORDED_ONLY_OUTCOMES = frozenset(
-    {
-        ProductOutcome.CLARIFICATION,
-        ProductOutcome.DENIED,
-        ProductOutcome.ERROR,
-        ProductOutcome.TIMEOUT,
-    }
+    {ProductOutcome.CLARIFICATION, ProductOutcome.ERROR, ProductOutcome.TIMEOUT}
 )
+# Before schema 2 a typed denial was recorded only as well.
+LEGACY_RECORDED_ONLY_OUTCOMES = RECORDED_ONLY_OUTCOMES | {ProductOutcome.DENIED}
 
 
 class Verdict(StrEnum):
@@ -72,64 +73,44 @@ class EvaluationStatus(StrEnum):
     RECORDED_ONLY = "recorded_only"
 
 
-class MetricName(StrEnum):
-    SEMANTIC_CORRECTNESS = "semantic_correctness"
-    RULES_ADHERENCE = "rules_adherence"
-    SCHEMA_FAITHFULNESS = "schema_faithfulness"
-    RELEVANCE = "relevance"
-    COMPLETION = "completion"
-    TOOL_SELECTION = "tool_selection"
-    FAITHFULNESS = "faithfulness"
-    CONTEXT_PRECISION = "context_precision"
-    CONTEXT_RECALL = "context_recall"
-
-
-# All three diagnostic metrics are higher-is-better and are reported everywhere.
-LOWER_IS_BETTER: frozenset[MetricName] = frozenset()
-REPORTED_METRICS = tuple(MetricName)
-NL2SQL_METRICS = (
-    MetricName.SEMANTIC_CORRECTNESS,
-    MetricName.RULES_ADHERENCE,
-    MetricName.SCHEMA_FAITHFULNESS,
-)
-AGENT_REQUIRED_METRICS = (
-    MetricName.RELEVANCE,
-    MetricName.COMPLETION,
-)
-AGENT_METRICS = tuple(MetricName(metric.value) for metric in AgentMetric)
-
-
-# Metric names written by earlier versions; migrated on read, never written again.
-_LEGACY_METRIC_NAMES = (
-    "relevancy",
-    "accuracy",
-    "correctness",
-    "completeness",
-    "task_completion",
-    "groundedness",
-    "hallucination_rate",
-)
-
-
-def metrics_for_profile(profile: EvaluationProfile) -> tuple[MetricName, ...]:
-    return AGENT_METRICS if profile is EvaluationProfile.AGENT else NL2SQL_METRICS
+class ClassificationSource(StrEnum):
+    TYPED_OUTCOME = "typed_outcome"  # denial / clarification outcome of the executor
+    ADAPTER = "adapter"  # the adapter's typed response-kind mapping
+    GENERAL_JUDGE = "general_judge"  # returned within the normal General Judge call
+    UNRESOLVED = "unresolved"  # no typed field and no general judge call
 
 
 class MetricStatus(StrEnum):
     SCORED = "scored"
-    INCONCLUSIVE = "inconclusive"  # applies, but could not be decided
-    NOT_APPLICABLE = "not_applicable"  # enabled, but required evidence/telemetry is absent
+    NOT_APPLICABLE = "not_applicable"  # genuinely irrelevant for this question / response
+    CANNOT_GENERATE = "cannot_generate"  # the required question expectation is absent
+    EVIDENCE_UNAVAILABLE = "evidence_unavailable"  # applicable, but telemetry / context missing
+    INCONCLUSIVE = "inconclusive"  # the judge could not decide despite the evidence
+    EVALUATION_ERROR = "evaluation_error"  # judge / parse / API failure
+    NOT_ENABLED = "not_enabled"  # not selected for the run (reporting only)
+    # Selected custom metric whose definition could not be compiled (reason kept).
+    UNAVAILABLE = "unavailable"
+
+
+# Non-scored statuses: never averaged and never turned into 0 or 1.
+NON_SCORED_STATUSES = tuple(s for s in MetricStatus if s is not MetricStatus.SCORED)
 
 
 class MetricResult(StrictModel):
     status: MetricStatus
     score: float | None = Field(default=None, ge=0.0, le=1.0)
-    rationale: NonEmptyStr
-    evidence: str | None = None  # exact quote from the response, if any
-    # Defaults keep historical run artifacts readable. New judgements populate these so the
-    # score drawer can show strengths and gaps separately instead of burying both in rationale.
+    rationale: NonEmptyStr  # the judge's reason, or why the metric was not scored
+    evidence: str | None = None  # exact quote from the response / SQL / chunk, if any
     what_worked: list[NonEmptyStr] = Field(default_factory=list)
     what_didnt: list[NonEmptyStr] = Field(default_factory=list)
+    judge_group: JudgeGroup | None = None
+    # Non-scored results: what was missing and which component failed.
+    missing_requirement: NonEmptyStr | None = None
+    failure_source: NonEmptyStr | None = None
+    # Retrieved chunk ids / source ids / tool-call orders the result relied on.
+    evidence_refs: list[NonEmptyStr] = Field(default_factory=list)
+    # Metric-specific transparency (e.g. MRR first relevant rank, recall checklist coverage).
+    details: dict[NonEmptyStr, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _score_iff_scored(self) -> Self:
@@ -138,89 +119,13 @@ class MetricResult(StrictModel):
         return self
 
 
-class Metrics(StrictModel):
-    semantic_correctness: MetricResult | None = None
-    rules_adherence: MetricResult | None = None
-    schema_faithfulness: MetricResult | None = None
-    relevance: MetricResult | None = None
-    completion: MetricResult | None = None
-    tool_selection: MetricResult | None = None
-    faithfulness: MetricResult | None = None
-    context_precision: MetricResult | None = None
-    context_recall: MetricResult | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _read_legacy_metrics(cls, value: Any) -> Any:
-        """Old run artifacts remain readable; new dumps use profile-specific names."""
-        if isinstance(value, dict):
-            data = dict(value)
-            # Former VoC fields map into the general Agent evaluator. The old retrieval metric
-            # combined operation/source selection, so tool_selection is the closest migration.
-            if "answer_relevance" in data:
-                data.setdefault("relevance", data.pop("answer_relevance"))
-            if "answer_completeness" in data:
-                data.setdefault("completion", data.pop("answer_completeness"))
-            if "retrieval_faithfulness" in data:
-                data.setdefault("tool_selection", data.pop("retrieval_faithfulness"))
-            if any(name.value in data for name in AGENT_METRICS):
-                return data
-            data.setdefault(
-                "semantic_correctness",
-                data.get(
-                    "accuracy",
-                    data.get(
-                        "correctness",
-                        data.get("completeness", data.get("task_completion")),
-                    ),
-                ),
-            )
-            data.setdefault(
-                "rules_adherence",
-                {
-                    "status": "not_applicable",
-                    "score": None,
-                    "rationale": "rules adherence was not separately evaluated in this run",
-                },
-            )
-            data.setdefault(
-                "schema_faithfulness",
-                data.get(
-                    "faithfulness",
-                    {
-                        "status": "not_applicable",
-                        "score": None,
-                        "rationale": "schema faithfulness was not computed by this run",
-                    },
-                ),
-            )
-            # The legacy values were migrated above; drop their old names so strict models
-            # (extra="forbid") can still read the artifact.
-            for legacy_name in _LEGACY_METRIC_NAMES:
-                data.pop(legacy_name, None)
-            return data
-        return value
-
-    @model_validator(mode="after")
-    def _has_metrics(self) -> Self:
-        if not self.by_name():
-            raise ValueError("at least one evaluation metric is required")
-        return self
-
-    def by_name(self) -> dict[MetricName, MetricResult]:
-        return {
-            name: result for name in MetricName if (result := getattr(self, name.value)) is not None
-        }
-
-
 class Finding(StrictModel):
     finding_id: NonEmptyStr = Field(pattern=r"^F_\d{3,}$")
-    category: NonEmptyStr  # a metric name (or a plugin check, when plugins are connected)
+    category: NonEmptyStr  # the metric id this finding explains
     description: NonEmptyStr
     expected_behavior: NonEmptyStr
     observed_behavior: NonEmptyStr
-    # Exact quote copied from the product response (text or an artifact such as SQL).
-    evidence: str | None = None
+    evidence: str | None = None  # exact quote from the response, SQL, tool trace or a chunk
     severity: Severity
     confidence: float | None = Field(
         default=None, ge=0.0, le=1.0, description="uncalibrated; None when not estimated"
@@ -235,19 +140,22 @@ class Finding(StrictModel):
     @classmethod
     def _read_legacy_category(cls, value: Any) -> Any:
         if isinstance(value, dict):
-            legacy = {
-                "relevancy": "semantic_correctness",
-                "accuracy": "semantic_correctness",
-                "correctness": "semantic_correctness",
-                "completeness": "semantic_correctness",
-                "answer_relevance": "relevance",
-                "answer_completeness": "completion",
-                "retrieval_faithfulness": "tool_selection",
-            }
             category = value.get("category")
-            if category in legacy:
-                return {**value, "category": legacy[category]}
+            if category in _LEGACY_FINDING_CATEGORIES:
+                return {**value, "category": _LEGACY_FINDING_CATEGORIES[category]}
         return value
+
+
+# Category names written before the VoC -> Agent and metric renames (kept as written then).
+_LEGACY_FINDING_CATEGORIES = {
+    "relevancy": "semantic_correctness",
+    "accuracy": "semantic_correctness",
+    "correctness": "semantic_correctness",
+    "completeness": "semantic_correctness",
+    "answer_relevance": "relevance",
+    "answer_completeness": "completion",
+    "retrieval_faithfulness": "tool_selection",
+}
 
 
 class CriterionStatus(StrEnum):
@@ -263,7 +171,9 @@ class CriterionResult(StrictModel):
     criterion: NonEmptyStr
     status: CriterionStatus
     rationale: NonEmptyStr
-    evidence: str | None = None  # exact quote from the response, if any
+    evidence: str | None = None
+    # The selected metric this criterion feeds (None in older artifacts).
+    metric_id: NonEmptyStr | None = None
 
 
 class BugCandidate(StrictModel):
@@ -280,51 +190,50 @@ class BugCandidate(StrictModel):
 
 
 class EvaluationResult(StrictModel):
+    schema_version: int = Field(default=EVALUATION_SCHEMA_VERSION, ge=1)
     evaluation_id: NonEmptyStr = Field(pattern=r"^EVAL_\d{3,}$")
     question_id: NonEmptyStr
     scenario_id: NonEmptyStr
     execution_id: NonEmptyStr
     product_outcome: ProductOutcome
+    response_classification: ResponseClassification | None = None
+    classification_source: ClassificationSource | None = None
+    classification_note: NonEmptyStr | None = None
     mode: GenerationMode
-    evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL
+    metric_config_id: NonEmptyStr | None = None
+    # Profile of a schema-1 evaluation, kept as a label for legacy reports only.
+    legacy_evaluation_profile: NonEmptyStr | None = None
     verdict: Verdict | None
+    verdict_policy: NonEmptyStr | None = None
     evaluation_status: EvaluationStatus
-    metrics: Metrics | None = None
+    # Keyed by metric id: every selected metric for an evaluated response; empty otherwise.
+    metrics: dict[NonEmptyStr, MetricResult] = Field(default_factory=dict)
     criteria_results: list[CriterionResult] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
     bug_candidates: list[BugCandidate] = Field(default_factory=list)
-    llm_verdict: Verdict | None = None  # the judge's own opinion; never decisive
+    llm_verdict: Verdict | None = None  # the general judge's own opinion; never decisive
     notes: list[NonEmptyStr] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_legacy_claims(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            data = {key: item for key, item in value.items() if key != "claims"}
-            # Before Agent existed, a generic "faithfulness" finding meant NL2SQL schema
-            # faithfulness. Preserve that migration only for NL2SQL artifacts; Agent
-            # faithfulness is now a first-class metric and must keep its name.
-            profile = EvaluationProfile(data.get("evaluation_profile", "nl2sql"))
-            if profile is EvaluationProfile.NL2SQL:
-                data["findings"] = [
-                    {
-                        **finding,
-                        "category": "schema_faithfulness",
-                    }
-                    if isinstance(finding, dict) and finding.get("category") == "faithfulness"
-                    else finding
-                    for finding in data.get("findings", [])
-                ]
-            return data
-        return value
+    def _read_legacy(cls, value: Any) -> Any:
+        """Stored schema-1 artifacts carry neither a schema_version nor a metric config id."""
+        if not isinstance(value, dict) or "schema_version" in value or "metric_config_id" in value:
+            return value
+        return migrate_legacy_evaluation(value)
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        recorded_outcome = self.product_outcome in RECORDED_ONLY_OUTCOMES
+        recorded_outcomes = (
+            RECORDED_ONLY_OUTCOMES
+            if self.schema_version >= EVALUATION_SCHEMA_VERSION
+            else LEGACY_RECORDED_ONLY_OUTCOMES
+        )
+        recorded_outcome = self.product_outcome in recorded_outcomes
         if recorded_outcome and self.verdict is not None:
             raise ValueError(f"{self.product_outcome} responses are recorded only (no verdict)")
         if not recorded_outcome and self.verdict is None:
-            raise ValueError("an answered response needs a verdict")
+            raise ValueError(f"an evaluable {self.product_outcome} response needs a verdict")
         recorded_only = self.evaluation_status is EvaluationStatus.RECORDED_ONLY
         if recorded_only != (self.verdict is None):
             raise ValueError("evaluation_status is recorded_only exactly when verdict is None")
@@ -333,29 +242,76 @@ class EvaluationResult(StrictModel):
             unknown = sorted(set(bug.finding_ids) - finding_ids)
             if unknown:
                 raise ValueError(f"{bug.bug_id} references unknown findings {unknown}")
-        if self.metrics is not None:
-            actual = set(self.metrics.by_name())
-            if self.evaluation_profile is EvaluationProfile.NL2SQL:
-                valid = actual == set(NL2SQL_METRICS)
-                requirement = f"exactly {sorted(m.value for m in NL2SQL_METRICS)}"
-            else:
-                valid = set(AGENT_REQUIRED_METRICS) <= actual <= set(AGENT_METRICS)
-                requirement = (
-                    f"required {sorted(m.value for m in AGENT_REQUIRED_METRICS)} plus any "
-                    f"enabled subset of {sorted(m.value for m in AGENT_METRICS)}"
-                )
-            if not valid:
-                raise ValueError(
-                    f"{self.evaluation_profile} evaluations require {requirement}, got "
-                    f"{sorted(m.value for m in actual)}"
-                )
         return self
 
 
-# --- LLM-facing draft (answers only) ---------------------------------------------------------
+def migrate_legacy_evaluation(old: dict[str, Any]) -> dict[str, Any]:
+    """Schema-1 evaluation (NL2SQL / Agent profile era) -> current shape, read-only.
+
+    Metric results keep their ORIGINAL ids (``completion``, ``tool_selection``, ...): they were
+    judged under the old rubrics and are never relabelled as new metrics. The profile is kept
+    as a label. Very old metric names are migrated the way the previous readers did.
+    """
+    data = {key: item for key, item in old.items() if key != "claims"}
+    profile = data.pop("evaluation_profile", None)
+    profile_name = "nl2sql" if profile in (None, "nl2sql") else "agent"
+    data["schema_version"] = 1
+    data["legacy_evaluation_profile"] = profile_name
+    metrics = data.get("metrics")
+    data["metrics"] = _legacy_metrics(metrics, profile_name) if isinstance(metrics, dict) else {}
+    if profile_name == "nl2sql":
+        # A generic "faithfulness" finding of that era meant NL2SQL schema faithfulness.
+        data["findings"] = [
+            {**finding, "category": "schema_faithfulness"}
+            if isinstance(finding, dict) and finding.get("category") == "faithfulness"
+            else finding
+            for finding in data.get("findings", [])
+        ]
+    return data
 
 
-JUDGED_SCORES = (0.0, 0.5, 1.0)
+_VERY_OLD_METRICS = (
+    "relevancy",
+    "accuracy",
+    "correctness",
+    "completeness",
+    "task_completion",
+    "groundedness",
+    "hallucination_rate",
+)
+
+
+def _legacy_metrics(metrics: dict[str, Any], profile: str) -> dict[str, Any]:
+    data = {name: result for name, result in metrics.items() if result is not None}
+    renamed = {
+        "answer_relevance": "relevance",
+        "answer_completeness": "completion",
+        "retrieval_faithfulness": "tool_selection",
+    }
+    for old, new in renamed.items():
+        if old in data:
+            data.setdefault(new, data.pop(old))
+    if profile == "nl2sql" and not {"relevance", "completion"} & set(data):
+        if "semantic_correctness" not in data:
+            for old in ("accuracy", "correctness", "completeness", "task_completion"):
+                if old in data:
+                    data["semantic_correctness"] = data[old]
+                    break
+        if "schema_faithfulness" not in data and "faithfulness" in data:
+            data["schema_faithfulness"] = data.pop("faithfulness")
+    for name in _VERY_OLD_METRICS:
+        data.pop(name, None)
+    return data
+
+
+# --- LLM-facing drafts (answers only; code assigns ids, statuses and verdicts) ---------------
+
+
+class FactualVerification(StrEnum):
+    VERIFIED = "verified"  # checked against trusted evidence supplied to the judge
+    PARTLY_VERIFIED = "partly_verified"
+    UNVERIFIED = "unverified"  # no trusted evidence: correctness is not asserted
+    NOT_APPLICABLE = "not_applicable"  # nothing factual to verify (e.g. a justified decline)
 
 
 class JudgedScore(StrictModel):
@@ -365,137 +321,92 @@ class JudgedScore(StrictModel):
     )
     rationale: NonEmptyStr
     evidence: str | None = Field(
-        default=None, description="exact quote copied from the product response, if any"
+        default=None, description="exact quote copied from the response / SQL / chunk, if any"
     )
-    what_worked: list[NonEmptyStr] = Field(
-        default_factory=list,
-        description="concise observable parts of the response that satisfied this metric",
+    evidence_ids: list[NonEmptyStr] = Field(
+        default_factory=list, description="retrieved chunk ids / tool-call orders relied on"
     )
-    what_didnt: list[NonEmptyStr] = Field(
-        default_factory=list,
-        description="concise observable gaps that prevented a perfect score",
-    )
+    what_worked: list[NonEmptyStr] = Field(default_factory=list)
+    what_didnt: list[NonEmptyStr] = Field(default_factory=list)
+    factual_verification: FactualVerification | None = None
 
     @model_validator(mode="after")
     def _three_levels(self) -> Self:
-        if self.score is not None and self.score not in JUDGED_SCORES:
+        if self.score is not None and self.score not in JUDGED_SCALE:
             raise ValueError(f"score must be 0, 0.5 or 1 (or null), not {self.score}")
         return self
 
 
 class FindingDraft(StrictModel):
-    category: NonEmptyStr = Field(description="the metric this finding explains")
+    category: NonEmptyStr = Field(description="the metric id this finding explains")
     description: NonEmptyStr
     expected_behavior: NonEmptyStr
     observed_behavior: NonEmptyStr
-    evidence: str | None = Field(
-        default=None, description="exact quote copied from the product response"
-    )
+    evidence: str | None = None
     severity: Severity
-    confidence: float | None = Field(
-        default=None, ge=0.0, le=1.0, description="uncalibrated; null if not estimated"
-    )
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     evidence_status: EvidenceStatus
     matches_known_gap: bool = False
-    related_tags: list[NonEmptyStr] = Field(
-        default_factory=list,
-        description="exact tags from the traceability catalog that this finding directly affects",
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _read_legacy_category(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            legacy = {
-                "relevancy": "semantic_correctness",
-                "accuracy": "semantic_correctness",
-                "correctness": "semantic_correctness",
-                "completeness": "semantic_correctness",
-            }
-            category = value.get("category")
-            if category in legacy:
-                return {**value, "category": legacy[category]}
-        return value
+    related_tags: list[NonEmptyStr] = Field(default_factory=list)
 
 
 class CriterionDraft(StrictModel):
     criterion: NonEmptyStr
     status: CriterionStatus
     rationale: NonEmptyStr
-    evidence: str | None = Field(default=None, description="exact quote from the response, if any")
+    evidence: str | None = None
+    metric_id: NonEmptyStr | None = None
 
 
-class EvaluationDraft(StrictModel):
-    """The judge's answer for one answered response; code turns it into metric scores."""
+class GeneralJudgeDraft(StrictModel):
+    """The General Judge's reply for one evaluable response."""
 
-    semantic_correctness: JudgedScore
-    rules_adherence: JudgedScore
-    schema_faithfulness: JudgedScore
+    # Required when code asks for it (answered payload without a typed response kind).
+    response_classification: Literal["answered", "unable_to_answer"] | None = None
+    classification_note: NonEmptyStr | None = None
+    metrics: dict[NonEmptyStr, JudgedScore]
     criteria: list[CriterionDraft] = Field(default_factory=list)
     findings: list[FindingDraft] = Field(default_factory=list)
-    overall_verdict: Verdict = Field(
-        description="your own overall opinion; recorded as llm_verdict, not decisive"
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _read_legacy_metrics(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        data = dict(value)
-        if "semantic_correctness" not in data:
-            data["semantic_correctness"] = data.get(
-                "accuracy",
-                data.get(
-                    "correctness",
-                    data.get("completeness", data.get("relevancy")),
-                ),
-            )
-        data.setdefault(
-            "rules_adherence",
-            {
-                "score": None,
-                "rationale": "rules adherence was not separately evaluated",
-                "what_worked": [],
-                "what_didnt": [],
-            },
-        )
-        if "schema_faithfulness" not in data:
-            data["schema_faithfulness"] = data.get(
-                "faithfulness",
-                {
-                    "score": None,
-                    "rationale": "schema faithfulness was not evaluated",
-                    "what_worked": [],
-                    "what_didnt": [],
-                },
-            )
-        for legacy_name in (
-            "relevancy",
-            "accuracy",
-            "correctness",
-            "completeness",
-            "faithfulness",
-        ):
-            data.pop(legacy_name, None)
-        return data
+    overall_verdict: Verdict
 
 
-class AgentEvaluationDraft(StrictModel):
-    """The judge's answer for one Agent response.
+class ChunkRelevanceDraft(StrictModel):
+    chunk_id: NonEmptyStr
+    relevant: bool
+    rationale: NonEmptyStr
 
-    Optional fields are required only when their metric is both enabled and observable for the
-    current response. Code injects not-applicable results without asking the judge to guess.
-    """
 
-    relevance: JudgedScore
-    completion: JudgedScore
-    tool_selection: JudgedScore | None = None
-    faithfulness: JudgedScore | None = None
-    context_precision: JudgedScore | None = None
-    context_recall: JudgedScore | None = None
-    criteria: list[CriterionDraft] = Field(default_factory=list)
+class CoverageStatus(StrEnum):
+    COVERED = "covered"
+    PARTLY = "partly"
+    NOT_COVERED = "not_covered"
+
+
+class RequiredInformationDraft(StrictModel):
+    item: NonEmptyStr  # copied exactly from required_information
+    status: CoverageStatus
+    chunk_ids: list[NonEmptyStr] = Field(default_factory=list)
+    rationale: NonEmptyStr
+
+
+class SupportStatus(StrEnum):
+    SUPPORTED = "supported"
+    PARTLY = "partly"
+    UNSUPPORTED = "unsupported"
+
+
+class CitationCheckDraft(StrictModel):
+    citation: NonEmptyStr  # the citation id (or "#<n>" for the n-th listed citation)
+    chunk_id: NonEmptyStr | None = None
+    support: SupportStatus
+    rationale: NonEmptyStr
+
+
+class RetrievalJudgeDraft(StrictModel):
+    """The Retrieval/Grounding Judge's reply; MRR is computed by code from chunk_relevance."""
+
+    metrics: dict[NonEmptyStr, JudgedScore] = Field(default_factory=dict)
+    chunk_relevance: list[ChunkRelevanceDraft] = Field(default_factory=list)
+    required_information: list[RequiredInformationDraft] = Field(default_factory=list)
+    citation_checks: list[CitationCheckDraft] = Field(default_factory=list)
     findings: list[FindingDraft] = Field(default_factory=list)
-    overall_verdict: Verdict = Field(
-        description="your own overall opinion; recorded as llm_verdict, not decisive"
-    )

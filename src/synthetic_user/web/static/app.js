@@ -1,38 +1,24 @@
 "use strict";
-// Synthetic User web UI (D199, D201, D207): workflow pages + test report over the JSON API.
+// Synthetic User web UI (D199, D201, D211): workflow pages + test report over the JSON API.
+// Metrics are chosen per run in the Evaluation tab (no evaluation profiles); the metric catalog,
+// labels and statuses come from the server (/api/config, the run's frozen metric_config).
 // All data is inserted with textContent / DOM nodes (never innerHTML): inputs are untrusted.
 
 const STEPS = ["scenarios", "questions", "execute", "evaluate"];
 const VIEWS = ["setup", "evaluation", "connect", "run", "report"];
-const NL2SQL_METRICS = ["semantic_correctness", "rules_adherence", "schema_faithfulness"];
-const AGENT_METRICS = ["relevance", "completion", "tool_selection", "faithfulness", "context_precision", "context_recall"];
-const REQUIRED_AGENT_METRICS = ["relevance", "completion"];
-const METRIC_ORDER = [...NL2SQL_METRICS, ...AGENT_METRICS];
-const METRIC_INFO = {
-  semantic_correctness: { label: "Semantic Correctness", short: "Semantic", inputs: "Question, clarified request, expected behaviour, and behavioural success criteria", help: "Does the SQL produce the requested result and meet the behavioural criteria?" },
-  rules_adherence: { label: "Rules Adherence", short: "Rules", inputs: "Applicable table/business rules, selected rules, and documented joins", help: "Does the SQL follow applicable business/table rules and documented joins?" },
-  schema_faithfulness: { label: "Schema Faithfulness", short: "Schema", inputs: "Explicit table and column names vs the allowed reference schema only", help: "Does the SQL use only allowed table and column names?" },
-  relevance: { label: "Relevance", short: "Relevant", inputs: "Question and expected behaviour vs final answer", help: "Does the final answer directly address the user's request or appropriately explain why it cannot?" },
-  completion: { label: "Completion", short: "Complete", inputs: "Expected behaviour, success criteria and prohibited behaviour vs response/actions", help: "Does the response complete every requested output and action?" },
-  tool_selection: { label: "Tool Selection", short: "Tools", inputs: "Expected tools and data sources vs exposed tool calls", help: "Were the right tools, operations, sources, arguments, filters, and boundaries selected?" },
-  faithfulness: { label: "Faithfulness", short: "Faithful", inputs: "Final claims vs expected and exposed context/tool results", help: "Are material answer claims supported by exposed retrieved context or tool results?" },
-  context_precision: { label: "Context Precision", short: "Precision", inputs: "Exposed context vs question, expected sources and expected evidence", help: "Is the exposed retrieved context focused and relevant to the request?" },
-  context_recall: { label: "Context Recall", short: "Recall", inputs: "Exposed context vs expected sources, evidence and success criteria", help: "Does the exposed retrieved context cover the necessary expected information?" },
+const NON_SCORED_LABELS = {
+  not_applicable: "n/a", cannot_generate: "no expectation", evidence_unavailable: "no evidence",
+  inconclusive: "?", evaluation_error: "error", unavailable: "unavailable", not_enabled: "off",
 };
-const PROFILE_OPTIONS = [
-  { id: "auto", label: "Auto-select" },
-  { id: "nl2sql", label: "NL2SQL", desc: "Manually use the SQL evaluation parameters for this run." },
-  { id: "agent", label: "Agent", desc: "Judge response quality and, when exposed, tools, grounding, and retrieved context." },
-];
 const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
 const OUTCOME_LABELS = { answered: "answered", clarification: "asked to clarify", denied: "declined", error: "error", timeout: "timed out" };
-const SOURCE_LABELS = { persona: "Persona", product: "Product description", golden_set: "Golden set", reference: "Reference data", reference_guide: "Usage instructions" };
-const SQL_PATTERN = /\bsql\b|structured query language/i;
+const SOURCE_LABELS = { persona: "Persona", product: "Product description", reference: "Reference data", reference_guide: "Usage instructions", custom_metrics: "Custom metric workbook" };
 
 const state = {
   config: null, samples: {}, personaSource: "sample", useReference: false, instructionsSource: "none", uploads: {},
-  questionComplexity: "", profileSelection: "auto", agentMetrics: new Set(REQUIRED_AGENT_METRICS),
+  questionComplexity: "", selectedMetrics: new Set(), contextSource: "response_field",
   runId: null, run: null, rows: [], scenarios: [], packs: [], evaluations: [], executions: [], kpis: null, issues: null,
+  questions: [], metricConfig: null, metricIds: [],
   filter: "all", filterIds: null, filterLabel: "", search: "", allColumns: false, breakdownBy: "by_task_type", busy: false,
   contractSource: "upload", contractFile: null, recent: [],
 };
@@ -67,7 +53,15 @@ const ms = (v) => (v == null ? "—" : v >= 1000 ? `${(v / 1000).toFixed(1)} s` 
 const when = (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); } catch (err) { return iso; } };
 const fileName = (source) => (source || "").replace(/^uploaded: /, "");
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const metricLabel = (m) => (METRIC_INFO[m] ? METRIC_INFO[m].label : human(m));
+function metricDef(m) {
+  const frozen = state.metricConfig && state.metricConfig.definitions.find((d) => d.metric_id === m);
+  if (frozen) return { label: frozen.display_name, help: frozen.description, category: frozen.category };
+  const builtin = state.config && state.config.metric_catalog.find((d) => d.id === m);
+  if (builtin) return { label: builtin.display_name, help: builtin.description, category: builtin.category };
+  const kpi = state.kpis && state.kpis.metrics.find((x) => x.metric === m);
+  return { label: (kpi && kpi.display_name) || human(m), help: "", category: kpi ? kpi.category : "" };
+}
+const metricLabel = (m) => metricDef(m).label;
 const list = (items) => (items && items.length ? el("ul", {}, items.map((i) => el("li", {}, i))) : el("span", { class: "muted", text: "—" }));
 // CSV cells list several items as "• item" lines (items may span lines, e.g. SQL).
 const split = (value) => {
@@ -112,7 +106,7 @@ async function withBusy(label, fn) {
   $("#busy-line").classList.add("on");
   updateUi();
   try { await fn(); } catch (err) { log(`${label} failed: ${err.message}`, true); toast(`${label} failed: ${err.message}`, "error"); }
-  finally { state.busy = false; $("#busy-line").classList.remove("on"); renderProfile(); updateUi(); }
+  finally { state.busy = false; $("#busy-line").classList.remove("on"); renderEvaluation(); updateUi(); }
 }
 
 // --- views ------------------------------------------------------------------------------------
@@ -146,15 +140,13 @@ function previewOf(kind, d) {
     const counts = d.kind === "data_catalog"
       ? `${plural(d.tables, "table")}, ${plural(d.relationships, "relationship")}, ${plural(d.rules, "rule")}`
       : plural(d.documents, "document");
-    const agent = d.agent_tools == null ? "none · NL2SQL only"
+    const agent = d.agent_tools == null ? "none (Tool Correctness cannot generate expectations)"
       : `${plural(d.agent_tools, "tool")}, ${plural(d.agent_data_sources, "data source")}, ${plural(d.agent_workflow_stages, "workflow stage")}`;
-    return kvList([["Format", human(d.kind)], ["Name", d.name], ["Contents", counts], ["Agent context", agent], ["Reference id", d.reference_id], ["Size", `${d.chars.toLocaleString()} characters`]]);
+    return kvList([["Format", human(d.kind)], ["Name", d.name], ["Contents", counts], ["Tool definitions", agent], ["Reference id", d.reference_id], ["Size", `${d.chars.toLocaleString()} characters`]]);
   }
-  if (kind === "golden_set") {
-    const ids = d.case_ids.length > 8 ? `${d.case_ids.slice(0, 8).join(", ")} … (+${d.case_ids.length - 8})` : d.case_ids.join(", ");
-    return kvList([["Source", d.source_name], ["Cases", String(d.cases)], ["Case ids", ids], ["Fields used", d.fields_used.map(human)],
-      ["Uploaded criteria", d.uploaded_criteria_fields], ["Expected tools", `${d.cases_with_expected_tools} of ${d.cases} case(s)`],
-      ["Expected sources", `${d.cases_with_expected_data_sources} of ${d.cases} case(s)`]]);
+  if (kind === "custom_metrics") {
+    return kvList([["Workbook", d.source_name], ["Metrics", d.metrics.map((m) => `${m.provenance}: ${m.text}`)],
+      ["Row problems", d.errors.map((e) => `${e.provenance}: ${e.reason}`)]]);
   }
   return kvList([["Instructions", d.name], ["Size", `${d.chars.toLocaleString()} characters`]]);
 }
@@ -183,10 +175,7 @@ function renderInput(kind) {
   const source = $(".source", root);
   source.className = input ? "source ok" : "source";
   source.replaceChildren(...(input ? [icon("check"), input.label] : []));
-  if (kind === "golden_set") {
-    if (input) box.replaceChildren(previewOf(kind, input.preview.parsed));
-    else box.replaceChildren(el("p", { class: "help golden-help", text: GOLDEN_HELP }));
-  } else if (input) {
+  if (input) {
     const children = [previewOf(kind, input.preview.parsed)];
     if (input.preview.raw) children.push(el("details", { class: "raw" }, el("summary", { text: kind === "persona" || kind === "product" ? "View YAML" : "View file" }), el("pre", { text: input.preview.raw })));
     box.replaceChildren(...children);
@@ -205,17 +194,11 @@ function renderInput(kind) {
     renderComplexityOptions();
   }
   if (kind === "reference") $("#reference-clear").classList.toggle("hidden", !(state.uploads.reference && sample("reference")));
-  if (kind === "golden_set") {
-    const status = $("[data-status-for=golden_set]");
-    status.className = `pill ${input ? "pill-ok" : "pill-neutral"}`;
-    status.textContent = input ? `${input.preview.parsed.cases} case(s)` : "Optional";
-    $("#golden-clear").classList.toggle("hidden", !state.uploads.golden_set);
-  }
+  if (kind === "custom_metrics") $("#custom-clear").classList.toggle("hidden", !state.uploads.custom_metrics);
   if (kind === "persona") renderComplexityOptions();
-  renderProfile();
-  updateUi(); // also the sidebar: an uploaded product can change the auto-selected profile
+  renderEvaluation();
+  updateUi();
 }
-const GOLDEN_HELP = "When uploaded, the golden set teaches realistic intent, expected-behaviour and success-criteria patterns for both NL2SQL and Agent runs. It is combined with Persona, Product and authoritative Reference data to generate new scenarios and questions; it never replaces Reference data and its questions are not replayed. Without a golden set, the pipeline generates normally from Persona, Product and Reference.";
 
 async function onFile(kind, file) {
   if (!file) return;
@@ -293,99 +276,53 @@ function renderComplexityOptions() {
   select.value = state.questionComplexity;
 }
 
-// --- evaluation profile -----------------------------------------------------------------------
-function autoProfile() {
-  const product = currentInput("product");
-  if (!product) return { profile: null, reason: "Chosen from the product description when the run starts." };
-  const d = product.preview.parsed;
-  if (SQL_PATTERN.test((d.expected_outputs || []).join(" "))) return { profile: "nl2sql", reason: "NL2SQL is auto-selected because the product's expected outputs explicitly require SQL." };
-  if (SQL_PATTERN.test([d.description, ...(d.supported || []), ...(d.user_visible_capabilities || [])].join(" "))) return { profile: "nl2sql", reason: "NL2SQL is auto-selected because the product description and capabilities mention SQL." };
-  return { profile: "agent", reason: "Agent is auto-selected because the product does not explicitly require SQL output." };
+// --- evaluation (run-level metric selection) --------------------------------------------------
+function catalog() { return (state.config && state.config.metric_catalog) || []; }
+function customGiven() { return Boolean($("#custom-metrics-text").value.trim() || state.uploads.custom_metrics); }
+function frozenSelection() { return state.run && state.run.metric_selection; }
+// Metrics whose evidence is retrieved context: the connection page then asks for its source.
+function needsContext() {
+  if (state.metricConfig) return state.metricConfig.definitions.some((d) => (d.required_execution_evidence || []).some((k) => ["retrieved_context", "ranked_context", "citations", "grounding_evidence"].includes(k)));
+  const ids = frozenSelection() ? frozenSelection().selected_metrics : [...state.selectedMetrics];
+  return catalog().some((m) => m.needs_context && ids.includes(m.id));
 }
-function selectedProfile() { return state.profileSelection === "auto" ? autoProfile().profile : state.profileSelection; }
-function profileEnabled(id) {
-  if (id === "auto") return true;
-  const profiles = (state.config && state.config.evaluation_profiles) || [];
-  const entry = profiles.find((p) => p.id === id);
-  return !entry || entry.enabled;
-}
-function selectedMetrics() { return AGENT_METRICS.filter((m) => state.agentMetrics.has(m)); }
-function runMetrics(run) { return run.evaluation_profile === "agent" ? run.agent_metrics : NL2SQL_METRICS; }
-function profileDiffers() {
-  if (!state.run) return false;
-  if (state.run.evaluation_profile_selection !== state.profileSelection) return true;
-  const profile = state.profileSelection === "auto" ? state.run.evaluation_profile : state.profileSelection;
-  return profile === "agent" && selectedMetrics().join() !== state.run.agent_metrics.join();
-}
-function paramCount(profile) { return profile === "agent" ? selectedMetrics().length : NL2SQL_METRICS.length; }
 
-function renderProfile() {
+function renderEvaluation() {
   if (!state.config) return;
-  const auto = autoProfile();
-  const box = $("#profile-options");
-  box.replaceChildren(...PROFILE_OPTIONS.map((opt) => {
-    const enabled = profileEnabled(opt.id);
-    const radio = el("input", { type: "radio", name: "profile", value: opt.id, disabled: !enabled || state.busy ? "" : null });
-    radio.checked = state.profileSelection === opt.id;
-    radio.addEventListener("change", () => { state.profileSelection = opt.id; renderProfile(); updateUi(); });
-    const desc = opt.id === "auto" ? auto.reason : opt.desc;
-    const badge = opt.id === "auto" ? pill("Recommended", "blue") : pill(enabled ? "Enabled" : "Disabled", enabled ? "ok" : "neutral");
-    return el("label", { class: `profile-option${state.profileSelection === opt.id ? " on" : ""}${enabled ? "" : " disabled"}` },
-      radio, el("div", { class: "profile-text" }, el("b", { text: opt.label }), el("small", { text: desc })), badge);
-  }));
-  const profile = selectedProfile();
-  const pillNode = $("#profile-pill");
-  pillNode.replaceChildren(...(profile ? [icon("check"), `${profile.toUpperCase()} ${state.profileSelection === "auto" ? "auto-selected" : "selected"}`] : ["Profile chosen at start"]));
-  pillNode.className = `pill ${profile ? "pill-ok" : "pill-neutral"}`;
-
-  // callout: active run vs next run
-  const name = (p) => (p ? p.toUpperCase() : "AUTO");
-  const reason = state.profileSelection === "auto" ? auto.reason : `${name(profile)} was selected by the user.`;
+  const frozen = frozenSelection();
+  const chosen = new Set(frozen ? frozen.selected_metrics : [...state.selectedMetrics]);
+  const labels = state.config.metric_categories || {};
+  const groups = {};
+  for (const m of catalog()) (groups[m.category] = groups[m.category] || []).push(m);
+  $("#metric-groups").replaceChildren(...Object.entries(groups).map(([category, metrics]) => el("div", { class: "metric-group" },
+    el("h3", { text: labels[category] || human(category) }),
+    el("div", { class: "param-grid" }, metrics.map((m) => {
+      const box = el("input", { type: "checkbox", disabled: frozen || state.busy ? "" : null });
+      box.checked = chosen.has(m.id);
+      box.addEventListener("change", () => { if (box.checked) state.selectedMetrics.add(m.id); else state.selectedMetrics.delete(m.id); renderEvaluation(); updateUi(); });
+      const notes = [m.needs_context ? "needs retrieved context" : "", m.needs_expectations ? "question-specific expectation" : "", m.counts_toward_verdict ? "" : "reported, not in the verdict"].filter(Boolean).join(" · ");
+      return el("label", { class: `param${box.checked ? " active" : ""}` },
+        el("div", { class: "param-name" }, box, " ", m.display_name), el("div", { class: "param-help", text: m.description }),
+        notes ? el("div", { class: "param-inputs", text: notes }) : null);
+    })))));
+  const count = chosen.size + (frozen ? frozen.custom_inputs.length : 0);
+  const pillNode = $("#metrics-pill");
+  pillNode.className = `pill ${count || customGiven() ? "pill-ok" : "pill-req"}`;
+  pillNode.textContent = frozen ? `${plural(count, "metric")} (frozen)` : `${plural(chosen.size, "built-in metric")}${customGiven() ? " + custom" : ""}`;
+  for (const id of ["custom-metrics-text", "scenario-count", "question-count", "question-complexity"]) $(`#${id}`).disabled = Boolean(frozen) || state.busy;
   let node;
-  if (state.run && !profileDiffers()) {
-    node = callout("info", `Active run profile: ${name(state.run.evaluation_profile)}.`, `${state.run.evaluation_profile_reason} The final pass/fail verdict combines all applicable parameters below.`);
-  } else if (state.run) {
-    const apply = el("button", { class: "btn btn-sm btn-primary", type: "button", text: "Apply to this run" });
-    apply.disabled = state.busy;
-    apply.addEventListener("click", applyProfileToRun);
-    node = callout("warn", `Profile for next run: ${name(profile)}.`, `${reason} The current run uses ${name(state.run.evaluation_profile)}; applying a different profile to it regenerates scenarios and later steps.`, apply);
+  if (frozen) {
+    const unavailable = state.metricConfig ? state.metricConfig.definitions.filter((d) => d.availability === "unavailable") : [];
+    node = callout("info", `Run ${state.run.run_id} uses this selection.`,
+      el("div", {}, "The selection is part of the run and frozen at the scenarios step. Start a new run to change it.",
+        frozen.custom_inputs.length ? list(frozen.custom_inputs.map((c) => `${c.provenance}: ${c.text}`)) : null,
+        unavailable.length ? el("div", { class: "hint-warn", text: `Not compiled: ${unavailable.map((d) => `${d.metric_id} (${d.unavailable_reason})`).join("; ")}` }) : null));
+  } else if (state.run && state.run.legacy_evaluation_profile) {
+    node = callout("warn", "Legacy run.", `This run was created with the ${state.run.legacy_evaluation_profile.toUpperCase()} evaluation profile; its results stay readable. Start a new run to use metric selection.`);
   } else {
-    node = callout("info", `Profile for next run: ${name(profile)}.`, `${reason} The final pass/fail verdict combines all applicable parameters below.`);
+    node = callout("info", "Applies to the whole run.", "Each selected metric gets one result per question: a score, or a status with its reason (not applicable, cannot generate, evidence unavailable, inconclusive, evaluation error). Retrieval metrics need a context source in Product connection.");
   }
-  $("#profile-callout").replaceChildren(node);
-
-  // parameter cards
-  const shown = profile === "agent" ? AGENT_METRICS : profile === "nl2sql" ? NL2SQL_METRICS : [];
-  const grounded = state.run ? state.run.sources.reference !== "off" : state.useReference;
-  $("#param-grid").replaceChildren(...shown.map((m) => {
-    const info = METRIC_INFO[m];
-    let status;
-    if (profile === "nl2sql") {
-      const na = !grounded && m !== "semantic_correctness";
-      status = el("div", { class: `param-status ${na ? "na" : "on"}`, text: na ? "N/A without reference data" : "Applicable" });
-    } else if (REQUIRED_AGENT_METRICS.includes(m)) {
-      status = el("div", { class: "param-status on", text: "Always on" });
-    } else {
-      const box = el("input", { type: "checkbox", disabled: state.busy ? "" : null });
-      box.checked = state.agentMetrics.has(m);
-      box.addEventListener("change", () => { if (box.checked) state.agentMetrics.add(m); else state.agentMetrics.delete(m); renderProfile(); updateUi(); });
-      status = el("label", { class: "param-toggle" }, box, el("span", { text: box.checked ? "On · N/A when telemetry is not exposed" : "Off" }));
-    }
-    return el("div", { class: `param${status.classList.contains("on") || (status.querySelector && status.querySelector("input:checked")) ? " active" : ""}` },
-      el("div", { class: "param-name", text: info.label }), el("div", { class: "param-inputs", text: info.inputs }),
-      el("div", { class: "param-help", text: info.help }), status);
-  }));
-}
-
-async function applyProfileToRun() {
-  await withBusy("Applying evaluation profile", async () => {
-    const body = await postJson(`/api/runs/${state.runId}/steps/reference`, {
-      evaluation_profile: state.profileSelection, agent_metrics: [...REQUIRED_AGENT_METRICS, ...selectedMetrics().filter((m) => !REQUIRED_AGENT_METRICS.includes(m))],
-    });
-    applyRun(body);
-    log(`Evaluation profile set to ${state.run.evaluation_profile} (${state.run.evaluation_profile_selection})`);
-    toast(`Profile ${state.run.evaluation_profile.toUpperCase()} applied`);
-  });
+  $("#evaluation-callout").replaceChildren(node);
 }
 
 // --- readiness / run creation -----------------------------------------------------------------
@@ -393,28 +330,22 @@ function readiness() {
   const persona = Boolean(currentInput("persona"));
   const product = Boolean(currentInput("product"));
   const reference = currentInput("reference");
-  const golden = Boolean(state.uploads.golden_set);
-  const profile = selectedProfile();
   const problems = [];
   if (state.useReference && !reference) problems.push("Upload reference data or switch it off.");
-  if (golden && !state.useReference) problems.push("A golden set needs Reference data: switch Reference on.");
-  if (profile === "agent" && !state.useReference) problems.push("Agent runs need Reference data with agent_context.");
-  else if (profile === "agent" && reference && reference.preview.parsed.agent_tools == null) problems.push("Agent runs need a reference with agent_context.");
-  const referenceOk = (!state.useReference || Boolean(reference)) && !(golden && !state.useReference);
-  const profileOk = !(profile === "agent" && (!state.useReference || (reference && reference.preview.parsed.agent_tools == null)));
-  return { persona, product, reference: referenceOk, golden: true, profile: profileOk, problems, ok: persona && product && referenceOk && profileOk };
+  const metrics = state.selectedMetrics.size > 0 || customGiven();
+  if (!metrics) problems.push("Select at least one metric (or add a custom metric) in the Evaluation tab.");
+  const referenceOk = !state.useReference || Boolean(reference);
+  return { persona, product, reference: referenceOk, metrics, problems, ok: persona && product && referenceOk && metrics };
 }
 
 function updateReadiness() {
   const r = readiness();
   $("#chk-persona").className = r.persona ? "ok" : "";
   $("#chk-product").className = r.product ? "ok" : "";
-  $("#chk-golden").className = r.golden ? "ok" : "";
   $("#chk-reference").className = r.reference ? "ok" : "";
-  $("#chk-profile").className = r.profile ? "ok" : "";
-  $("#chk-reference").textContent = state.useReference ? "Operational reference" : "Operational reference (off)";
-  const profile = selectedProfile();
-  $("#chk-profile").textContent = profile ? `Evaluation profile · ${profile.toUpperCase()}` : "Evaluation profile";
+  $("#chk-metrics").className = r.metrics ? "ok" : "";
+  $("#chk-reference").textContent = state.useReference ? "Reference data" : "Reference data (off · ungrounded)";
+  $("#chk-metrics").textContent = `Evaluation metrics · ${state.selectedMetrics.size}${customGiven() ? " + custom" : ""}`;
   $("#start-hint").textContent = r.problems.length ? r.problems[0]
     : r.ok ? (state.runId ? "Starting again creates a new run." : "Ready to start.")
       : "Complete the required inputs to start.";
@@ -431,19 +362,21 @@ async function createRun() {
     if (state.instructionsSource === "upload" && state.uploads.reference_guide) form.append("reference_guide", state.uploads.reference_guide.file);
     if (state.instructionsSource === "write") form.append("reference_instructions", $("#instructions-text").value);
   }
-  if (state.uploads.golden_set) form.append("golden_set", state.uploads.golden_set.file);
   form.append("use_reference", state.useReference ? "true" : "false");
   form.append("persona_queries", $("#persona-queries").value);
   if (state.questionComplexity) form.append("question_complexity", state.questionComplexity);
-  form.append("evaluation_profile", state.profileSelection);
-  for (const m of [...REQUIRED_AGENT_METRICS, ...selectedMetrics().filter((x) => !REQUIRED_AGENT_METRICS.includes(x))]) form.append("agent_metrics", m);
+  for (const m of catalog().map((x) => x.id).filter((id) => state.selectedMetrics.has(id))) form.append("selected_metrics", m);
+  form.append("custom_metrics_text", $("#custom-metrics-text").value);
+  if (state.uploads.custom_metrics) form.append("custom_metrics", state.uploads.custom_metrics.file);
+  if ($("#scenario-count").value) form.append("scenario_count", $("#scenario-count").value);
+  if ($("#question-count").value) form.append("questions_per_scenario", $("#question-count").value);
   await withBusy("Starting run", async () => {
     const body = await api("/api/runs", { method: "POST", body: form });
     state.runId = body.state.run_id;
     history.replaceState(null, "", `${location.pathname}?run=${encodeURIComponent(state.runId)}#connect`);
     for (const node of $$(".step")) { node.classList.remove("done", "error", "running"); $(".step-result", node).textContent = ""; }
     applyRun(body);
-    log(`Run ${state.runId} started (${state.run.evaluation_profile.toUpperCase()}, ${state.useReference ? "grounded" : "ungrounded"})`);
+    log(`Run ${state.runId} started (${plural(state.run.metric_selection.selected_metrics.length, "metric")}${state.run.metric_selection.custom_inputs.length ? ` + ${state.run.metric_selection.custom_inputs.length} custom` : ""}, ${state.useReference ? "grounded" : "ungrounded"})`);
     toast(`Run ${state.runId} started`);
     showView("connect");
     loadRecent();
@@ -466,6 +399,17 @@ function setContractFile(file) {
   updateUi();
 }
 
+function setContextSource(source) {
+  state.contextSource = source;
+  for (const b of $$("#context-source button")) b.classList.toggle("on", b.dataset.source === source);
+  const help = {
+    response_field: "The contract maps the retrieved chunks (and citations) in the product response: response_mapping.context / citations.",
+    context_api: "The contract has a context_api section: the context of the SAME execution is fetched after the answer, correlated by request / session / trace id.",
+    none: "No retrieved context: retrieval and grounding metrics are reported as evidence unavailable.",
+  };
+  $("#context-help").textContent = help[source];
+}
+
 function canConnect() {
   if (!state.runId || state.busy) return false;
   const url = $("#product-url").value.trim();
@@ -484,6 +428,7 @@ async function connect() {
       const form = new FormData();
       form.append("url", url);
       form.append("contract", state.contractFile);
+      if (needsContext()) form.append("context_source", state.contextSource);
       const body = await api(`/api/runs/${state.runId}/connection`, { method: "POST", body: form });
       state.run = body.state;
       log(`Connected to ${state.run.connection.product_url} (${state.contractFile.name})`);
@@ -526,7 +471,8 @@ function renderConnection() {
       el("div", { class: "facts" },
         fact("Endpoint", `${adapter}${c.method} ${c.product_url}`), fact("Contract", c.contract_file),
         fact("Headers", c.header_names.length ? `${c.header_names.join(", ")} (values hidden)` : "none"),
-        fact("Recognised outcomes", outcomes.join(", "))),
+        fact("Recognised outcomes", outcomes.join(", ")),
+        fact("Retrieved context", c.context_source === "context_api" ? `context API ${c.context_api_url}` : c.context_source === "response_field" ? "in the product response" : "not available")),
       el("details", { class: "raw" }, el("summary", { text: "View request template and response mapping" }),
         el("pre", { text: JSON.stringify({ timeout: c.timeout, request_template: c.request_template, response_mapping: mapping, stream: c.stream || undefined }, null, 2) })),
     );
@@ -592,9 +538,12 @@ function updateUi() {
   $("#scenarios-desc").textContent = grounded
     ? "Creates business scenarios from Persona, Product and the operational capabilities in Reference data."
     : "Business goals this persona would pursue with the product.";
-  const goldenLimit = state.config && state.config.agent_golden_max_questions_per_scenario;
-  const golden = state.run && state.run.sources.golden_set && state.run.sources.golden_set !== "none";
-  $("#question-count").max = golden && goldenLimit ? String(goldenLimit) : String(maxStep());
+  const defaults = state.config || {};
+  const scenarios = (state.run && state.run.scenario_count) || defaults.scenario_count;
+  const perScenario = (state.run && state.run.question_count) || defaults.question_count;
+  $("#scenario-count-note").textContent = scenarios ? `${scenarios} scenario(s) · set in Evaluation` : "";
+  $("#question-count-note").textContent = perScenario ? `${perScenario} per scenario · set in Evaluation` : "";
+  $("#context-block").classList.toggle("hidden", !needsContext());
   renderRunCallout(connection, mock, d);
 
   const csv = $("#download-csv");
@@ -615,18 +564,19 @@ function updateUi() {
     const show = (value) => (value === "sample" ? "Sample" : value === "off" ? "Off" : value === "none" ? "none" : fileName(value) || "—");
     for (const [kind, label] of Object.entries(SOURCE_LABELS)) sources.append(el("dt", { text: label }), el("dd", { text: show(state.run.sources[kind]) }));
     sources.append(el("dt", { text: "Question complexity" }), el("dd", { text: state.run.question_complexity || "persona preference" }));
-    sources.append(el("dt", { text: "Evaluation profile" }), el("dd", { text: `${state.run.evaluation_profile.toUpperCase()} · ${state.run.evaluation_profile_selection === "auto" ? "auto-selected" : "selected"}` }));
+    const sel = state.run.metric_selection;
+    sources.append(el("dt", { text: "Metrics" }), el("dd", { text: sel ? `${sel.selected_metrics.map(metricLabel).join(", ") || "none"}${sel.custom_inputs.length ? ` + ${sel.custom_inputs.length} custom` : ""}` : `legacy ${state.run.legacy_evaluation_profile || ""} profile` }));
     sources.append(el("dt", { text: "Answers from" }), el("dd", { text: connection ? connection.product_url : mock ? "Mock product" : `Configured adapter (${adapter})` }));
   }
   $("#crumb").replaceChildren(...(state.runId ? [el("span", { class: "sep", text: "/" }), el("code", { text: state.runId })] : []));
 
   // navigation status
   const k = state.kpis;
-  const profile = state.run ? state.run.evaluation_profile : selectedProfile();
-  const params = state.run ? runMetrics(state.run).length : paramCount(profile);
+  const sel = frozenSelection();
+  const metricCount = sel ? sel.selected_metrics.length + sel.custom_inputs.length : state.selectedMetrics.size;
   const navStatus = {
     setup: state.runId ? "Run created" : readiness().ok ? "Ready to start" : "Persona, product, reference",
-    evaluation: profile ? `${profile.toUpperCase()} · ${plural(params, "parameter")}` : "Auto-select",
+    evaluation: `${plural(metricCount, "metric")}${!sel && customGiven() ? " + custom" : ""}`,
     connect: connection ? "Connected" : mock ? "Mock product" : "Not connected",
     run: `${completed} of ${STEPS.length} steps`,
     report: k ? `Accuracy ${pct(k.accuracy)}` : "Not available yet",
@@ -652,7 +602,7 @@ function renderRunCallout(connection, mock, d) {
 }
 
 function describe(step, detail) {
-  if (step === "scenarios") return `${detail.accepted} accepted, ${detail.rejected} rejected${detail.reference_packs ? ` · ${detail.reference_packs} reference pack(s)` : ""}`;
+  if (step === "scenarios") return `${detail.accepted} accepted, ${detail.rejected} rejected${detail.reference_packs ? ` · ${detail.reference_packs} reference pack(s)` : ""}${detail.unavailable_metrics && detail.unavailable_metrics.length ? ` · ${detail.unavailable_metrics.length} custom metric(s) not compiled` : ""}`;
   if (step === "questions") return `${detail.accepted} questions, ${detail.rejected} rejected`;
   if (step === "execute") return `${detail.executions} answers via ${detail.product}${detail.resumed_from_question ? ` · resumed from question ${detail.resumed_from_question}` : ""}`;
   return `${detail.evaluations} evaluated · ${detail.bug_candidates} bug candidate(s)${detail.accuracy != null ? ` · accuracy ${pct(detail.accuracy)}` : ""}`;
@@ -660,8 +610,6 @@ function describe(step, detail) {
 
 function stepBody(step) {
   const body = {};
-  const count = step === "scenarios" ? $("#scenario-count").value : step === "questions" ? $("#question-count").value : "";
-  if (count) body.count = Number(count);
   if (step === "execute" && $("#start-from").value) body.start_from_question = Number($("#start-from").value);
   return body;
 }
@@ -711,13 +659,12 @@ async function runAll() {
 function renderContracts() {
   const rows = questionRows();
   $("#contracts-card").classList.toggle("hidden", !rows.length);
-  $("#contracts-table thead").replaceChildren(el("tr", {}, ["Question", "Journey / scope", "Duration", "Sources", "Expected tools", "Expected behavior contract"].map((h) => el("th", { text: h }))));
+  $("#contracts-table thead").replaceChildren(el("tr", {}, ["Question", "Expected behaviour", "Success criteria", "Metric expectations"].map((h) => el("th", { text: h }))));
   $("#contracts-table tbody").replaceChildren(...rows.map((row) => {
     const tr = el("tr", { tabindex: "0" },
       el("td", { class: "q" }, el("b", { text: row.question }), el("small", { text: row.question_id })),
-      el("td", { text: row.expected_journey || "—" }), el("td", { text: row.expected_time_period || "—" }),
-      el("td", {}, list(split(row.expected_data_sources))), el("td", {}, list(split(row.expected_tools))),
-      el("td", { class: "wide" }, el("div", { class: "clamp", text: row.expected_behavior_contract || row.expected_behavior })));
+      el("td", { class: "wide" }, el("div", { class: "clamp", text: row.expected_behavior })),
+      el("td", {}, list(split(row.success_criteria))), el("td", {}, list(split(row.metric_expectations))));
     tr.addEventListener("click", () => openDrawer(row));
     tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(row); } });
     return tr;
@@ -734,14 +681,14 @@ function applyRun(body) {
   state.evaluations = body.evaluations || [];
   state.executions = body.executions || [];
   state.issues = body.issue_summary || null;
-  if (state.run) {
-    state.profileSelection = state.run.evaluation_profile_selection;
-    state.agentMetrics = new Set([...REQUIRED_AGENT_METRICS, ...state.run.agent_metrics]);
-  }
+  state.questions = body.questions || [];
+  state.metricConfig = body.metric_config || null;
+  state.metricIds = body.metric_ids || [];
+  if (state.run && state.run.metric_selection) state.selectedMetrics = new Set(state.run.metric_selection.selected_metrics);
   renderConnection();
   renderReport(body);
   renderContracts();
-  renderProfile();
+  renderEvaluation();
   updateUi();
 }
 
@@ -752,9 +699,10 @@ function verdictCounts() {
   return { pass: by("pass"), fail: by("fail"), inconclusive: by("inconclusive"), recorded: by("recorded_only") };
 }
 function activeMetrics() {
-  if (state.kpis && state.kpis.metrics.length) return METRIC_ORDER.filter((m) => state.kpis.metrics.some((x) => x.metric === m));
-  if (state.run) return runMetrics(state.run);
-  return NL2SQL_METRICS;
+  if (state.metricIds.length) return state.metricIds;
+  if (state.kpis && state.kpis.metrics.length) return state.kpis.metrics.map((x) => x.metric);
+  if (state.run && state.run.metric_selection) return state.run.metric_selection.selected_metrics;
+  return [];
 }
 
 function renderReport(body) {
@@ -778,7 +726,7 @@ function renderMeta() {
   const k = state.kpis;
   const run = state.run;
   const parts = [];
-  if (k) parts.push(k.product_id, k.mode === "grounded" ? "Grounded (with reference data)" : "Ungrounded (no reference data)", `${run ? run.evaluation_profile.toUpperCase() : ""} profile`, `${k.questions_asked} questions`, `Evaluated ${when(k.computed_at)}`);
+  if (k) parts.push(k.product_id, k.mode === "grounded" ? "Grounded (with reference data)" : "Ungrounded (no reference data)", k.selected_metrics.length ? plural(k.selected_metrics.length, "metric") : `legacy ${run && run.legacy_evaluation_profile ? run.legacy_evaluation_profile.toUpperCase() : ""} profile`, `${k.questions_asked} questions`, `Evaluated ${when(k.computed_at)}`);
   else if (run) parts.push(fileName(run.sources.product) || run.sources.product, `Started ${when(run.created_at)}`, "Results fill in as the steps complete.");
   $("#report-meta").textContent = parts.length ? parts.join("  ·  ") : "Run the tests to produce a report.";
 }
@@ -794,14 +742,17 @@ function renderNotice() {
     const outcomes = Object.entries(k.outcomes).filter(([, n]) => n).map(([o, n]) => `${n} ${OUTCOME_LABELS[o] || o}`).join(", ");
     const example = questionRows().find((r) => r.product_outcome === "error" && r.product_message);
     node = callout("warn", "No answers could be judged.",
-      el("div", {}, `Of ${k.questions_asked} question(s): ${outcomes}. Only answered questions are scored; clarifications, refusals, errors and timeouts are recorded only.`,
+      el("div", {}, `Of ${k.questions_asked} question(s): ${outcomes}. Answers and substantive refusals are scored; unresolved clarifications, errors and timeouts are recorded only.`,
         example ? el("div", { class: "quote", text: `Product message: ${example.product_message}` }) : null),
       go("connect", "Check connection"));
   } else {
     const failed = (k.outcomes.error || 0) + (k.outcomes.timeout || 0);
     if (failed) node = callout("warn", `${failed} of ${k.questions_asked} question(s) got no answer.`, "Errors and timeouts lower availability and are not scored.");
   }
-  box.replaceChildren(...(node ? [node] : []));
+  const extra = k && k.compiler_failures && k.compiler_failures.length
+    ? callout("warn", `${plural(k.compiler_failures.length, "custom metric")} could not be compiled.`, list(k.compiler_failures.map((f) => `${f.metric_id} (${f.provenance}): ${f.reason}`)))
+    : null;
+  box.replaceChildren(...[node, extra].filter(Boolean));
 }
 
 function tile(label, ...content) { return el("div", { class: "tile" }, el("div", { class: "tile-label", text: label }), ...content); }
@@ -816,7 +767,7 @@ function renderSummary() {
   const accuracy = tile("Accuracy", el("div", { class: "tile-row" }, ring,
     el("div", {}, el("div", { class: "tile-value small", text: k ? `${c.pass} passed` : "—" }),
       el("div", { class: "tile-sub", text: k ? `${c.pass} of ${judged} evaluated answers` : "available after evaluation" }))),
-  el("div", { class: "tile-sub", text: "Passes only when every applicable evaluation driver fully passes" }));
+  el("div", { class: "tile-sub", text: `Provisional verdict policy: passes only when every scored selected metric is perfect${k && k.verdict_policy ? ` (${k.verdict_policy})` : ""}` }));
 
   const stack = el("div", { class: "stack" }, ...[["pass", c.pass], ["fail", c.fail], ["inconclusive", c.inconclusive], ["recorded", c.recorded]]
     .filter(([, n]) => n && total).map(([cls, n]) => el("div", { class: `c-${cls}`, style: `width:${(n / total) * 100}%`, title: `${cls}: ${n}` })));
@@ -841,26 +792,29 @@ function renderSummary() {
 function renderMetrics() {
   const k = state.kpis;
   const metrics = activeMetrics();
-  $("#metric-cards").className = `metrics metrics-${Math.min(metrics.length, 4)}`;
+  $("#metric-cards").className = `metrics metrics-${Math.min(Math.max(metrics.length, 1), 4)}`;
   $("#metric-cards").replaceChildren(...metrics.map((name) => {
-    const info = METRIC_INFO[name];
+    const info = metricDef(name);
     const m = k && k.metrics.find((x) => x.metric === name);
     const head = el("div", { class: "metric-name", text: info.label });
     const desc = el("div", { class: "metric-desc", text: info.help });
+    const statusCounts = m ? [["not applicable", m.not_applicable], ["cannot generate", m.cannot_generate], ["evidence unavailable", m.evidence_unavailable], ["inconclusive", m.inconclusive], ["error", m.evaluation_error]]
+      .filter(([, n]) => n).map(([label, n]) => `${n} ${label}`).join(" · ") : "";
+    const notes = m && m.notes.length ? el("div", { class: "metric-desc", text: m.notes.join(" · ") }) : null;
+    const mrr = name === "mrr" && k && k.mrr ? el("div", { class: "metric-desc", text: `Run MRR over ${plural(k.mrr.denominator, "question")}; ${k.mrr.excluded_missing_rank} excluded for missing rank, ${k.mrr.excluded_other} other exclusions` }) : null;
     if (!m || m.mean == null) {
-      const why = !k ? "Available after evaluation"
-        : m && m.not_applicable && !m.n ? `N/A for ${m.not_applicable} answer(s)`
-          : m && m.inconclusive ? `${m.inconclusive} inconclusive` : "No judged answers";
-      return el("div", { class: "metric na" }, head, desc, el("div", { class: "metric-value", text: m && m.not_applicable && !m.n ? "N/A" : "—" }), el("div", { class: "meter" }), el("div", { class: "metric-foot" }, el("span", { text: why })));
+      const reasons = m ? Object.keys(m.reasons || {}).slice(0, 2) : [];
+      return el("div", { class: "metric na" }, head, desc, el("div", { class: "metric-value", text: "—" }), el("div", { class: "meter" }),
+        el("div", { class: "metric-foot" }, el("span", { text: !k ? "Available after evaluation" : statusCounts || "No scored answers" })),
+        reasons.length ? el("div", { class: "metric-desc", text: reasons.join(" | ") }) : null, notes, mrr);
     }
-    const extras = [m.inconclusive ? `${m.inconclusive} inconclusive` : "", m.not_applicable ? `${m.not_applicable} n/a` : ""].filter(Boolean).join(" · ");
     const meterCls = m.mean >= 1 ? "good" : m.mean <= 0 ? "bad" : "";
     return el("div", { class: "metric" }, head, desc,
       el("div", { class: "metric-value" }, pct(m.mean), el("small", { text: `mean ${m.mean.toFixed(2)}` })),
       el("div", { class: `meter ${meterCls}` }, el("div", { style: `width:${Math.max(m.mean * 100, m.mean > 0 ? 2 : 0)}%` })),
       el("div", { class: "metric-foot" },
         el("span", { text: `${pct(m.pass_rate)} at full score` }),
-        el("span", { text: `n = ${m.n}${extras ? ` · ${extras}` : ""}` })));
+        el("span", { text: `n = ${m.n}${statusCounts ? ` · ${statusCounts}` : ""}` })), notes, mrr);
   }));
 }
 
@@ -931,7 +885,8 @@ function renderBugs() {
   })));
 }
 
-function scoreChip(value, judged) {
+function scoreChip(value, judged, status) {
+  if (status && status !== "scored") return el("span", { class: `score ${status === "inconclusive" ? "mid" : "na"}`, title: human(status), text: NON_SCORED_LABELS[status] || human(status) });
   if (!value) return el("span", { class: "score na", text: judged ? "n/a" : "" });
   if (value === "inconclusive") return el("span", { class: "score mid", title: "inconclusive", text: "?" });
   const v = Number(value);
@@ -946,7 +901,7 @@ function renderBreakdown() {
   const metrics = activeMetrics();
   $("#breakdown-block").classList.toggle("hidden", !k || (!k.by_task_type.length && !k.by_capability.length));
   const head = el("tr", {}, el("th", { text: state.breakdownBy === "by_task_type" ? "Task type" : "Capability" }), el("th", { class: "num", text: "Questions" }),
-    el("th", { class: "num", text: "Judged" }), el("th", { class: "num", text: "Pass rate" }), metrics.map((m) => el("th", { class: "num", text: METRIC_INFO[m].short })));
+    el("th", { class: "num", text: "Judged" }), el("th", { class: "num", text: "Pass rate" }), metrics.map((m) => el("th", { class: "num", text: metricLabel(m) })));
   $("#breakdown-table thead").replaceChildren(head);
   $("#breakdown-table tbody").replaceChildren(...(groups.length ? groups.map((g) => el("tr", {},
     el("td", { text: human(g.group) }), el("td", { class: "num", text: String(g.questions) }), el("td", { class: "num", text: String(g.judged) }),
@@ -956,8 +911,8 @@ function renderBreakdown() {
 }
 
 function mainColumns() {
-  return [["question_id", "ID"], ["question", "Question"], ["expected_behavior_contract", "Expected behavior contract"], ["product_outcome", "Outcome"], ["final_verdict", "Verdict"],
-    ...activeMetrics().map((m) => [m, METRIC_INFO[m].short]), ["bug_ids", "Bug"]];
+  return [["question_id", "ID"], ["question", "Question"], ["expected_behavior", "Expected behaviour"], ["product_outcome", "Outcome"], ["response_classification", "Response kind"], ["final_verdict", "Verdict"],
+    ...activeMetrics().map((m) => [m, metricLabel(m)]), ["bug_ids", "Bug"]];
 }
 
 function matchesFilter(r) {
@@ -1015,11 +970,12 @@ function renderTable() {
       if (key === "question") {
         return el("td", { class: "q" }, el("b", { text: value || row.scenario_title }), el("small", { text: value ? row.scenario_title : "Scenario without a question yet" }));
       }
-      if (key === "expected_behavior_contract") return el("td", { class: "wide" }, el("div", { class: "clamp", text: value || row.expected_behavior || "" }));
+      if (key === "expected_behavior") return el("td", { class: "wide" }, el("div", { class: "clamp", text: value }));
+      if (key === "response_classification") return el("td", { class: "nowrap", text: human(value) });
       if (key === "final_verdict") return el("td", { class: "nowrap" }, value ? verdictPill(value) : "");
       if (key === "product_outcome") return el("td", { class: "nowrap" }, value ? el("span", { class: `outcome ${value}`, text: OUTCOME_LABELS[value] || value }) : "");
       if (key === "question_id" || key === "bug_ids") return el("td", { class: "id", text: split(value).join(", ") });
-      if (metrics.includes(key)) return el("td", { class: "num" }, scoreChip(value, judged));
+      if (metrics.includes(key)) return el("td", { class: "num" }, scoreChip(value, judged, row[`${key}_status`]));
       return el("td", { text: value });
     });
     const tr = el("tr", { tabindex: "0" }, cells);
@@ -1037,7 +993,7 @@ async function loadRecent() {
 
 function renderRecent() {
   $("#recent-card").classList.toggle("hidden", !state.recent.length);
-  $("#recent-table thead").replaceChildren(el("tr", {}, ["Run", "Started", "Product", "Profile", "Complexity", "Mode", "Progress", "Accuracy", ""].map((h) => el("th", { text: h }))));
+  $("#recent-table thead").replaceChildren(el("tr", {}, ["Run", "Started", "Product", "Metrics", "Complexity", "Mode", "Progress", "Accuracy", ""].map((h) => el("th", { text: h }))));
   $("#recent-table tbody").replaceChildren(...state.recent.map((r) => {
     const steps = r.steps_done.filter((s) => STEPS.includes(s)).length;
     const grounded = r.sources.reference && r.sources.reference !== "off";
@@ -1047,7 +1003,7 @@ function renderRecent() {
       el("td", { class: "id" }, r.run_id, r.run_id === state.runId ? el("span", { class: "muted", text: "  (open)" }) : null),
       el("td", { class: "nowrap", text: when(r.created_at) }),
       el("td", { text: r.product_id || (r.sources.product === "sample" ? "default" : fileName(r.sources.product)) }),
-      el("td", {}, r.evaluation_profile ? pill(r.evaluation_profile.toUpperCase(), "blue") : ""),
+      el("td", {}, r.legacy_evaluation_profile ? pill(`legacy ${r.legacy_evaluation_profile}`, "neutral") : el("span", { text: `${r.selected_metrics.length}${r.custom_metrics ? ` + ${r.custom_metrics} custom` : ""}` })),
       el("td", { text: r.question_complexity || "persona" }),
       el("td", {}, pill(grounded ? "grounded" : "ungrounded", grounded ? "blue" : "neutral")),
       el("td", {}, r.steps_done.includes("evaluate") ? pill("evaluated", "ok") : el("span", { class: "muted", text: `${steps} of ${STEPS.length} steps` })),
@@ -1065,18 +1021,19 @@ function openDrawer(row) {
   const pack = scenario && state.packs.find((p) => p.pack_id === scenario.reference_pack_id);
   const evaluation = state.evaluations.find((e) => e.question_id === row.question_id);
   const execution = state.executions.find((e) => e.question_id === row.question_id);
-  $("#drawer-eyebrow").textContent = [row.question_id, row.golden_case_id, row.scenario_id, row.mode, evaluation ? evaluation.evaluation_profile.toUpperCase() : ""].filter(Boolean).join("  ·  ");
+  const question = state.questions.find((q) => q.question_id === row.question_id);
+  $("#drawer-eyebrow").textContent = [row.question_id, row.scenario_id, row.mode, evaluation && evaluation.legacy_evaluation_profile ? `legacy ${evaluation.legacy_evaluation_profile}` : ""].filter(Boolean).join("  ·  ");
   $("#drawer-title").textContent = row.question || row.scenario_title;
   $("#drawer-verdict").replaceChildren(...(row.final_verdict ? [verdictPill(row.final_verdict)] : []));
   const parts = [];
   if (evaluation) parts.push(...evaluationSections(evaluation));
   if (row.question_id) {
     const criteria = split(row.success_criteria).map((c, i) => el("span", {}, el("code", { class: "tag", text: `CRIT-${String(i + 1).padStart(2, "0")}` }), " ", c));
+    const expectations = question ? Object.entries(question.expectations.metric_expectations || {}).map(([id, x]) =>
+      `${metricLabel(id)} [${human(x.status)}]: ${x.value ? JSON.stringify(x.value) : x.reason || ""}`) : split(row.metric_expectations);
     parts.push(section("Question and expected behaviour", kvList([
-      ["Asked", row.question], ["Golden case", row.golden_case_id], ["Expected behaviour", row.expected_behavior],
-      ["Success criteria", criteria], ["Expected tools", split(row.expected_tools)], ["Journey / scope", row.expected_journey],
-      ["Time period", row.expected_time_period], ["Data sources", split(row.expected_data_sources)], ["Expected context", split(row.expected_context)],
-      ["Must not", split(row.prohibited_behaviors)], ["Reference definitions", split(row.reference_context)], ["Golden-set criteria", split(row.golden_set_criteria)],
+      ["Asked", row.question], ["Expected behaviour", row.expected_behavior], ["Success criteria", criteria],
+      ["Metric expectations", expectations], ["Legacy expectations", split(row.legacy_expectations)],
     ])));
   }
   if (execution && execution.turns && execution.turns.length > 2) {
@@ -1086,8 +1043,15 @@ function openDrawer(row) {
         el("div", { class: "turn-msg", text: t.message }))))));
   }
   if (row.product_outcome) {
-    const content = [kvList([["Outcome", OUTCOME_LABELS[row.product_outcome] || row.product_outcome], ["Answer", row.answer_text], ["Message", row.product_message], ["Latency", row.latency_ms ? ms(Number(row.latency_ms)) : ""]])];
+    const content = [kvList([["Outcome", OUTCOME_LABELS[row.product_outcome] || row.product_outcome], ["Response kind", human(row.response_classification)],
+      ["Answer", row.answer_text], ["Message", row.product_message], ["Tool calls", split(row.tool_calls)], ["Retrieved context", row.retrieved_context],
+      ["Latency", row.latency_ms ? ms(Number(row.latency_ms)) : ""]])];
     for (const artifact of split(row.artifacts)) content.push(el("pre", { text: artifact }));
+    const context = execution && execution.context;
+    if (context && context.chunks && context.chunks.length) {
+      content.push(el("details", { class: "raw" }, el("summary", { text: `Retrieved chunks (${context.chunks.length}${context.rank_exposed ? ", ranked" : ""})` }),
+        el("pre", { text: context.chunks.map((c) => `${c.rank != null ? `#${c.rank} ` : ""}[${c.chunk_id}]${c.source_id ? ` (${c.source_id})` : ""} ${c.text}`).join("\n\n") })));
+    }
     parts.push(section("Product response", ...content));
   }
   if (evaluation) parts.push(...detailSections(evaluation));
@@ -1109,32 +1073,46 @@ function showDrawer(parts) {
   $("#drawer-close").focus();
 }
 
+function metricDetails(m) {
+  const d = m.details || {};
+  const out = [];
+  if (d.factual_verification) out.push(`Factual verification: ${human(d.factual_verification)}${d.limitation ? ` - ${d.limitation}` : ""}`);
+  if (d.reciprocal_rank != null) out.push(`Reciprocal rank ${d.reciprocal_rank}${d.first_relevant_rank ? ` (first relevant chunk at rank ${d.first_relevant_rank})` : " (no relevant chunk)"}`);
+  if (d.required_information) out.push(...d.required_information.map((i) => `Required: ${i.item} - ${human(i.status)}${i.chunk_ids.length ? ` [${i.chunk_ids.join(", ")}]` : ""}`));
+  if (d.disclosure) out.push(d.disclosure);
+  if (d.citation_checks) out.push(...d.citation_checks.map((c) => `Citation ${c.citation}${c.chunk_id ? ` -> ${c.chunk_id}` : ""}: ${human(c.support)}`));
+  if (m.missing_requirement && m.status !== "scored") out.push(`Missing: ${human(m.missing_requirement)}`);
+  return out;
+}
+
 function evaluationSections(ev) {
-  if (!ev.metrics) {
+  const names = activeMetrics().filter((m) => ev.metrics[m]).concat(Object.keys(ev.metrics).filter((m) => !activeMetrics().includes(m)));
+  if (!names.length) {
     return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")],
-      ev.verdict ? callout("warn", "No scores.", "The judge could not produce a valid evaluation; see the notes.")
-        : callout("info", "Not judged.", `The product ${OUTCOME_LABELS[ev.product_outcome] || ev.product_outcome}. Clarifications, refusals, errors and timeouts are recorded but not scored.`),
+      ev.verdict ? callout("warn", "No scores.", "No selected metric produced a result; see the notes.")
+        : callout("info", "Not judged.", `The product ${OUTCOME_LABELS[ev.product_outcome] || ev.product_outcome}. Unresolved clarifications, errors and timeouts are recorded but not scored.`),
       ev.notes.length ? kvList([["Notes", ev.notes]]) : null)];
   }
-  const names = METRIC_ORDER.filter((m) => ev.metrics[m]);
   const minis = el("div", { class: "mini-metrics" }, names.map((name) => {
     const m = ev.metrics[name];
-    return el("div", { class: "mini" }, el("b", { text: METRIC_INFO[name].short }),
-      m.status === "scored" ? scoreChip(String(m.score), true) : el("span", { class: "na", text: human(m.status) }));
+    return el("div", { class: "mini" }, el("b", { text: metricLabel(name) }), scoreChip(m.score == null ? "" : String(m.score), true, m.status));
   }));
   const why = el("div", { class: "why" });
   for (const name of names) {
     const m = ev.metrics[name];
+    const details = metricDetails(m);
     why.append(el("div", { class: "why-row" },
-      el("div", { class: "why-head" }, el("b", { text: METRIC_INFO[name].label }),
-        m.status === "scored" ? scoreChip(String(m.score), true) : pill(m.status, "neutral")),
+      el("div", { class: "why-head" }, el("b", { text: metricLabel(name) }),
+        m.status === "scored" ? scoreChip(String(m.score), true) : pill(m.status, "neutral"), m.judge_group ? el("small", { class: "muted", text: ` ${human(m.judge_group)} judge` }) : null),
       el("div", { text: m.rationale }), m.evidence ? el("span", { class: "quote", text: m.evidence }) : null,
       (m.what_worked || []).length ? el("ul", { class: "worked" }, m.what_worked.map((x) => el("li", { text: x }))) : null,
-      (m.what_didnt || []).length ? el("ul", { class: "didnt" }, m.what_didnt.map((x) => el("li", { text: x }))) : null));
+      (m.what_didnt || []).length ? el("ul", { class: "didnt" }, m.what_didnt.map((x) => el("li", { text: x }))) : null,
+      details.length ? list(details) : null));
   }
-  return [section(["Evaluation", verdictPill(ev.verdict)], minis,
+  return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")], minis,
     el("h4", { text: "Why these scores" }), why,
-    kvList([["Judge's own opinion", ev.llm_verdict ? verdictPill(ev.llm_verdict) : ""], ["Notes", ev.notes]]))];
+    kvList([["Product outcome", human(ev.product_outcome)], ["Response kind", ev.response_classification ? `${human(ev.response_classification)} (${human(ev.classification_source)})` : ""],
+      ["Judge's own opinion", ev.llm_verdict ? verdictPill(ev.llm_verdict) : ""], ["Verdict policy", ev.verdict_policy], ["Notes", ev.notes]]))];
 }
 
 function detailSections(ev) {
@@ -1222,7 +1200,8 @@ async function boot() {
     $("#scenario-count").value = state.config.scenario_count;
     $("#question-count").value = state.config.question_count;
     $("#scenario-count").max = String(maxStep());
-    state.agentMetrics = new Set([...REQUIRED_AGENT_METRICS, ...(state.config.agent_metrics || [])]);
+    $("#question-count").max = String(maxStep());
+    state.selectedMetrics = new Set(state.config.default_metrics || []);
     state.samples = await api("/api/samples");
   } catch (err) {
     log(`Could not load configuration: ${err.message}`, true);
@@ -1232,13 +1211,16 @@ async function boot() {
     const empty = $(".preview-empty", box);
     if (empty) box.dataset.empty = empty.textContent;
   }
-  for (const kind of ["persona", "product", "reference", "reference_guide", "golden_set"]) for (const zone of $$("[data-drop]", panel(kind))) wireDrop(zone, (file) => onFile(kind, file));
+  for (const kind of ["persona", "product", "reference", "reference_guide", "custom_metrics"]) for (const zone of $$("[data-drop]", panel(kind))) wireDrop(zone, (file) => onFile(kind, file));
   for (const b of $$("#persona-source button")) b.addEventListener("click", () => setPersonaSource(b.dataset.source));
   for (const b of $$("#instructions-source button")) b.addEventListener("click", () => setInstructionsSource(b.dataset.source));
   $("#use-reference").addEventListener("change", (e) => setUseReference(e.target.checked));
   $("#product-clear").addEventListener("click", () => clearUpload("product"));
   $("#reference-clear").addEventListener("click", () => clearUpload("reference"));
-  $("#golden-clear").addEventListener("click", () => clearUpload("golden_set"));
+  $("#custom-clear").addEventListener("click", () => clearUpload("custom_metrics"));
+  $("#custom-metrics-text").addEventListener("input", () => { renderEvaluation(); updateUi(); });
+  for (const b of $$("#context-source button")) b.addEventListener("click", () => setContextSource(b.dataset.source));
+  setContextSource("response_field");
   $("#question-complexity").addEventListener("change", (e) => { state.questionComplexity = e.target.value; });
   $("#create-run").addEventListener("click", createRun);
   wireDrop($("[data-contract-drop]"), setContractFile);
@@ -1270,7 +1252,7 @@ async function boot() {
   setUseReference(Boolean(sample("reference")));
   setInstructionsSource("none");
   renderInput("product");
-  renderInput("golden_set");
+  renderInput("custom_metrics");
 
   const fromUrl = new URLSearchParams(location.search).get("run");
   let initial = location.hash.slice(1);
@@ -1290,7 +1272,7 @@ async function boot() {
     }
   }
   if (!state.run) renderReport({});
-  renderProfile();
+  renderEvaluation();
   updateUi();
   showView(initial, { scroll: false });
   loadRecent();

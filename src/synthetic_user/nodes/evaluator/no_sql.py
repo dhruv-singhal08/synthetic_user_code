@@ -1,59 +1,31 @@
-"""Shared detection for NL2SQL responses that did not produce SQL."""
+"""Shared detection of executions that should have produced SQL but did not.
+
+"SQL is expected" means the run selected a metric that needs SQL evidence (frozen metric
+config) - never a keyword found in the product description or id. Runs from before the metric
+registry fall back to their recorded profile label (``nl2sql``).
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
 from synthetic_user.models.evaluation import EvaluationResult
-from synthetic_user.models.evaluation_profile import EvaluationProfile
-from synthetic_user.models.execution import (
-    AnsweredResponse,
-    ExecutionRecord,
-    ProductOutcome,
-)
-from synthetic_user.models.product import ProductDescription
+from synthetic_user.models.execution import AnsweredResponse, ExecutionRecord, ProductOutcome
+from synthetic_user.models.metrics import EvidenceKind, ResolvedMetricConfig
 
 NO_SQL_REASON = "No SQL generated."
 
 
-def product_expects_sql(product: ProductDescription) -> bool:
-    """Return whether SQL is an expected output of this product."""
-
-    values = [
-        product.product_id,
-        product.name,
-        product.description,
-        *product.expected_outputs,
-    ]
-    return any("sql" in value.casefold() for value in values)
-
-
 def run_expects_sql(
-    executions: Sequence[ExecutionRecord],
-    evaluations: Sequence[EvaluationResult] = (),
+    config: ResolvedMetricConfig | None, evaluations: Sequence[EvaluationResult] = ()
 ) -> bool:
-    """Infer SQL expectation when rendering a stored run without its product model.
-
-    The evaluation profile is authoritative. A product id can still contain ``nl2sql`` when
-    that product is deliberately tested as an Agent; missing SQL is not a defect in that run.
-    """
-
-    profiles = {evaluation.evaluation_profile for evaluation in evaluations}
-    if profiles == {EvaluationProfile.AGENT}:
-        return False
-    if EvaluationProfile.NL2SQL in profiles:
-        return True
-
-    return any("nl2sql" in execution.product_id.casefold() for execution in executions) or any(
-        _has_sql_artifact(execution.response)
-        for execution in executions
-        if isinstance(execution.response, AnsweredResponse)
-    )
+    if config is not None:
+        return config.needs_evidence(EvidenceKind.SQL)
+    return any(e.legacy_evaluation_profile == "nl2sql" for e in evaluations)
 
 
 def no_sql_execution(execution: ExecutionRecord, *, sql_expected: bool) -> bool:
-    """Identify an NL2SQL timeout or answered response with no SQL artifact."""
-
+    """A timeout, or an answered response with no SQL artifact, when SQL is expected."""
     if not sql_expected:
         return False
     if execution.outcome is ProductOutcome.TIMEOUT:

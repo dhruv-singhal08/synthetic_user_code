@@ -1,0 +1,318 @@
+# The predefined metric catalog: exactly 11 built-in metrics (instruction section 2).
+# catalog.py loads this file; ids are stable snake_case. The rubric / anchors / instructions
+# below are prompt text read by the judges and the question generator. Categories are UI
+# grouping only; they never decide which judge runs or which product can be tested.
+# Every metric is scored 0 / 0.5 / 1 (higher is better) or reported with a non-scored status.
+
+catalog_version: "2026.11-1"
+
+category_labels:
+  answer_quality: Answer Quality / Task Fulfilment
+  retrieval_quality: Retrieval Quality
+  grounding_citations: Grounding & Citations
+  sql_quality: SQL Quality
+  agent: Agent
+  custom: Custom
+
+metrics:
+  relevance:
+    display_name: Relevance
+    category: answer_quality
+    judge_group: general
+    description: >-
+      Does the response address the user's intended request (direct responsiveness, not
+      factual correctness)?
+    rubric: >-
+      Compare the user's request (and any clarification turns) with the final response. Judge
+      only whether the response is directed at what was asked: an on-topic answer, or an
+      appropriate explanation of why the request cannot be served, is relevant. Do not judge
+      factual correctness, completeness or style here.
+    score_anchors:
+      "1": the response directly addresses the request (or appropriately explains why it cannot)
+      "0.5": the response is partly responsive or drifts to a related but different request
+      "0": the response is off-topic or ignores the request
+    required_execution_evidence: [answer]
+    applicability_policy: Applies to every evaluable terminal response (answer or substantive denial).
+    evidence_requirements: The final response text and artifacts.
+
+  correctness_completeness:
+    asks_factual_verification: true
+    display_name: Correctness and Completeness
+    category: answer_quality
+    judge_group: general
+    description: >-
+      Are all requested parts delivered, and is the delivered content correct to the extent it
+      can be verified from trusted evidence?
+    rubric: >-
+      Compare expected_behavior and every success criterion with the delivered response and
+      artifacts. Completeness: every requested part is delivered. Correctness: delivered content
+      is consistent with the product contract, the question's expectations and any authoritative
+      evidence supplied (cheat sheet, tool results, retrieved context). Never assert factual
+      accuracy without trusted evidence: when the content cannot be verified, set
+      factual_verification to "unverified" and judge only what is observable. A justified
+      statement that the product cannot do something is correct when the expectations say so.
+    score_anchors:
+      "1": every requested part is delivered and nothing observable contradicts the expectations
+      "0.5": some requested parts are missing or some delivered content is wrong
+      "0": the central request is not delivered or the delivered content is wrong
+    required_execution_evidence: [answer]
+    applicability_policy: Applies to every evaluable terminal response (answer or substantive denial).
+    evidence_requirements: >-
+      The final response and artifacts; factual correctness only against trusted evidence
+      (cheat sheet, tool results or retrieved context), otherwise recorded as unverified.
+
+  context_precision:
+    when_evidence_missing: evidence_unavailable
+    when_no_chunks: not_applicable
+    display_name: Context Precision
+    category: retrieval_quality
+    judge_group: retrieval_grounding
+    description: >-
+      How relevant and focused is the retrieved evidence for the user's question?
+    rubric: >-
+      Label every retrieved chunk as relevant or not relevant to the user's question and its
+      expected behaviour. Judge the retrieved evidence only, not whether the answer is true.
+    score_anchors:
+      "1": the retrieved chunks are focused and relevant to the question
+      "0.5": the retrieved chunks mix relevant and irrelevant material
+      "0": the retrieved chunks are predominantly irrelevant
+    required_execution_evidence: [retrieved_context]
+    applicability_policy: >-
+      Applies when retrieved context is available for the response; not applicable when the
+      product retrieved no chunks (precision is undefined).
+    evidence_requirements: The normalized retrieved chunks (context in the response or a context API).
+
+  context_recall:
+    when_no_chunks: score_zero
+    display_name: Context Recall
+    category: retrieval_quality
+    judge_group: retrieval_grounding
+    description: >-
+      Do the retrieved chunks cover the required-information checklist derived for this
+      question? Expectation-based coverage, not exhaustive recall over the whole corpus.
+    rubric: >-
+      For every item of required_information, decide whether the retrieved chunks contain it
+      (covered, partly covered, not covered) and cite the chunk ids. Score coverage of the
+      checklist only; never claim recall over the full corpus.
+    score_anchors:
+      "1": every required-information item is covered by the retrieved chunks
+      "0.5": some required-information items are covered, others are missing
+      "0": none of the required-information items is covered
+    question_expectation_schema:
+      - name: required_information
+        type: string_list
+        required: true
+        description: >-
+          The information categories / constraints the retrieved evidence must contain to
+          answer this exact question (e.g. both compared periods and the compared dimension).
+    generation_instructions: >-
+      Derive required_information from the exact utterance, expected_behavior, success_criteria
+      and the authoritative reference only: list the categories of information (periods,
+      entities, constraints, dimensions) the retrieved evidence must contain. Never invent
+      documents, values or facts. If the required information cannot be determined reliably,
+      use status cannot_generate with a specific reason.
+    required_execution_evidence: [retrieved_context]
+    applicability_policy: >-
+      Applies when retrieved context is available and a required-information checklist was
+      generated for the question.
+    evidence_requirements: >-
+      The normalized retrieved chunks and the question's required_information checklist.
+
+  mrr:
+    when_no_chunks: score_zero
+    # Per-question reciprocal rank feeds the run-level MRR; it does not decide the verdict.
+    counts_toward_verdict: false
+    display_name: Mean Reciprocal Rank (MRR)
+    category: retrieval_quality
+    judge_group: retrieval_grounding
+    description: >-
+      Rank of the first relevant retrieved chunk. Per question: reciprocal rank
+      1 / first_relevant_rank (0 when no chunk is relevant); run level: the mean over
+      questions with ranked retrieval.
+    rubric: >-
+      Label every retrieved chunk as relevant or not relevant to the user's question. Code
+      computes the reciprocal rank from these labels and the exposed ranks; you do not score
+      MRR yourself.
+    score_anchors:
+      "1": the top-ranked chunk is relevant
+      "0.5": the first relevant chunk is at rank 2
+      "0": no retrieved chunk is relevant
+    continuous_score: true
+    required_execution_evidence: [retrieved_context, ranked_context]
+    applicability_policy: >-
+      Applies when retrieved chunks carry an explicit rank (or the adapter declares that list
+      order is the rank); never derived from arbitrary chunk order.
+    evidence_requirements: Ranked retrieved chunks and per-chunk relevance labels.
+
+  faithfulness:
+    display_name: Groundedness / Faithfulness
+    category: grounding_citations
+    judge_group: retrieval_grounding
+    description: >-
+      Are the material claims of the answer supported by the retrieved context or exposed tool
+      evidence? (Evidence support, not the real-world truth of the sources.)
+    rubric: >-
+      List the material claims of the answer and decide for each whether the retrieved chunks or
+      exposed tool results support it. Judge support by the evidence only; do not judge whether
+      the evidence itself is true.
+    score_anchors:
+      "1": every material claim is supported by the evidence
+      "0.5": support is mixed; some material claims are unsupported
+      "0": material claims are unsupported or contradicted by the evidence
+    required_execution_evidence: [answer, grounding_evidence]
+    applicability_policy: >-
+      Applies when retrieved context or tool results are exposed for the response.
+    evidence_requirements: The answer's material claims and the retrieved chunks / tool results.
+
+  citation_correctness:
+    display_name: Citation Correctness
+    category: grounding_citations
+    judge_group: retrieval_grounding
+    description: >-
+      Is each cited answer claim supported by the specific retrieved chunk it cites?
+    rubric: >-
+      For every citation exposed in the answer, compare the cited claim with the content of the
+      specific retrieved chunk it resolves to and decide supported, partly supported or
+      unsupported. A citation that resolves to no retrieved chunk is unsupported. When
+      citations_required is true and the answer exposes no citation, that is a failure.
+    score_anchors:
+      "1": every citation is supported by its cited chunk
+      "0.5": some citations are supported, some are not
+      "0": the citations are not supported by their cited chunks (or required citations are missing)
+    question_expectation_schema:
+      - name: citations_required
+        type: boolean
+        required: true
+        description: >-
+          true only when the product contract or this exact question requires the answer to
+          cite its sources.
+    generation_instructions: >-
+      Set citations_required to true only when the product description (expected outputs,
+      capabilities) or the exact question requires cited sources; otherwise false.
+    required_execution_evidence: [retrieved_context, citations]
+    applicability_policy: >-
+      Applies when the adapter exposes citation mappings and retrieved context. Without a
+      citation mapping the metric is evidence_unavailable; without citations it applies only
+      when citations were required.
+    evidence_requirements: Citations mapped to specific retrieved chunks and those chunks' content.
+
+  semantic_correctness:
+    when_evidence_missing: score_zero
+    display_name: Semantic Correctness
+    category: sql_quality
+    judge_group: general
+    description: >-
+      Does the generated SQL implement the requested result semantics? Static review only;
+      no executed values are verified.
+    rubric: >-
+      Compare the clarified request, expected_behavior and the result-behaviour success criteria
+      with the final SQL (use the parser output as supporting evidence). Check projections,
+      calculations, aggregations, filters, grouping, ordering and limits needed for the
+      requested result. Judge the result produced, not a preferred SQL shape; a reasonable
+      equivalent implementation is correct. Do not use table/column allow-list compliance or
+      business rules and documented joins here: they have their own metrics. Never execute the
+      query or claim to verify returned values.
+    score_anchors:
+      "1": all requested result behaviour is implemented
+      "0.5": only part of the requested result behaviour is implemented
+      "0": none of the requested result behaviour is implemented
+    required_execution_evidence: [sql]
+    applicability_policy: >-
+      Applies to responses that expose an SQL artifact. An answered response without SQL scores
+      0 ("No SQL generated") unless the product declined the request.
+    evidence_requirements: The SQL artifact, its parse, the question expectations.
+
+  rules_adherence:
+    when_evidence_missing: not_applicable
+    display_name: Rules Adherence
+    category: sql_quality
+    judge_group: general
+    description: >-
+      Does the SQL comply with the applicable reference business/table rules and documented
+      joins?
+    rubric: >-
+      Check direct, material compliance of the SQL with the applicable table rules, selected
+      rules and documented joins of the question's cheat sheet. Apply a rule only when the
+      question or the SQL concerns it; irrelevant or theoretical rules must not lower the score.
+      Do not use unknown table/column names or missing requested behaviour here.
+    score_anchors:
+      "1": all applicable rules and documented joins are followed
+      "0.5": a mix of compliance and supported conflicts
+      "0": applicable rules or documented joins are materially violated
+    required_reference_assets: [catalog_rules]
+    required_execution_evidence: [sql]
+    applicability_policy: >-
+      Applies to SQL responses whose cheat sheet lists rules, table rules or joins; not
+      applicable otherwise.
+    evidence_requirements: The SQL artifact, its parse, the cheat sheet's rules and joins.
+
+  schema_faithfulness:
+    when_evidence_missing: not_applicable
+    display_name: Schema Faithfulness
+    category: sql_quality
+    judge_group: general
+    description: >-
+      Do the SQL's explicit base table and column identifiers conform to the allowed reference
+      schema?
+    rubric: >-
+      Compare only the explicit base database table and column identifiers with the allowed
+      tables and columns of the cheat sheet (case-insensitive, quoting and qualification
+      removed). The parser output lists the base identifiers; output aliases, CTE names and
+      functions are not database identifiers and must never be compared. Do not use rules,
+      joins or requested behaviour here.
+    score_anchors:
+      "1": every explicit base table and column identifier is allowed
+      "0.5": a mix of allowed and unallowed identifiers
+      "0": none of the explicit identifiers is allowed
+    required_reference_assets: [catalog_schema]
+    required_execution_evidence: [sql]
+    applicability_policy: >-
+      Applies to SQL responses of grounded questions whose cheat sheet lists tables; not
+      applicable otherwise.
+    evidence_requirements: The SQL artifact, the parser's base identifiers, the cheat sheet schema.
+
+  tool_correctness:
+    display_name: Tool Correctness
+    category: agent
+    judge_group: general
+    description: >-
+      Did the product select the correct tool/operation, source, arguments, filters, grouping
+      and time boundaries, based on the exposed tool trace and the authoritative tool
+      definitions? (Supersedes tool_selection.)
+    rubric: >-
+      Compare the exposed tool calls (name, operation, arguments, order) with expected_tools,
+      expected_data_sources, expected_arguments, the authoritative tool definitions and the
+      question. Check tool/operation, data source, arguments, filters, grouping and time
+      boundaries. The expected tools are canonical, not a mandatory exact sequence. Judge the
+      selected action: a correctly targeted tool that returned an error is not wrong by itself.
+      Never infer calls that the trace does not show.
+    score_anchors:
+      "1": the right tools/operations were called with correct sources and arguments
+      "0.5": partly correct selection or arguments
+      "0": wrong tools/operations or sources for the task
+    question_expectation_schema:
+      - name: expected_tools
+        type: string_list
+        required: true
+        description: Canonical tool names (exactly as in the tool definitions) this question needs.
+      - name: expected_data_sources
+        type: string_list
+        required: false
+        description: Canonical data-source names (exactly as defined) the calls should use.
+      - name: expected_arguments
+        type: string_list
+        required: false
+        description: >-
+          Argument-level expectations stated by the question (filters, grouping, time
+          boundaries), one plain sentence each.
+    generation_instructions: >-
+      Use only canonical tool and data-source names from the authoritative tool definitions;
+      never a capability phrase. expected_tools lists the tools the exact question needs (not a
+      mandatory exact sequence). expected_arguments states only filters, grouping or time
+      boundaries the question itself requests. If the needed tool cannot be established from
+      the tool definitions, use status cannot_generate with a specific reason.
+    required_reference_assets: [tool_definitions]
+    required_execution_evidence: [tool_trace]
+    applicability_policy: >-
+      Applies when the reference defines tools and the response exposes a tool-call trace.
+    evidence_requirements: The exposed tool trace and the authoritative tool definitions.

@@ -21,6 +21,8 @@ product:
   clarification_policy: assume # assume = hidden single-turn instruction; ask = send unchanged
   ssl_verify: true            # SSL on/off for http_json / http_sse products: false = do NOT
                               # check the product's certificate (self-signed test servers only)
+  context_max_chunks: 50      # retrieved chunks kept per execution (metric telemetry)
+  context_max_chunk_chars: 4000
 
 # Which adapter talks to the product: fixture | http_json | http_sse | python (see config/products/).
 # Inline {type, options}, or a path to a config/products/<product_id>.adapter.yaml file.
@@ -33,13 +35,17 @@ reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 
 evaluation:
-  artifact_max_chars: 8000   # max characters per response artifact sent to the judge
-  # Agent relevance and completion are mandatory. Optional metrics can be removed here or
-  # switched off per run in the UI. If their required trace/context is absent, they are N/A.
-  agent_metrics: [relevance, completion]
-  # Temporary product workaround. When true, only cg_id IN ('DUMMY') is omitted from the
-  # judge's copy of SQL; original responses remain unchanged in artifacts and reports.
-  ignore_dummy_cg_id_filter: true
+  # Built-in metric ids used when a run does not choose its own (CLI). The UI Evaluation tab
+  # selects metrics (and custom metrics) per run; the choice is frozen in metric_config.json.
+  default_metrics: [relevance, correctness_completeness]
+  sql_dialect: null          # explicit sqlglot dialect for the SQL parser (e.g. bigquery); never guessed
+  # Predicates removed from the JUDGE's copy of generated SQL only (exact AST match; temporary
+  # product workaround). Original responses remain unchanged in artifacts and reports.
+  ignored_sql_predicates: ["cg_id IN ('DUMMY')"]
+  artifact_max_chars: 8000   # max characters per artifact / chunk / tool trace sent to a judge
+  max_custom_metrics: 20     # custom metrics per run (free text + workbook rows)
+  max_custom_metric_chars: 2000
+  max_custom_metric_rows: 200
 
 trace:
   enabled: true              # runs/<run_id>/run.log: every LLM / product call, prompt + output
@@ -60,12 +66,9 @@ generation:
     scenario_count: 10                  # scenarios per run
     include_unsupported_scenarios: true # include scenarios the product should refuse
     diversity_preference: balanced      # free text hint to the scenario generator
-    max_topup_rounds: 1                 # extra calls if fewer scenarios accepted than requested
   question:
     question_count: 1                   # questions per scenario
-    agent_golden_max_questions_per_scenario: 2 # golden-guided default and hard cap
-    agent_min_tool_calls: 1             # supported Agent question; complex UI profile raises to 2
-    agent_min_data_sources: 1           # supported Agent question; complex UI profile raises to 2
+    max_parallel_scenarios: 5           # internal: concurrent per-scenario question calls
     max_deliverables: 2                 # hard limit; filters do not count as deliverables
     max_sources: 1                      # sources allowed in one question plan
     max_success_criteria: 2
@@ -77,7 +80,6 @@ generation:
     language: en
     allow_vague_questions: false
     reject_reference_leaks: true        # reject questions that repeat internal reference names
-    near_duplicate_threshold: 0.8       # token Jaccard similarity; 1.0 keeps only exact matches
 
 
 paths:

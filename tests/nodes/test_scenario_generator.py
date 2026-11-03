@@ -9,10 +9,16 @@ import pytest
 from synthetic_user.core.config import AppConfig
 from synthetic_user.core.identifiers import SequentialIdGenerator
 from synthetic_user.llm.fake import FakeLLMClient
+from synthetic_user.metrics.registry import builtin_metric_config
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
-from synthetic_user.models.scenario import ScenarioDraft, ScenarioGenerationResult, TaskType
+from synthetic_user.models.scenario import (
+    CapabilityClassification,
+    ScenarioDraft,
+    ScenarioGenerationResult,
+    TaskType,
+)
 from synthetic_user.nodes.scenario.generator import (
     FILTERED_BY_CONFIG,
     MISSING_PACK,
@@ -22,7 +28,6 @@ from synthetic_user.nodes.scenario.generator import (
     UNKNOWN_TYPICAL_TASK,
     ScenarioGenerator,
     scenario_signature,
-    ungrounded_signature,
 )
 from synthetic_user.nodes.scenario.prompt import ScenarioPromptOptions, build_scenario_prompt
 
@@ -51,7 +56,12 @@ class Env:
         self.settings = settings
 
     async def run(
-        self, llm: FakeLLMClient, count: int, existing: tuple[str, ...] = (), **scenario: Any
+        self,
+        llm: FakeLLMClient,
+        count: int,
+        existing: tuple[str, ...] = (),
+        metrics: tuple[str, ...] = (),
+        **scenario: Any,
     ) -> ScenarioGenerationResult:
         generator = ScenarioGenerator(
             llm,
@@ -60,7 +70,12 @@ class Env:
             id_generator=SequentialIdGenerator(),
         )
         return await generator.generate(
-            self.persona, self.product, self.reference, count=count, existing_signatures=existing
+            self.persona,
+            self.product,
+            self.reference,
+            count=count,
+            existing_signatures=existing,
+            metrics=builtin_metric_config(list(metrics)).definitions if metrics else (),
         )
 
 
@@ -108,7 +123,7 @@ async def test_missing_business_goal_rejected(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     del scenario_drafts[0]["business_goal"]
-    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1, max_topup_rounds=0)
+    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1)
     assert not result.accepted
     assert "business_goal" in result.rejected[0].reasons[0]
 
@@ -116,7 +131,7 @@ async def test_missing_business_goal_rejected(
 async def test_llm_supplied_ids_rejected(env: Env, scenario_drafts: list[dict[str, Any]]) -> None:
     scenario_drafts[0]["id"] = "SCN_999"
     scenario_drafts[0]["signature"] = "made-up"
-    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1, max_topup_rounds=0)
+    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1)
     assert not result.accepted
     assert "Extra inputs are not permitted" in result.rejected[0].reasons[0]
 
@@ -159,7 +174,7 @@ async def test_pack_without_a_valid_table_rejects_the_scenario(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     scenario_drafts[1]["reference_pack"] = {"tables": [INVENTED]}
-    result = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1, max_topup_rounds=0)
+    result = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1)
     assert not result.accepted and not result.packs
     assert result.rejected[0].reasons == [NO_VALID_ITEM, "unknown table 'payroll'"]
 
@@ -168,7 +183,7 @@ async def test_one_bad_scenario_does_not_sink_the_batch(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     scenario_drafts[0]["reference_pack"] = {"tables": [INVENTED]}
-    result = await env.run(FakeLLMClient([_batch(*scenario_drafts)]), count=2, max_topup_rounds=0)
+    result = await env.run(FakeLLMClient([_batch(*scenario_drafts)]), count=2)
     assert [s.title for s in result.accepted] == [
         "Monthly spend trend by merchant category",
         "Card spend forecast",
@@ -192,7 +207,7 @@ async def test_document_reference_grounds_a_chatbot(
     }
     generator = ScenarioGenerator(
         FakeLLMClient([_batch(draft, wrong_kind)]),
-        _settings(env.settings, max_topup_rounds=0),
+        _settings(env.settings),
         logging.getLogger("t"),
         id_generator=SequentialIdGenerator(),
     )
@@ -214,7 +229,6 @@ async def test_unsupported_filtered_by_config(
         FakeLLMClient([_batch(*scenario_drafts)]),
         count=3,
         include_unsupported_scenarios=False,
-        max_topup_rounds=0,
     )
     assert [s.capability for s in result.accepted] == ["supported", "supported"]
     assert result.rejected[0].reasons == [FILTERED_BY_CONFIG]
@@ -232,72 +246,77 @@ async def test_unsupported_kept_when_allowed(
 # --- (e) duplicates -------------------------------------------------------------------------
 
 
-async def test_identical_scenarios_are_duplicates(
+async def test_identical_scenarios_are_exact_duplicates(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     result = await env.run(
         FakeLLMClient([_batch(scenario_drafts[0], scenario_drafts[0])]),
         count=2,
-        max_topup_rounds=0,
     )
     assert len(result.accepted) == 1
-    assert result.duplicates[0].reasons[0].startswith("duplicate of SCN_001")
+    assert result.duplicates[0].reasons[0].startswith("exact duplicate of SCN_001")
 
 
-async def test_same_shape_different_goal_is_duplicate(
+async def test_same_shape_different_goal_is_not_a_duplicate(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
+    """No keyword / shape heuristics: a different goal over the same tables is a new scenario."""
     reworded = copy.deepcopy(scenario_drafts[0])
     reworded["business_goal"] = "Find the biggest card spenders among staff for audit"
     reworded["reference_pack"]["tables"].reverse()
-    result = await env.run(
-        FakeLLMClient([_batch(scenario_drafts[0], reworded)]), count=2, max_topup_rounds=0
-    )
-    assert len(result.accepted) == 1
-    assert len(result.duplicates) == 1
+    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0], reworded)]), count=2)
+    assert len(result.accepted) == 2 and not result.duplicates
 
 
 async def test_existing_signatures_are_avoided(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     first = await env.run(FakeLLMClient([_batch(scenario_drafts[1])]), count=1)
-    existing = scenario_signature(
-        TaskType.TREND, "anything else", first.accepted[0].capability, first.packs[0]
-    )
+    existing = first.accepted[0].signature
     llm = FakeLLMClient([_batch(scenario_drafts[1])])
-    result = await env.run(llm, count=1, existing=(existing,), max_topup_rounds=0)
+    result = await env.run(llm, count=1, existing=(existing,))
     assert not result.accepted
-    assert result.duplicates[0].reasons[0].startswith("duplicate of existing scenario")
+    assert result.duplicates[0].reasons[0].startswith("exact duplicate of existing scenario")
     assert existing in llm.calls[0].user
 
 
-# --- top-up ---------------------------------------------------------------------------------
+def test_signature_is_structural(scenario_drafts: list[dict[str, Any]]) -> None:
+    """task | capability | cheat-sheet items | hash of the normalized goal (no keywords)."""
+    goal = scenario_drafts[0]["business_goal"]
+    a = scenario_signature(TaskType.RANKING, goal, CapabilityClassification.SUPPORTED)
+    b = scenario_signature(
+        TaskType.RANKING, f"  {goal.upper()} ", CapabilityClassification.SUPPORTED
+    )
+    c = scenario_signature(TaskType.RANKING, goal + " quickly", CapabilityClassification.SUPPORTED)
+    assert a == b and a != c
+    assert a.startswith("ranking|supported||")
 
 
-async def test_top_up_is_bounded_and_never_pads(
+# --- one call for the whole batch -----------------------------------------------------------
+
+
+async def test_one_call_for_the_whole_batch_never_padded(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     llm = FakeLLMClient([_batch(scenario_drafts[0]), _batch(scenario_drafts[1])])
-    result = await env.run(llm, count=3, max_topup_rounds=1)
-    assert len(llm.calls) == 2
-    assert [s.id for s in result.accepted] == ["SCN_001", "SCN_002"]
+    result = await env.run(llm, count=3)
+    assert len(llm.calls) == 1  # no top-up rounds
     assert "Write 3 distinct scenario(s)" in llm.calls[0].user
-    assert "Write 2 distinct scenario(s)" in llm.calls[1].user
-    assert result.accepted[0].signature in llm.calls[1].user
-    assert llm.remaining == 0
+    assert [s.id for s in result.accepted] == ["SCN_001"]  # partial result, reported as is
+    assert llm.remaining == 1
 
 
-async def test_no_top_up_when_rounds_zero(env: Env, scenario_drafts: list[dict[str, Any]]) -> None:
-    llm = FakeLLMClient([_batch(scenario_drafts[0]), _batch(scenario_drafts[1])])
-    result = await env.run(llm, count=3, max_topup_rounds=0)
-    assert len(llm.calls) == 1
-    assert len(result.accepted) == 1
-
-
-async def test_no_top_up_when_satisfied(env: Env, scenario_drafts: list[dict[str, Any]]) -> None:
-    llm = FakeLLMClient([_batch(*scenario_drafts)])
-    await env.run(llm, count=3, max_topup_rounds=5)
-    assert len(llm.calls) == 1
+async def test_selected_metrics_are_coverage_guidance_only(
+    env: Env, scenario_drafts: list[dict[str, Any]]
+) -> None:
+    llm = FakeLLMClient([_batch(scenario_drafts[0])])
+    result = await env.run(llm, count=1, metrics=("context_recall", "tool_correctness"))
+    user = llm.calls[0].user
+    assert "Evaluation metrics selected for this run (coverage guidance only)" in user
+    assert "- Context Recall:" in user and "- Tool Correctness:" in user
+    assert "Never force tools, retrieval or complexity" in user
+    # the generation mode never depends on the metrics: still grounded with a pack
+    assert result.accepted[0].mode == "grounded" and result.packs
 
 
 async def test_surplus_recorded_not_accepted(
@@ -332,6 +351,7 @@ def test_prompt_contents(
     assert "business goal FIRST" in user
     assert "Pick\n  from the catalog by exact name" in user and "drops any" in user
     assert "Writing the user's question" in user
+    assert "never turn it into a nearby supported proxy goal" in user
     assert "- sig-1" in user
     for item in sample_product.not_supported + sample_product.known_limitations:
         assert item in user
@@ -353,7 +373,7 @@ async def test_missing_success_criteria_rejected(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     scenario_drafts[0]["success_criteria"] = []
-    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1, max_topup_rounds=0)
+    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1)
     assert not result.accepted
     assert "success_criteria" in result.rejected[0].reasons[0]
 
@@ -362,7 +382,7 @@ async def test_grounded_draft_without_pack_rejected(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     del scenario_drafts[0]["reference_pack"]
-    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1, max_topup_rounds=0)
+    result = await env.run(FakeLLMClient([_batch(scenario_drafts[0])]), count=1)
     assert not result.accepted
     assert result.rejected[0].reasons == [MISSING_PACK]
 
@@ -427,7 +447,7 @@ async def test_ungrounded_accepts_goal_and_criteria_without_pack(
         assert scenario.mode == "ungrounded"
         assert scenario.business_goal and scenario.success_criteria
         assert scenario.reference_pack_id is None and scenario.reference_id is None
-        assert scenario.signature == ungrounded_signature(
+        assert scenario.signature == scenario_signature(
             scenario.task_type, scenario.business_goal, scenario.capability
         )
     assert not result.packs
@@ -441,7 +461,7 @@ async def test_ungrounded_pack_from_llm_is_rejected(
     env: Env, scenario_drafts: list[dict[str, Any]]
 ) -> None:
     llm = FakeLLMClient([_batch(scenario_drafts[0], _ungrounded(scenario_drafts[1]))])
-    result = await _run_ungrounded(env, llm, count=2, max_topup_rounds=0)
+    result = await _run_ungrounded(env, llm, count=2)
     assert [s.title for s in result.accepted] == [scenario_drafts[1]["title"]]
     assert result.rejected[0].reasons == [UNEXPECTED_PACK]
     assert result.rejected[0].payload["title"] == scenario_drafts[0]["title"]
@@ -450,9 +470,7 @@ async def test_ungrounded_pack_from_llm_is_rejected(
 async def test_ungrounded_unsupported_filter_and_empty_criteria(env: Env) -> None:
     empty = {**copy.deepcopy(CHATBOT_DRAFTS[0]), "success_criteria": []}
     llm = FakeLLMClient([_batch(empty, CHATBOT_DRAFTS[1])])
-    result = await _run_ungrounded(
-        env, llm, count=2, max_topup_rounds=0, include_unsupported_scenarios=False
-    )
+    result = await _run_ungrounded(env, llm, count=2, include_unsupported_scenarios=False)
     assert not result.accepted
     assert "success_criteria" in result.rejected[0].reasons[0]
     assert result.rejected[1].reasons == [FILTERED_BY_CONFIG]
@@ -473,24 +491,25 @@ async def test_non_sql_product_sample_chatbot_works(
     assert "SQL" not in llm.calls[0].system
 
 
-async def test_ungrounded_duplicates_by_task_goal_and_capability(env: Env) -> None:
-    same_goal = {
+async def test_ungrounded_duplicates_are_exact_only(env: Env) -> None:
+    reworded = {
         **copy.deepcopy(CHATBOT_DRAFTS[0]),
         "title": "Paris hotel cap (again)",
         "business_goal": "Before booking, find out the hotel cap for a Paris business trip",
     }
+    exact = {**copy.deepcopy(CHATBOT_DRAFTS[0]), "title": "Same goal, other title"}
     other_capability = {**copy.deepcopy(CHATBOT_DRAFTS[0]), "capability": "unknown"}
-    llm = FakeLLMClient([_batch(CHATBOT_DRAFTS[0], same_goal, other_capability)])
-    result = await _run_ungrounded(env, llm, count=3, max_topup_rounds=0)
-    assert [s.capability for s in result.accepted] == ["supported", "unknown"]
+    llm = FakeLLMClient([_batch(CHATBOT_DRAFTS[0], reworded, exact, other_capability)])
+    result = await _run_ungrounded(env, llm, count=4)
+    assert [s.capability for s in result.accepted] == ["supported", "supported", "unknown"]
     assert len(result.duplicates) == 1
-    assert result.duplicates[0].reasons[0].startswith("duplicate of SCN_001")
+    assert result.duplicates[0].reasons[0].startswith("exact duplicate of SCN_001")
 
 
-async def test_ungrounded_top_up_bounded_never_padded(env: Env) -> None:
+async def test_ungrounded_one_call_never_padded(env: Env) -> None:
     llm = FakeLLMClient([_batch(CHATBOT_DRAFTS[0]), _batch(), _batch()])
-    result = await _run_ungrounded(env, llm, count=3, max_topup_rounds=1)
-    assert len(result.accepted) == 1 and len(llm.calls) == 2
+    result = await _run_ungrounded(env, llm, count=3)
+    assert len(result.accepted) == 1 and len(llm.calls) == 1
 
 
 def test_both_prompts_share_the_common_core(
@@ -520,9 +539,7 @@ async def test_typical_task_is_matched_to_the_persona_wording(
     named, unknown, none = (copy.deepcopy(d) for d in scenario_drafts)
     named["typical_task"] = "identify top merchants or merchant categories by spend."
     unknown["typical_task"] = "Plan the office party"
-    result = await env.run(
-        FakeLLMClient([_batch(named, unknown, none)]), count=3, max_topup_rounds=0
-    )
+    result = await env.run(FakeLLMClient([_batch(named, unknown, none)]), count=3)
     assert [s.typical_task for s in result.accepted] == [
         "Identify top merchants or merchant categories by spend",  # the persona's own text
         None,

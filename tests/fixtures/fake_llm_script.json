@@ -2,6 +2,20 @@
   "rules": [
     {
       "contains": [
+        "You compile user-written evaluation metrics"
+      ],
+      "response": {
+        "metrics": [
+          {
+            "input_index": 1,
+            "compilable": false,
+            "uncompilable_reason": "Needs an SQL dialect, and no SQL dialect is configured for this run."
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
         "MOCK of the conversational product",
         "top 10 card spenders"
       ],
@@ -360,45 +374,113 @@
     },
     {
       "contains": [
-        "You perform three narrow NL2SQL comparisons",
+        "You are the General Judge",
+        "Can you forecast our card spend"
+      ],
+      "response": {
+        "metrics": {
+          "relevance": {
+            "score": 1,
+            "rationale": "Addresses the forecast request by stating the limitation.",
+            "evidence": "Forecasting is not supported yet.",
+            "what_worked": [
+              "states that forecasting is unsupported"
+            ],
+            "what_didnt": []
+          },
+          "correctness_completeness": {
+            "score": 1,
+            "rationale": "The product contract lists forecasting as unsupported; declining without invented figures is the expected behaviour.",
+            "what_worked": [
+              "no invented figures"
+            ],
+            "what_didnt": [],
+            "factual_verification": "not_applicable"
+          }
+        },
+        "criteria": [
+          {
+            "criterion": "states clearly whether a forecast can be produced",
+            "status": "met",
+            "rationale": "Says forecasting is not supported.",
+            "evidence": "Forecasting is not supported yet.",
+            "metric_id": "correctness_completeness"
+          },
+          {
+            "criterion": "does not present invented future figures as facts",
+            "status": "met",
+            "rationale": "No figures given.",
+            "metric_id": "correctness_completeness"
+          }
+        ],
+        "findings": [],
+        "overall_verdict": "pass"
+      }
+    },
+    {
+      "contains": [
+        "You are the General Judge",
         "top 10 card spenders"
       ],
       "response": {
-        "semantic_correctness": {
-          "score": 1,
-          "rationale": "Ranks employees by total spend for the period.",
-          "what_worked": [
-            "ranks employees by SUM(amount)"
-          ],
-          "what_didnt": []
-        },
-        "rules_adherence": {
-          "score": 0,
-          "rationale": "Uses an undocumented relationship to combine the tables.",
-          "evidence": "c.merchant_id = e.employee_id",
-          "what_worked": [],
-          "what_didnt": [
-            "uses merchant_id instead of employee_id"
-          ]
-        },
-        "schema_faithfulness": {
-          "score": 1,
-          "rationale": "Every identifier is allowed.",
-          "what_worked": [
-            "uses allowed identifiers"
-          ],
-          "what_didnt": []
+        "response_classification": "answered",
+        "classification_note": "Returns an SQL query for the ranking.",
+        "metrics": {
+          "relevance": {
+            "score": 1,
+            "rationale": "The SQL ranks employees by card spend as asked.",
+            "what_worked": [
+              "ranks employees by spend"
+            ],
+            "what_didnt": []
+          },
+          "correctness_completeness": {
+            "score": 1,
+            "rationale": "Delivers the ranking query for the period; the values themselves are not verified.",
+            "what_worked": [
+              "ranking, period and limit present"
+            ],
+            "what_didnt": [],
+            "factual_verification": "unverified"
+          },
+          "semantic_correctness": {
+            "score": 1,
+            "rationale": "Ranks employees by total spend for the period.",
+            "what_worked": [
+              "ranks employees by SUM(amount)"
+            ],
+            "what_didnt": []
+          },
+          "rules_adherence": {
+            "score": 0,
+            "rationale": "Uses an undocumented relationship to combine the tables.",
+            "evidence": "c.merchant_id = e.employee_id",
+            "what_worked": [],
+            "what_didnt": [
+              "uses merchant_id instead of employee_id"
+            ]
+          },
+          "schema_faithfulness": {
+            "score": 1,
+            "rationale": "Every identifier is allowed.",
+            "what_worked": [
+              "uses allowed identifiers"
+            ],
+            "what_didnt": []
+          }
         },
         "criteria": [
           {
             "criterion": "names the employees ranked by total card spend",
             "status": "met",
-            "rationale": "Selects full_name ordered by total spend."
+            "rationale": "Selects full_name ordered by total spend.",
+            "metric_id": "semantic_correctness"
           },
           {
             "criterion": "covers the requested time period",
             "status": "met",
-            "rationale": "Filters the last 3 months."
+            "rationale": "Filters the last 3 months.",
+            "metric_id": "semantic_correctness"
           }
         ],
         "findings": [
@@ -418,36 +500,42 @@
     },
     {
       "contains": [
-        "You evaluate an Agent response",
+        "You are the General Judge",
         "hotel in Paris"
       ],
       "response": {
-        "relevance": {
-          "score": 1,
-          "rationale": "Answers the hotel question.",
-          "what_worked": [
-            "answers the question"
-          ],
-          "what_didnt": []
-        },
-        "completion": {
-          "score": 1,
-          "rationale": "States the limit and the tax treatment.",
-          "what_worked": [
-            "limit and taxes stated"
-          ],
-          "what_didnt": []
+        "response_classification": "answered",
+        "metrics": {
+          "relevance": {
+            "score": 1,
+            "rationale": "Answers the hotel question.",
+            "what_worked": [
+              "answers the question"
+            ],
+            "what_didnt": []
+          },
+          "correctness_completeness": {
+            "score": 1,
+            "rationale": "States the limit and the tax treatment.",
+            "what_worked": [
+              "limit and taxes stated"
+            ],
+            "what_didnt": [],
+            "factual_verification": "unverified"
+          }
         },
         "criteria": [
           {
             "criterion": "states the nightly hotel limit that applies",
             "status": "met",
-            "rationale": "States the limit."
+            "rationale": "States the limit.",
+            "metric_id": "correctness_completeness"
           },
           {
             "criterion": "says whether taxes are included",
             "status": "met",
-            "rationale": "Mentions taxes."
+            "rationale": "Mentions taxes.",
+            "metric_id": "correctness_completeness"
           }
         ],
         "findings": [],

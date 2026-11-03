@@ -1,7 +1,7 @@
 """Scenarios: what the synthetic user wants to achieve.
 
-Grounded NL2SQL scenarios have a schema Reference Pack. Grounded Agent scenarios deliberately do
-not: their answer key is generated later on the question as expected behaviour and criteria.
+Grounded scenarios carry a Reference Pack (cheat sheet); ungrounded ones never do. The
+generation mode is a property of the run's reference, independent of the selected metrics.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from typing import Annotated, Any, Self
 from pydantic import Field, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
-from synthetic_user.models.evaluation_profile import EvaluationProfile
 from synthetic_user.models.reference import (
     CatalogPackDraft,
     DocumentPackDraft,
@@ -80,11 +79,9 @@ class ScenarioBatchDraft(StrictModel):
 
 class Scenario(StrictModel):
     id: NonEmptyStr = Field(pattern=r"^SCN_\d{3,}$")
-    golden_case_id: NonEmptyStr | None = Field(default=None, pattern=r"^GOLD_\d{3,}$")
     persona_id: NonEmptyStr
     product_id: NonEmptyStr
     mode: GenerationMode
-    evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL
     reference_id: NonEmptyStr | None = None
     reference_pack_id: NonEmptyStr | None = None
     business_goal: NonEmptyStr
@@ -98,17 +95,24 @@ class Scenario(StrictModel):
     question_intent: NonEmptyStr
     signature: NonEmptyStr
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy(cls, value: Any) -> Any:
+        """Profile / golden-set era artifacts: those fields are no longer scenario properties."""
+        if isinstance(value, dict) and ("evaluation_profile" in value or "golden_case_id" in value):
+            data = dict(value)
+            data.pop("evaluation_profile", None)
+            data.pop("golden_case_id", None)
+            return data
+        return value
+
     @model_validator(mode="after")
     def _reference_matches_mode(self) -> Self:
-        problems = [
-            mode_mismatch(self.mode, self.reference_id is not None, "a reference_id"),
-        ]
-        if self.evaluation_profile is EvaluationProfile.NL2SQL:
-            problems.append(
-                mode_mismatch(self.mode, self.reference_pack_id is not None, "a reference_pack_id")
-            )
-        elif self.reference_pack_id is not None:
-            problems.append("Agent scenarios must not have a reference_pack_id")
+        problems = [mode_mismatch(self.mode, self.reference_id is not None, "a reference_id")]
+        # New grounded scenarios always get a pack (the generator enforces it); earlier
+        # Agent-profile scenarios were grounded without one and stay readable.
+        if self.mode is GenerationMode.UNGROUNDED and self.reference_pack_id is not None:
+            problems.append("mode ungrounded must not have a reference_pack_id")
         found = [p for p in problems if p]
         if found:
             raise ValueError(f"scenario {self.id}: {'; '.join(found)}")

@@ -17,6 +17,14 @@ Options (``product_adapter.options``)::
       denied_when: "data.status == unsupported"
       denied_message: data.message            # default: the text path
       product_version: meta.version
+      unable_to_answer_when: "data.kind == cannot_answer"   # typed inability (optional)
+      correlation_id: meta.request_id         # the product's request / trace id (optional)
+      tool_trace: {path: data.tool_calls, name: name, arguments: input, result: output}
+      context:   {path: data.chunks, chunk_id: id, text: text, source_id: doc, rank: rank}
+      citations: {path: data.citations, chunk_id: chunk, claim: text}
+    context_api:                      # OR a separate context endpoint (not both)
+      url: https://product.example/v1/context/{correlation_id}
+      context: {path: chunks, chunk_id: id, text: text, rank: rank}
 
 Conditions are ``path == value`` only (no eval, no JSONPath). Non-string JSON values compare
 by their JSON text (true, 3, null). HTTP >= 400 and non-JSON bodies become ErrorResponse with
@@ -31,18 +39,21 @@ import json
 import logging
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Self
 
 from pydantic import ValidationError
 
-from synthetic_user.adapters.base import ProductRequest
+from synthetic_user.adapters.base import ContextRequest, ProductRequest
 from synthetic_user.adapters.http_common import (
     ERROR_SNIPPET_CHARS,
     HttpOptionsBase,
     HttpRequest,
     HttpResult,
     ResponseMapper,
+    correlation_for,
+    fetch_context,
     host,
     lookup,
     redact_json,
@@ -54,7 +65,12 @@ from synthetic_user.adapters.http_common import (
 )
 from synthetic_user.core.exceptions import ConfigError, ProductAdapterError, format_validation_error
 from synthetic_user.core.trace import record_product_http
-from synthetic_user.models.execution import ErrorResponse, ProductResponse, TimeoutResponse
+from synthetic_user.models.execution import (
+    ErrorResponse,
+    ProductResponse,
+    RetrievedContext,
+    TimeoutResponse,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -158,7 +174,8 @@ class HttpJsonAdapter:
     async def send(self, req: ProductRequest) -> ProductResponse:
         options = self._options
         resolved = resolve_headers(options.headers, self._env)
-        rendered = render_template(options.request_template, req)
+        request_uuid = str(uuid.uuid4())
+        rendered = render_template(options.request_template, req, request_uuid=request_uuid)
         body = None
         if options.method != "GET":
             body = json.dumps(rendered).encode("utf-8")
@@ -200,7 +217,27 @@ class HttpJsonAdapter:
             },
             error=None,
         )
-        return self._to_response(result, resolved.secrets)
+        response = self._to_response(result, resolved.secrets)
+        return correlation_for(response, options, req, request_uuid)
+
+    async def fetch_context(self, req: ContextRequest) -> RetrievedContext:
+        options = self._options.context_api
+        if options is None:
+            return RetrievedContext()  # not_requested: no separate context source configured
+        return await fetch_context(
+            options,
+            {
+                "correlation_id": req.correlation_id,
+                "session_id": req.session_id,
+                "question_id": req.question_id,
+                "utterance": req.utterance,
+                "uuid": req.correlation_id,
+            },
+            self._env,
+            self._transport,
+            tls_ca_bundle=self._tls_ca_bundle,
+            ssl_verify=self._ssl_verify,
+        )
 
     async def aclose(self) -> None:
         return None

@@ -11,7 +11,14 @@ LLM for persona replies. Per question:
   (an adapter defect, recorded only - never judged as a wrong answer);
 - latency: the adapter's latency_ms if it gives one, else measured with perf_counter;
 - raw responses (if supplied) are handed to ``raw_writer`` and cleared from the stored response;
-  the record keeps their returned path and a user-visible conversation transcript.
+  the record keeps their returned path and a user-visible conversation transcript;
+- metric telemetry: for a terminal answer the retrieved context is normalized onto
+  ``ExecutionRecord.context`` - from the response mapping, or fetched for the SAME execution
+  from a context API (correlated by request / session id) when the adapter implements
+  ``ContextFetchingAdapter``. Context failures / timeouts are recorded on the context only and
+  never change the answer's outcome. Chunks are bounded (``product.context_max_*``) and each
+  citation is resolved against the retrieved chunk ids. The utterance is never changed to force
+  telemetry.
 Responses (and any SQL artifact) are recorded, never executed. ``execute_many`` runs calls
 under ``product.max_concurrency``, keeps question order (EXE_ ids assigned afterwards) and always
 calls ``adapter.aclose()``.
@@ -29,7 +36,12 @@ from typing import Any
 
 from pydantic import BaseModel, JsonValue, ValidationError
 
-from synthetic_user.adapters.base import ProductAdapter, ProductRequest
+from synthetic_user.adapters.base import (
+    ContextFetchingAdapter,
+    ContextRequest,
+    ProductAdapter,
+    ProductRequest,
+)
 from synthetic_user.core.config import AppConfig, ClarificationPolicy
 from synthetic_user.core.exceptions import ProductAdapterError, format_validation_error
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
@@ -41,6 +53,8 @@ from synthetic_user.models.execution import (
     AnsweredResponse,
     ClarificationReplyDraft,
     ClarificationResponse,
+    ContextAvailability,
+    ContextSourceMode,
     ConversationRole,
     ConversationTurn,
     ConversationTurnKind,
@@ -49,6 +63,7 @@ from synthetic_user.models.execution import (
     ExecutionRecord,
     ProductOutcome,
     ProductResponse,
+    RetrievedContext,
     TimeoutResponse,
 )
 from synthetic_user.models.persona import Persona
@@ -294,7 +309,12 @@ class ProductExecutor:
                     )
                     next_utterance = reply
 
-        elapsed_ms = (time.perf_counter() - conversation_start) * 1000
+            # Latency covers the product conversation only, never the context fetch.
+            elapsed_ms = (time.perf_counter() - conversation_start) * 1000
+            context = await self._context(response, question, session_id)
+            if isinstance(response, AnsweredResponse) and response.retrieved_context is not None:
+                response = response.model_copy(update={"retrieved_context": None})
+
         latency = (
             single_call_latency
             if completed_calls == 1
@@ -318,7 +338,44 @@ class ProductExecutor:
             "latency_ms": latency,
             "response": response,
             "turns": turns,
+            "context": context,
         }, raw_payload
+
+    async def _context(
+        self, response: ProductResponse, question: QuestionCase, session_id: str
+    ) -> RetrievedContext:
+        """The normalized context of a terminal answer (not_requested for anything else)."""
+        if not isinstance(response, AnsweredResponse):
+            return RetrievedContext()
+        context = response.retrieved_context or RetrievedContext()
+        if isinstance(self._adapter, ContextFetchingAdapter):
+            request = ContextRequest(
+                question_id=question.question_id,
+                session_id=session_id,
+                correlation_id=response.correlation_id or session_id,
+                utterance=question.utterance,
+            )
+            try:
+                with trace_subject(question.question_id):
+                    fetched = await asyncio.wait_for(
+                        self._adapter.fetch_context(request),
+                        self._settings.product.timeout_seconds,
+                    )
+            except TimeoutError:
+                fetched = _failed_context(request.correlation_id, "context API call timed out")
+            except ProductAdapterError as exc:
+                fetched = _failed_context(request.correlation_id, str(exc))
+            # Adapter boundary: a context failure must never sink the answer or the run.
+            except Exception as exc:
+                self._log.exception("%s: context fetch raised %s", question.question_id, exc)
+                fetched = _failed_context(request.correlation_id, f"{type(exc).__name__}: {exc}")
+            if fetched.availability is not ContextAvailability.NOT_REQUESTED:
+                context = fetched
+        return bound_context(
+            context,
+            max_chunks=self._settings.product.context_max_chunks,
+            max_chars=self._settings.product.context_max_chunk_chars,
+        )
 
     async def _clarification_reply(
         self,
@@ -356,6 +413,45 @@ class ProductExecutor:
             return ErrorResponse(
                 error_type=INVALID_ADAPTER_RESPONSE, message=problems[:MAX_ERROR_MESSAGE_CHARS]
             )
+
+
+def _failed_context(correlation_id: str | None, reason: str) -> RetrievedContext:
+    return RetrievedContext(
+        availability=ContextAvailability.FAILED,
+        source_mode=ContextSourceMode.CONTEXT_API,
+        retrieved_at=datetime.now(UTC),
+        correlation_id=correlation_id,
+        error=reason[:MAX_ERROR_MESSAGE_CHARS],
+    )
+
+
+def bound_context(
+    context: RetrievedContext, *, max_chunks: int, max_chars: int
+) -> RetrievedContext:
+    """Cut chunks / text to the configured bounds and resolve citations to chunk ids."""
+    if context.availability is not ContextAvailability.AVAILABLE:
+        return context
+    truncated = context.truncated or len(context.chunks) > max_chunks
+    chunks = []
+    for chunk in context.chunks[:max_chunks]:
+        if len(chunk.text) > max_chars:
+            truncated = True
+            chunk = chunk.model_copy(update={"text": chunk.text[:max_chars]})
+        chunks.append(chunk)
+    ids = {chunk.chunk_id for chunk in chunks}
+    sources = {chunk.source_id for chunk in chunks if chunk.source_id}
+    citations = [
+        citation.model_copy(
+            update={
+                "resolved": (citation.chunk_id is not None and citation.chunk_id in ids)
+                or (citation.chunk_id is None and citation.source_id in sources)
+            }
+        )
+        for citation in context.citations
+    ]
+    return context.model_copy(
+        update={"chunks": chunks, "citations": citations, "truncated": truncated}
+    )
 
 
 def _response_turn(response: ProductResponse, latency_ms: float | None) -> ConversationTurn:

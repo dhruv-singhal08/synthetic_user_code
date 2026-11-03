@@ -11,15 +11,23 @@ from typing import Any, get_args, get_origin
 import pytest
 from pydantic import BaseModel
 
-from synthetic_user.models.evaluation import AgentEvaluationDraft, EvaluationDraft, MetricName
-from synthetic_user.models.question import QuestionBatchDraft
+from synthetic_user.metrics.catalog import builtin_definitions
+from synthetic_user.metrics.compiler import CompiledMetricDraft, CompilerOutput
+from synthetic_user.metrics.compiler_prompt import compiler_example
+from synthetic_user.metrics.registry import builtin_metric_config
+from synthetic_user.models.evaluation import (
+    FindingDraft,
+    GeneralJudgeDraft,
+    JudgedScore,
+    RetrievalJudgeDraft,
+)
+from synthetic_user.models.execution import AnsweredResponse, RetrievedChunk, RetrievedContext
+from synthetic_user.models.question import MetricExpectationDraft, QuestionBatchDraft, QuestionCase
 from synthetic_user.models.reference import CatalogPackDraft, DocumentPackDraft, ReferenceKind
 from synthetic_user.models.scenario import ScenarioBatchDraft
-from synthetic_user.nodes.evaluator.agent_prompt import (
-    evaluation_example as agent_evaluation_example,
-)
-from synthetic_user.nodes.evaluator.nl2sql_prompt import evaluation_example
-from synthetic_user.nodes.question.prompt import QUESTION_EXAMPLE
+from synthetic_user.nodes.evaluator.general_prompt import judge_example
+from synthetic_user.nodes.evaluator.retrieval_prompt import RetrievalJudgeInput, retrieval_example
+from synthetic_user.nodes.question.prompt import question_example
 from synthetic_user.nodes.scenario.prompt import scenario_example
 from synthetic_user.prompts.contracts import render_contract
 
@@ -66,29 +74,105 @@ def test_scenario_example_matches_the_model(kind: ReferenceKind | None) -> None:
         _assert_matches(scenario["reference_pack"], DocumentPackDraft, "pack")
 
 
+QUESTION_EXAMPLE = question_example(())
+GENERAL = [d for d in builtin_definitions() if d.judge_group == "general"]
+
+
 def test_question_example_matches_the_model() -> None:
     _assert_matches(QUESTION_EXAMPLE, QuestionBatchDraft, "questions")
+    assert QUESTION_EXAMPLE["questions"][0]["expectations"]["metric_expectations"] == {}
 
 
-def test_evaluation_example_matches_the_model() -> None:
-    _assert_matches(evaluation_example(), EvaluationDraft, "eval")
+def test_question_example_lists_only_metrics_that_need_expectations() -> None:
+    config = builtin_metric_config(["relevance", "context_recall", "tool_correctness"])
+    needing = [d for d in config.definitions if d.needs_expectations]
+    example = question_example(needing)
+    entries = example["questions"][0]["expectations"]["metric_expectations"]
+    assert sorted(entries) == ["context_recall", "tool_correctness"]
+    _assert_matches(entries["tool_correctness"], MetricExpectationDraft, "expectation")
+    assert set(entries["tool_correctness"]["value"]) == {
+        "expected_tools",
+        "expected_data_sources",
+        "expected_arguments",
+    }
 
 
-def test_agent_evaluation_example_with_every_metric_matches_the_model() -> None:
-    agent_metrics = [
-        MetricName.RELEVANCE,
-        MetricName.COMPLETION,
-        MetricName.TOOL_SELECTION,
-        MetricName.FAITHFULNESS,
-        MetricName.CONTEXT_PRECISION,
-        MetricName.CONTEXT_RECALL,
-    ]
-    _assert_matches(agent_evaluation_example(agent_metrics), AgentEvaluationDraft, "agent")
+@pytest.mark.parametrize("classify", [True, False])
+def test_general_judge_example_matches_the_model(classify: bool) -> None:
+    example = judge_example(GENERAL, needs_classification=classify)
+    expected = {"metrics", "criteria", "findings", "overall_verdict"}
+    if classify:
+        expected |= {"response_classification", "classification_note"}
+    assert set(example) == expected
+    assert sorted(example["metrics"]) == sorted(d.metric_id for d in GENERAL)
+    for metric_id, score in example["metrics"].items():
+        keys = set(JudgedScore.model_fields)
+        if metric_id != "correctness_completeness":
+            keys -= {"factual_verification"}
+        assert set(score) == keys, metric_id
+    _assert_matches(example["findings"][0], FindingDraft, "finding")
+    assert set(GeneralJudgeDraft.model_fields) >= set(example)
 
 
-def test_agent_evaluation_example_lists_only_applicable_metrics() -> None:
-    example = agent_evaluation_example([MetricName.RELEVANCE, MetricName.COMPLETION])
-    assert "tool_selection" not in example and "relevance" in example
+def _question() -> QuestionCase:
+    return QuestionCase.model_validate(
+        {
+            "question_id": "Q_001",
+            "scenario_id": "SCN_001",
+            "persona_id": "p",
+            "mode": "ungrounded",
+            "utterance": "Compare January and February complaints",
+            "intended_goal": "g",
+            "intent": {"task_type": "comparison"},
+            "question_characteristics": {
+                "style": "precise",
+                "ambiguity_level": "low",
+                "complexity": "simple",
+            },
+            "expectations": {
+                "expected_behavior": "Compare both months.",
+                "success_criteria": ["covers both months"],
+                "metric_expectations": {
+                    "context_recall": {
+                        "status": "generated",
+                        "value": {"required_information": ["January", "February"]},
+                    }
+                },
+            },
+        }
+    )
+
+
+def test_retrieval_judge_example_matches_the_model(sample_product: Any) -> None:
+    config = builtin_metric_config(
+        ["context_precision", "context_recall", "mrr", "faithfulness", "citation_correctness"]
+    )
+    judged = [d for d in config.definitions if not d.continuous_score]
+    data = RetrievalJudgeInput(
+        product=sample_product,
+        question=_question(),
+        response=AnsweredResponse(text="January had more."),
+        definitions=judged,
+        needs_labels=True,
+        context=RetrievedContext(
+            availability="available",
+            chunks=[RetrievedChunk(chunk_id="c1", rank=1, text="Jan: 10")],
+            citations=[{"chunk_id": "c1", "resolved": True}],
+            citations_exposed=True,
+            rank_exposed=True,
+        ),
+        tool_trace=None,
+        artifact_max_chars=8000,
+    )
+    example = retrieval_example(data)
+    assert set(example) == set(RetrievalJudgeDraft.model_fields)
+    assert "mrr" not in example["metrics"]  # MRR is computed by code, never scored by the judge
+
+
+def test_compiler_example_matches_the_model() -> None:
+    example = compiler_example()
+    assert set(example) == set(CompilerOutput.model_fields)
+    assert set(example["metrics"][0]) == set(CompiledMetricDraft.model_fields)
 
 
 @pytest.mark.parametrize(
@@ -97,10 +181,10 @@ def test_agent_evaluation_example_lists_only_applicable_metrics() -> None:
         scenario_example(ReferenceKind.DATA_CATALOG),
         scenario_example(None),
         QUESTION_EXAMPLE,
-        evaluation_example(),
+        judge_example(GENERAL, needs_classification=True),
     ],
 )
 def test_contracts_stay_short(example: dict[str, Any]) -> None:
     contract = render_contract(example)
-    assert len(contract.splitlines()) < 60
+    assert len(contract.splitlines()) < 120
     assert "$defs" not in contract and json.loads(contract.split("\n", 1)[1]) == example

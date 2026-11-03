@@ -46,17 +46,26 @@ from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.llm.structured import generate_structured
+from synthetic_user.metrics.custom_input import (
+    CustomInputLimits,
+    ParsedCustomInput,
+    merge,
+    parse_free_text,
+    parse_workbook,
+)
+from synthetic_user.metrics.registry import builtin_metric_config
 from synthetic_user.models.base import StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
 from synthetic_user.models.kpi import RunKpis
+from synthetic_user.models.metrics import MetricSelection, ResolvedMetricConfig
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import DataCatalog, Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluator.benchmark import load_cases, load_scenarios, run_benchmark
-from synthetic_user.nodes.evaluator.kpis import METRIC_LABELS, compute_kpis, kpis_csv
+from synthetic_user.nodes.evaluator.kpis import compute_kpis, kpis_csv
 from synthetic_user.pipeline import RunInputs, RunSummary, Step, SyntheticUserPipeline
 from synthetic_user.prompts.smoke import SMOKE_SYSTEM, SMOKE_USER
 from synthetic_user.references.convert import refidx_to_catalog
@@ -66,6 +75,7 @@ from synthetic_user.references.loader import (
     parse_reference,
 )
 from synthetic_user.storage.json_store import JsonArtifactStore
+from synthetic_user.storage.migrations import map_legacy_metric
 from synthetic_user.storage.runs import run_artifact
 
 T = TypeVar("T")
@@ -95,6 +105,29 @@ GuideOption = Annotated[
         "--reference-guide",
         help="Usage instructions (.md / .txt) for the reference (optional; a default per "
         "format is used). Default: inputs.reference_guide_file.",
+    ),
+]
+
+MetricsOption = Annotated[
+    str | None,
+    typer.Option(
+        "--metrics",
+        help="Comma-separated built-in metric ids for the whole run. Default: "
+        "evaluation.default_metrics.",
+    ),
+]
+CustomMetricsTextOption = Annotated[
+    str | None,
+    typer.Option(
+        "--custom-metrics-text",
+        help="Custom metric descriptions (one per paragraph or bullet); compiled once per run.",
+    ),
+]
+CustomMetricsFileOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--custom-metrics-file",
+        help="Custom metrics workbook (.xlsx, every sheet; or .csv): first row = header.",
     ),
 ]
 
@@ -273,14 +306,26 @@ def generate_scenarios(
         int | None,
         typer.Option("--count", min=1, help="Scenarios to request. Default: scenario_count."),
     ] = None,
+    metrics: MetricsOption = None,
+    custom_metrics_text: CustomMetricsTextOption = None,
+    custom_metrics_file: CustomMetricsFileOption = None,
 ) -> None:
-    """Generate scenarios (+ reference packs when grounded) into artifacts/runs/<run_id>/."""
+    """Freeze the run's metric configuration, then generate scenarios (+ reference packs when
+    grounded) into artifacts/runs/<run_id>/."""
     state = _state(ctx, config, log_level)
+    selection = _MetricArgs(metrics, custom_metrics_text, custom_metrics_file)
     _guard(
         lambda: asyncio.run(
-            _generate_scenarios(state, run_id, persona, product, reference, guide, count)
+            _generate_scenarios(state, run_id, persona, product, reference, guide, count, selection)
         )
     )
+
+
+@dataclass(frozen=True)
+class _MetricArgs:
+    metrics: str | None
+    custom_text: str | None
+    custom_file: Path | None
 
 
 async def _generate_scenarios(
@@ -291,15 +336,25 @@ async def _generate_scenarios(
     reference_path: Path | None,
     guide_path: Path | None,
     count: int | None,
+    metric_args: _MetricArgs,
 ) -> None:
     settings = load_config(state.config_path)
     run_id = _valid_run_id(run_id or new_run_id())
-    inputs = _inputs(settings, persona_path, product_path, reference_path, guide_path)
+    inputs = _inputs(
+        settings,
+        persona_path,
+        product_path,
+        reference_path,
+        guide_path,
+        selection=_selection(settings, metric_args),
+    )
     pipeline, store = _pipeline(settings, run_id)
     step = await pipeline.generate_scenarios(run_id, inputs, count=count, force=True)
-    duplicates = sum(1 for r in step.rejected if r.reasons[0].startswith("duplicate of"))
+    duplicates = sum(1 for r in step.rejected if r.reasons[0].startswith("exact duplicate of"))
+    config = step.metric_config
     typer.echo(
-        f"run_id={run_id} mode={inputs.mode} accepted={len(step.accepted)} "
+        f"run_id={run_id} mode={inputs.mode} metrics={','.join(config.selected_metric_ids)} "
+        f"unavailable_metrics={len(config.unavailable())} accepted={len(step.accepted)} "
         f"rejected={len(step.rejected) - duplicates} duplicates={duplicates} "
         f"reference_packs={len(step.packs)} dir={_run_dir(store, run_id)}"
     )
@@ -333,7 +388,7 @@ async def _generate_questions(
     settings = load_config(state.config_path)
     run_id = _valid_run_id(run_id)
     pipeline, store = _pipeline(settings, run_id)
-    inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
+    inputs = _run_inputs(settings, store, run_id, reference_path, guide_path)
     step = await pipeline.generate_questions(run_id, inputs, count=count, force=True)
     scenarios = len(
         {q.scenario_id for q in step.questions} | {r.scenario_id for r in step.rejected}
@@ -382,7 +437,7 @@ async def _execute(
     run_id = _valid_run_id(run_id)
     pipeline, store = _pipeline(settings, run_id, with_product=True)
     try:
-        inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
+        inputs = _run_inputs(settings, store, run_id, reference_path, guide_path)
         step = await pipeline.execute_questions(run_id, inputs, force=True)
     finally:
         await pipeline.aclose()
@@ -452,12 +507,23 @@ def evaluate(
         Path | None,
         typer.Option("--out-dir", help="File mode output dir. Default: the executions file's dir."),
     ] = None,
+    metric_config: Annotated[
+        Path | None,
+        typer.Option(
+            "--metric-config",
+            help="File mode: a run's frozen metric_config.json. Default: built-in "
+            "evaluation.default_metrics (no custom metrics).",
+        ),
+    ] = None,
     reference: ReferenceOption = None,
     guide: GuideOption = None,
 ) -> None:
-    """Evaluate executions; writes evaluations.json and bug_candidates.json."""
+    """Evaluate executions with the run's frozen metric configuration; writes
+    evaluations.json, bug_candidates.json and the KPIs."""
     state = _state(ctx, config, log_level)
-    files = _EvaluateFiles(questions, executions, scenarios, reference_packs, out_dir)
+    files = _EvaluateFiles(
+        questions, executions, scenarios, reference_packs, out_dir, metric_config
+    )
     _guard(lambda: asyncio.run(_evaluate(state, run_id, files, reference, guide)))
 
 
@@ -468,6 +534,7 @@ class _EvaluateFiles:
     scenarios: Path | None
     reference_packs: Path | None
     out_dir: Path | None
+    metric_config: Path | None
 
 
 async def _evaluate(
@@ -490,7 +557,7 @@ async def _evaluate(
     if run_id is not None:
         run_id = _valid_run_id(run_id)
         pipeline, store = _pipeline(settings, run_id)
-        inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
+        inputs = _run_inputs(settings, store, run_id, reference_path, guide_path)
         step = await pipeline.evaluate_executions(run_id, inputs, force=True)
         questions = store.read_models(run_artifact(run_id, "questions.json"), QuestionCase)
         _print_evaluation(
@@ -513,11 +580,19 @@ async def _evaluate(
     out_store = JsonArtifactStore(files.out_dir or executions_path.parent)
 
     cases = _pair_cases(question_list, execution_items, scenario_list, packs)
+    llm = create_llm_client(settings)
+    logger = get_run_logger("synthetic_user.nodes.evaluator", new_run_id())
+    frozen = (
+        _read_file(files.metric_config, TypeAdapter(ResolvedMetricConfig))
+        if files.metric_config is not None
+        else builtin_metric_config(list(settings.evaluation.default_metrics))
+    )
     evaluator = Evaluator(
-        create_llm_client(settings),
+        llm,
         settings,
-        get_run_logger("synthetic_user.nodes.evaluator", new_run_id()),
+        logger,
         reference=reference,
+        metric_config=frozen,
         id_generator=SequentialIdGenerator(),
     )
     results = await evaluator.evaluate_many(cases, product)
@@ -529,7 +604,9 @@ async def _evaluate(
         scenarios=scenario_list,
         executions=execution_items,
         evaluations=results,
+        metric_config=frozen,
     )
+    out_store.write_model("metric_config.json", frozen)
     out_store.write_models("evaluations.json", results, EvaluationResult)
     out_store.write_models("bug_candidates.json", bugs, BugCandidate)
     out_store.write_model("kpis.json", kpis)
@@ -570,9 +647,14 @@ def run(
     ] = None,
     reference: ReferenceOption = None,
     guide: GuideOption = None,
+    metrics: MetricsOption = None,
+    custom_metrics_text: CustomMetricsTextOption = None,
+    custom_metrics_file: CustomMetricsFileOption = None,
 ) -> None:
-    """Full pipeline: reference check -> scenarios -> questions -> execute -> evaluate."""
+    """Full pipeline: reference check -> metric config + scenarios -> questions -> execute ->
+    evaluate."""
     state = _state(ctx, config, log_level)
+    selection = _MetricArgs(metrics, custom_metrics_text, custom_metrics_file)
     _guard(
         lambda: asyncio.run(
             _run(
@@ -584,6 +666,7 @@ def run(
                 question_count,
                 reference,
                 guide,
+                selection,
             )
         )
     )
@@ -598,10 +681,16 @@ async def _run(
     question_count: int | None,
     reference_path: Path | None,
     guide_path: Path | None,
+    metric_args: _MetricArgs,
 ) -> None:
     settings = load_config(state.config_path)
     run_id = _valid_run_id(run_id or new_run_id())
-    inputs = _inputs(settings, reference_path=reference_path, guide_path=guide_path)
+    inputs = _inputs(
+        settings,
+        reference_path=reference_path,
+        guide_path=guide_path,
+        selection=_selection(settings, metric_args),
+    )
     pipeline, _store = _pipeline(settings, run_id, with_product=True)
     try:
         summary = await pipeline.run(
@@ -620,6 +709,10 @@ async def _run(
 def _print_summary(summary: RunSummary) -> None:
     typer.echo(f"run_id={summary.run_id}")
     typer.echo(f"mode={summary.mode} reference={summary.reference_id or '-'}")
+    typer.echo(
+        f"metric_config={summary.metric_config_id or '-'} "
+        f"metrics={','.join(summary.selected_metrics) or '-'}"
+    )
     typer.echo(
         f"steps_run={','.join(summary.steps_run) or '-'} "
         f"steps_reused={','.join(summary.steps_reused) or '-'}"
@@ -641,8 +734,19 @@ def _print_kpis(kpis: RunKpis) -> None:
 
     typer.echo(f"kpi accuracy={fmt(kpis.accuracy)} judged={kpis.judged}")
     for m in kpis.metrics:
-        name = METRIC_LABELS[m.metric].lower().replace(" ", "_")
-        typer.echo(f"kpi {name} mean={fmt(m.mean)} pass_rate={fmt(m.pass_rate)} n={m.n}")
+        typer.echo(
+            f"kpi {m.metric} mean={fmt(m.mean)} pass_rate={fmt(m.pass_rate)} n={m.n} "
+            f"not_applicable={m.not_applicable} cannot_generate={m.cannot_generate} "
+            f"evidence_unavailable={m.evidence_unavailable} inconclusive={m.inconclusive} "
+            f"evaluation_error={m.evaluation_error}"
+        )
+    if kpis.mrr is not None:
+        typer.echo(
+            f"kpi mrr_run={fmt(kpis.mrr.value)} denominator={kpis.mrr.denominator} "
+            f"excluded_missing_rank={kpis.mrr.excluded_missing_rank}"
+        )
+    for failure in kpis.compiler_failures:
+        typer.echo(f"custom metric {failure.metric_id} unavailable: {failure.reason}")
     typer.echo(
         f"kpi availability={fmt(kpis.availability)} latency_p50_ms={fmt(kpis.latency_p50_ms)} "
         f"latency_p95_ms={fmt(kpis.latency_p95_ms)} new_bugs={kpis.new_bugs} "
@@ -679,6 +783,62 @@ def serve(
         uvicorn.run(create_app(settings), host=bind_host, port=bind_port, log_level="warning")
 
     _guard(start)
+
+
+# --- legacy runs --------------------------------------------------------------------------
+
+
+@app.command("migrate-run")
+def migrate_run(
+    ctx: typer.Context,
+    run_id: Annotated[str, typer.Option("--run-id", help="A run created before metric selection.")],
+    config: CommandConfigOption = None,
+    log_level: CommandLogLevelOption = None,
+    map_completion: Annotated[
+        bool,
+        typer.Option(
+            "--map-completion",
+            help="Relabel legacy 'completion' results as 'correctness_completeness' (marked in "
+            "each evaluation's notes; scores are not re-evaluated).",
+        ),
+    ] = False,
+) -> None:
+    """Explicitly migrate a legacy (profile-era) run's stored metric ids. Without an option it
+    only reports what the run contains; nothing is rewritten silently."""
+    state = _state(ctx, config, log_level)
+    _guard(lambda: _migrate_run(state, run_id, map_completion))
+
+
+def _migrate_run(state: CliState, run_id: str, map_completion: bool) -> None:
+    settings = load_config(state.config_path)
+    run_id = _valid_run_id(run_id)
+    store = JsonArtifactStore(settings.paths.artifacts_dir)
+    evaluations = store.read_models(run_artifact(run_id, "evaluations.json"), EvaluationResult)
+    ids = sorted({m for e in evaluations for m in e.metrics})
+    legacy = sum(1 for e in evaluations if e.schema_version < 2)
+    typer.echo(f"run_id={run_id} evaluations={len(evaluations)} legacy={legacy} metrics={ids}")
+    if not map_completion:
+        return
+    store.write_models(
+        run_artifact(run_id, "evaluations.legacy.json"), evaluations, EvaluationResult
+    )
+    migrated, changed = map_legacy_metric(evaluations, "completion", "correctness_completeness")
+    manifest = store.read_model(run_artifact(run_id, "manifest.json"), RunManifest)
+    kpis = compute_kpis(
+        run_id=run_id,
+        product_id=manifest.product_id,
+        mode=manifest.mode,
+        scenarios=store.read_models(run_artifact(run_id, "scenarios.json"), Scenario),
+        executions=store.read_models(run_artifact(run_id, "executions.json"), ExecutionRecord),
+        evaluations=migrated,
+    )
+    store.write_models(run_artifact(run_id, "evaluations.json"), migrated, EvaluationResult)
+    store.write_model(run_artifact(run_id, "kpis.json"), kpis)
+    store.write_text(run_artifact(run_id, "kpis.csv"), kpis_csv(kpis))
+    typer.echo(
+        f"migrated completion -> correctness_completeness in {changed} evaluation(s); "
+        "original saved as evaluations.legacy.json"
+    )
 
 
 # --- benchmark ----------------------------------------------------------------------------
@@ -721,11 +881,14 @@ async def _benchmark(state: CliState, cases_path: Path | None, scenarios_path: P
     reference = _reference(settings)
     product_paths = settings.inputs.benchmark_product_paths or [settings.inputs.product_path]
     products = {p.product_id: p for p in (load_product(path) for path in product_paths)}
+    llm = create_llm_client(settings)
+    logger = get_run_logger("synthetic_user.nodes.evaluator.benchmark", new_run_id())
     evaluator = Evaluator(
-        create_llm_client(settings),
+        llm,
         settings,
-        get_run_logger("synthetic_user.nodes.evaluator.benchmark", new_run_id()),
+        logger,
         reference=reference,
+        metric_config=builtin_metric_config(list(settings.evaluation.default_metrics)),
         id_generator=SequentialIdGenerator(),
     )
     scenario_list, packs = load_scenarios(scenarios_path)
@@ -742,7 +905,7 @@ async def _benchmark(state: CliState, cases_path: Path | None, scenarios_path: P
         typer.echo(f"  {group[0]} {group[1]}: {sum(r.agrees for r in judged)}/{len(judged)}")
     typer.echo(
         f"agreement={report.agreement:.2f} ({report.agreed}/{len(report.judged)} judged; "
-        f"{len(report.rows) - len(report.judged)} not judged: clarification / denied)"
+        f"{len(report.rows) - len(report.judged)} not judged: unresolved clarification)"
     )
 
 
@@ -765,13 +928,73 @@ def _inputs(
     product_path: Path | None = None,
     reference_path: Path | None = None,
     guide_path: Path | None = None,
+    *,
+    selection: MetricSelection | None = None,
 ) -> RunInputs:
     """--reference, else inputs.reference_file; neither -> ungrounded (logged)."""
     return RunInputs(
         persona=load_persona(persona_path or settings.inputs.persona_path),
         product=load_product(product_path or settings.inputs.product_path),
         reference=_reference(settings, reference_path, guide_path),
+        metric_selection=selection,
     )
+
+
+def _run_inputs(
+    settings: AppConfig,
+    store: JsonArtifactStore,
+    run_id: str,
+    reference_path: Path | None,
+    guide_path: Path | None,
+) -> RunInputs:
+    """Inputs of an EXISTING run: its frozen metric selection is reused (never re-chosen)."""
+    path = run_artifact(run_id, "metric_config.json")
+    selection = None
+    if store.exists(path):
+        frozen = store.read_model(path, ResolvedMetricConfig)
+        selection = MetricSelection(
+            selected_metrics=[
+                d.metric_id for d in frozen.definitions if d.origin.value == "builtin"
+            ],
+            custom_inputs=list(frozen.custom_inputs),
+            input_errors=list(frozen.input_errors),
+        )
+    return _inputs(
+        settings, reference_path=reference_path, guide_path=guide_path, selection=selection
+    )
+
+
+def _selection(settings: AppConfig, args: _MetricArgs) -> MetricSelection:
+    ids = (
+        [m.strip() for m in args.metrics.split(",") if m.strip()]
+        if args.metrics
+        else list(settings.evaluation.default_metrics)
+    )
+    limits = CustomInputLimits(
+        max_metrics=settings.evaluation.max_custom_metrics,
+        max_chars_per_metric=settings.evaluation.max_custom_metric_chars,
+        max_rows=settings.evaluation.max_custom_metric_rows,
+        max_uncompressed_bytes=settings.web.max_upload_bytes * 10,
+    )
+    parts: list[ParsedCustomInput] = []
+    if args.custom_text:
+        parts.append(parse_free_text(args.custom_text, limits))
+    if args.custom_file is not None:
+        if not args.custom_file.is_file():
+            raise InputAssetError(f"Custom metrics file not found: {args.custom_file}")
+        content = args.custom_file.read_bytes()
+        if len(content) > settings.web.max_upload_bytes:
+            raise InputAssetError(f"{args.custom_file}: file is too large")
+        parts.append(parse_workbook(content, args.custom_file.name, limits))
+    parsed = merge(parts, limits)
+    for error in parsed.errors:
+        _log.warning("Custom metric input %s: %s", error.provenance, error.reason)
+    try:
+        return MetricSelection(
+            selected_metrics=ids, custom_inputs=parsed.inputs, input_errors=parsed.errors
+        )
+    except ValueError as exc:
+        raise InputAssetError(f"Invalid metric selection: {exc}") from exc
 
 
 def _reference(

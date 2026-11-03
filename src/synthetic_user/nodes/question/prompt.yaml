@@ -1,5 +1,6 @@
-# Prompt text for Node 3 (questions). prompt.py picks the entries for the run's profile and
-# mode and fills every ${placeholder}; a literal dollar sign is written $$.
+# Prompt text for Node 3 (questions): ONE call per accepted scenario. prompt.py picks the
+# entries for the run's mode and selected metrics and fills every ${placeholder}; a literal
+# dollar sign is written $$.
 
 system: >-
   You role-play a real user typing questions into a conversational product, in their own words.
@@ -54,10 +55,14 @@ core: |
   - ${identifiers_rule}
   - Set question_characteristics style and ambiguity_level honestly. Code computes complexity from
     the structured plan; do not output complexity.
+  - Write the utterance FIRST. Then derive every expectation from that exact utterance and the
+    authoritative inputs - never from a broader scenario, an invented factual answer or a
+    copied example.
   - expected_behavior: 1-3 plain sentences: what the product should do for THIS question (what
     it should return or do; whether asking for clarification or declining would be right or
     wrong). If the question can fairly be read in more than one way, say which readings are
-    acceptable.
+    acceptable. For an unsupported scenario, keep the unsupported request: the expected
+    behaviour states the limitation instead of turning the question into a supported proxy.
   - expected_behavior and success_criteria must respect the product's expected_outputs and scope.
     Do not require execution, returned data values, or another artifact that the product says it
     does not provide. When the product returns an artifact that computes the requested answer,
@@ -67,8 +72,7 @@ core: |
     must be entailed by this exact question, its structured plan, the product answer contract or a
     necessary rule in the supplied reference. A generally useful practice is not automatically a
     must-have. Word each criterion so that every acceptable reading passes it.
-  ${profile_rules}
-  ${golden_rules}
+  ${metric_rules}
   - A ranking without a numeric plan.deliverables[].limit requires ordering, not an invented top-N
     cutoff. Never require LIMIT, top N, top 5, top 10 or another result count unless that exact
     limit is requested by the utterance and recorded in the plan.
@@ -79,9 +83,9 @@ core: |
     unconditional reason to fail.
   - Negative criteria are allowed only when their prohibited behaviour would make the requested
     result wrong. Do not add generic defensive checks merely because they sound prudent.
-  - A sensitive identifier used only inside COUNT or COUNT(DISTINCT) is not exposed by the result.
-    A privacy criterion may prohibit returning, grouping, or displaying raw identifier values, but
-    must not prohibit using a documented identifier internally to calculate a requested aggregate.
+  - A sensitive identifier used only internally to compute a requested aggregate is not exposed
+    by the result. A privacy criterion may prohibit returning, grouping or displaying raw
+    identifier values, but must not prohibit using a documented identifier to calculate it.
   - The intended goal is the scenario's business_goal (code copies it; do not restate it).
   - Questions must differ meaningfully from each other.
 
@@ -140,14 +144,7 @@ question_example:
       expectations:
         expected_behavior: "<1-3 sentences: what the product should do for this question>"
         success_criteria: ["<1-${max_success_criteria} short, checkable must-haves>"]
-        expected_tools: ["<tool capability expected, or empty>"]
-        expected_journey: "<journey/domain scope expected, or null>"
-        expected_time_period: "<time period/duration expected, or null>"
-        expected_data_sources: ["<data source expected, or empty>"]
-        expected_context: ["<evidence/context expected, or empty>"]
-        prohibited_behaviors: ["<observable behavior that must not occur, or empty>"]
-        reference_context: []
-        golden_set_criteria: {}
+        metric_expectations: {}
 
 # --- ungrounded ---------------------------------------------------------------------------
 
@@ -156,7 +153,7 @@ ungrounded_missing: |-
   be read several ways, say in expected_behavior which readings are fine and whether the
   product should ask for clarification.
 
-# --- grounded (NL2SQL with a reference pack) ----------------------------------------------
+# --- grounded (a reference pack) -----------------------------------------------------------
 
 grounded_reference: |
 
@@ -165,89 +162,39 @@ grounded_reference: |
 
   Usage instructions of the reference (for YOUR understanding):
   ${instructions}
-  ${golden_guidance}
+  ${tools}
+grounded_tools: |
+
+  Authoritative tool / data-source definitions (canonical names for metric expectations):
+  ${tools}
 
 grounded_missing: |-
   If the cheat sheet shows the goal depends on something ambiguous, say in expected_behavior
   whether the product should ask or state its assumption. Do not guess silently.
 
-golden_guidance: |
+# --- selected-metric expectations (only metrics that need a question-specific value) -------
 
-  Optional SME golden-set coverage:
-  ${summary}
+metric_rules: |-
+  - metric_expectations: the run's selected metrics below need a question-specific value. Give
+    an entry for EXACTLY these metric ids (no others):
+  ${metrics}
+    For each: status "generated" with value = the listed fields; "not_applicable" (value null,
+    reason) when the metric does not apply to this question; "cannot_generate" (value null,
+    specific reason) when it may apply but the value cannot be established from this exact
+    question and the authoritative inputs. Never fabricate a value; required fields must be
+    present when generated.
 
-  Relevant intent and evaluation patterns (INSPIRATION only):
-  ${examples}
+no_metric_rules: >-
+  - metric_expectations must be {} (no selected metric needs a question-specific value).
 
-  Use these patterns together with Persona, Product and the authoritative Reference to make the
-  new question realistic and its expected behavior and success criteria specific. Do not replay or
-  lightly reword any uploaded question or expected outcome. Reference data overrides any conflict.
+metric_requirement: |-
+    - ${metric_id} (${display_name}): ${instructions}
+      fields: ${fields}
 
-golden_rules: >-
-  - The optional golden set is guidance, not a replay list. Use relevant patterns to refine
-  expected_behavior and success_criteria, while keeping the new question and contract distinct
-  from every uploaded example.
+metric_field: "${name} (${type}, ${required}): ${description}"
+field_required: required
+field_optional: optional
 
-# --- agent ----------------------------------------------------------------------------------
-
-agent_reference: |
-  Agent operational reference (AUTHORITATIVE):
-  <<<AGENT_CONTEXT
-  ${context}
-  AGENT_CONTEXT>>>
-
-agent_no_context: No structured Agent context was supplied.
-
-agent_inspiration: |
-
-  Golden-set coverage across all uploaded examples:
-  ${summary}
-
-  Relevant SME examples (INSPIRATION only):
-  ${examples}
-
-  The uploaded examples teach valid intent patterns and how detailed an evaluation contract should
-  be. Generate a NEW question and a NEW contract for this scenario. Never copy or lightly reword a
-  golden question, expected behaviour, success criterion, or planner output.
-
-agent_missing: >-
-  The operational reference is the source of truth. If it does not establish a needed tool or
-  source, revise the question to use supported capabilities rather than inventing an
-  implementation detail.
-
-agent_rules: |-
-  - Agent answer key: expected_behavior and success_criteria must completely describe
-    the observable answer/action required by the exact question. Do not include tables, columns,
-    fields, joins, SQL, or physical-schema requirements.
-  ${operational_minimum}
-  - expected_tools: list the exact canonical tool name from AGENT_CONTEXT for every expected call,
-    in execution order. Repeat a tool name when separate calls are expected. Never use a capability
-    phrase or a golden-set label as a tool name.
-  - expected_data_sources: list exact canonical source names from AGENT_CONTEXT. These may differ
-    from the user-facing labels used in plan.deliverables[].sources.
-  - expected_journey and expected_time_period: capture the exact scope needed by this new question,
-    or null when absent. expected_context describes the evidence the tool results should expose.
-  - prohibited_behaviors: include only behaviours that would materially violate this question or
-    an applicable reference rule.
-  ${golden_rule}
-  - reference_context must be []; code fills it from the canonical tools and sources after
-    validating the generated contract against Reference data.
-
-agent_minimum_supported: |-
-  - COMPLEXITY FLOOR FOR THIS SUPPORTED AGENT SCENARIO: every
-    question must genuinely use at least ${min_data_sources} distinct Agent data
-    source(s) and require at least ${min_tool_calls} operational tool call(s). Repeating
-    a canonical tool name is valid only for separate calls with different sources or purposes.
-    Record every call in expected_tools, in execution order, and every source in
-    expected_data_sources. Do not pad either list.
-
-agent_minimum_unsupported: >-
-  - This scenario is unsupported: do not invent tool calls or data sources merely to meet a
-  complexity target. The expected behaviour should explain the limitation.
-
-agent_golden_rule: >-
-  - golden_set_criteria: adapt relevant organization-specific criterion LABELS from the SME
-  examples to this new question. Write new values; never copy an example value blindly.
-
-agent_no_golden_rule: >-
-  - golden_set_criteria must be {} because no golden set was supplied.
+metric_expectation_example:
+  status: "${statuses}"
+  reason: "<null, or the specific reason when not_applicable / cannot_generate>"

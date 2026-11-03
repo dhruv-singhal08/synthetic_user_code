@@ -17,7 +17,7 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.web.results_csv import COLUMNS, build_rows, bullets, to_csv
+from synthetic_user.web.results_csv import build_rows, bullets, columns_for, to_csv
 
 
 def _question(scenario: Scenario) -> QuestionCase:
@@ -64,9 +64,16 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
             },
         }
     )
-    rows = build_rows("RUN_1", sample_scenarios, [question], [execution], packs=sample_packs)
+    rows = build_rows(
+        "RUN_1",
+        sample_scenarios,
+        [question],
+        [execution],
+        packs=sample_packs,
+        metric_ids=["relevance"],
+    )
     assert len(rows) == 3
-    assert all(list(r) == COLUMNS for r in rows)
+    assert all(list(r) == columns_for(["relevance"]) for r in rows)
     assert (rows[0]["question_id"], rows[0]["artifacts"], rows[0]["latency_ms"]) == (
         "Q_001",
         "sql:\nSELECT 1",
@@ -88,37 +95,35 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
     assert rows[0]["final_verdict"] == ""
 
 
-def test_columns_are_the_evaluation_view() -> None:
-    metrics = [
-        "semantic_correctness",
-        "rules_adherence",
-        "schema_faithfulness",
+def test_columns_follow_the_selected_metrics() -> None:
+    columns = columns_for(["relevance", "custom_01", "mrr"])
+    assert columns[-13:] == [
         "relevance",
-        "completion",
-        "tool_selection",
-        "faithfulness",
-        "context_precision",
-        "context_recall",
-    ]
-    assert COLUMNS[-22:] == [
-        *(c for m in metrics for c in (m, f"{m}_reason")),
+        "relevance_status",
+        "relevance_reason",
+        "custom_01",
+        "custom_01_status",
+        "custom_01_reason",
+        "mrr",
+        "mrr_status",
+        "mrr_reason",
         "final_verdict",
         "verdict_reason",
         "bug_ids",
         "evaluation_notes",
     ]
-    assert "golden_case_id" in COLUMNS and "expected_behavior_contract" in COLUMNS
+    assert {"product_outcome", "response_classification", "metric_expectations"} <= set(columns)
+    assert {"tool_calls", "retrieved_context"} <= set(columns)
     for removed in (
+        "golden_case_id",
+        "expected_behavior_contract",
+        "expected_tools",
+        "golden_set_criteria",
         "relevancy",
-        "correctness",
         "groundedness",
-        "hallucination_rate",
-        "completeness",
-        "failed_checks",
-        "generated_sql",
         "llm_verdict",
     ):
-        assert removed not in COLUMNS
+        assert removed not in columns
 
 
 def test_csv_round_trip(sample_scenarios: list[Scenario]) -> None:
@@ -248,13 +253,17 @@ def test_bullets_and_metric_cells(sample_scenarios: list[Scenario]) -> None:
     )
     row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [evaluation])[0]
     assert row["artifacts"].startswith("• sql:\nSELECT 1\n• tool_calls:\n[")
-    assert [row[m] for m in ("semantic_correctness", "rules_adherence")] == ["1", "inconclusive"]
+    assert [row[m] for m in ("semantic_correctness", "rules_adherence")] == ["1", ""]
+    assert [row[f"{m}_status"] for m in ("semantic_correctness", "rules_adherence")] == [
+        "scored",
+        "inconclusive",
+    ]
     assert (row["semantic_correctness_reason"], row["rules_adherence_reason"]) == (
         "ok",
         "cannot tell",
     )
     assert row["schema_faithfulness"] == "0.5"
-    assert row["relevance"] == "" and row["relevance_reason"] == ""  # not an NL2SQL metric
+    assert "relevance" not in row  # only the metrics the run recorded have columns
     assert row["verdict_reason"] == ""  # inconclusive without findings
     parsed = list(csv.DictReader(io.StringIO(to_csv([row]))))
     assert parsed == [row]  # multi-line cells survive the CSV round trip
@@ -283,11 +292,12 @@ def test_reason_columns_explain_each_score(sample_scenarios: list[Scenario]) -> 
     row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [failed])[0]
     assert row["semantic_correctness_reason"] == "on topic - 'Ann'"  # reason + its quote
     assert row["rules_adherence_reason"] == "wrong join"
-    assert row["schema_faithfulness_reason"] == "not applicable: no pack"
+    assert row["schema_faithfulness_reason"] == "no pack"
+    assert row["schema_faithfulness_status"] == "not_applicable"
     assert row["verdict_reason"] == "F_001 [high] rules_adherence: joins on the wrong key"
     clean = _evaluation(verdict="pass", metrics={**metrics, "rules_adherence": scored})
     row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution], [clean])[0]
-    assert row["verdict_reason"] == "All metrics passed"
+    assert row["verdict_reason"] == "All scored metrics passed"
 
 
 def test_no_sql_note_explains_every_metric(sample_scenarios: list[Scenario]) -> None:
@@ -299,27 +309,50 @@ def test_no_sql_note_explains_every_metric(sample_scenarios: list[Scenario]) -> 
         evaluation_status="recorded_only",
         notes=["No SQL generated."],
     )
-    row = build_rows("RUN_1", sample_scenarios[:1], [question], [timeout], [recorded])[0]
-    assert row["semantic_correctness_reason"] == "No SQL generated."
-    assert row["rules_adherence_reason"].startswith("not applicable: no SQL")
+    row = build_rows(
+        "RUN_1",
+        sample_scenarios[:1],
+        [question],
+        [timeout],
+        [recorded],
+        metric_ids=["semantic_correctness"],
+    )[0]
+    assert row["semantic_correctness"] == row["semantic_correctness_status"] == ""  # not judged
     assert row["verdict_reason"] == "No SQL generated."
+    assert row["final_verdict"] == "recorded_only"
 
 
-def test_agent_expectations_fill_their_own_columns(sample_scenarios: list[Scenario]) -> None:
-    question = _question(sample_scenarios[0])
-    expectations = question.expectations.model_copy(
+def test_metric_expectations_and_telemetry_columns(sample_scenarios: list[Scenario]) -> None:
+    data = _question(sample_scenarios[0]).model_dump(mode="json")
+    data["expectations"]["metric_expectations"] = {
+        "context_recall": {"status": "generated", "value": {"required_information": ["Q1 spend"]}},
+        "tool_correctness": {"status": "cannot_generate", "reason": "no tools"},
+    }
+    question = QuestionCase.model_validate(data)
+    execution = _execution(
+        {
+            "outcome": "answered",
+            "text": "x",
+            "tool_trace": [{"order": 1, "name": "aggregate", "arguments": {"source": "c"}}],
+        }
+    ).model_copy(
         update={
-            "expected_tools": ["aggregate_feedback"],
-            "expected_data_sources": ["complaints"],
-            "expected_journey": "card replacement",
-            "golden_set_criteria": {"Expected Journey": "card replacement"},
+            "context": ExecutionRecord.model_validate(
+                {
+                    **_execution({"outcome": "answered", "text": "x"}).model_dump(mode="json"),
+                    "context": {
+                        "availability": "available",
+                        "source_mode": "context_api",
+                        "chunks": [{"chunk_id": "c1", "text": "t"}],
+                    },
+                }
+            ).context
         }
     )
-    question = question.model_copy(update={"expectations": expectations})
-    row = build_rows("RUN_1", sample_scenarios[:1], [question])[0]
-    assert row["expected_tools"] == "aggregate_feedback"
-    assert row["expected_journey"] == "card replacement"
-    assert row["golden_set_criteria"] == "Expected Journey: card replacement"
-    contract = row["expected_behavior_contract"].split("\n")
-    assert contract[0] == "Behavior: Rank the top spenders."
-    assert "Expected tools: aggregate_feedback" in contract
+    row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution])[0]
+    assert row["metric_expectations"].split("\n") == [
+        '• context_recall [generated]: {"required_information": ["Q1 spend"]}',
+        "• tool_correctness [cannot_generate]: no tools",
+    ]
+    assert row["tool_calls"] == '1. aggregate({"source": "c"})'
+    assert row["retrieved_context"] == "1 chunk(s) via context_api"

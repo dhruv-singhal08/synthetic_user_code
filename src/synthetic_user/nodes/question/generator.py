@@ -1,8 +1,21 @@
-"""Node 3: questions per scenario with profile-specific answer keys.
+"""Node 3: ONE independent question-generation call per accepted scenario.
 
-NL2SQL grounded questions link to a validated schema pack. Agent questions instead own their
-answer key through expected_behavior and success_criteria and never link to a schema pack.
-Calls run concurrently and results are assembled in stable scenario order.
+Calls run concurrently under ``generation.question.max_parallel_scenarios`` (default 5, an
+internal setting) and results are assembled in stable scenario order. A failed scenario call is
+isolated (recorded as a rejection for that scenario); valid items are accepted individually and
+nothing is silently regenerated. Normal-path call budget = one per accepted scenario (+ the
+bounded validation retries of that call); no separate semantic-validation call.
+
+Grounded questions link to their scenario's validated Reference Pack. Each question carries the
+universal expectations (expected_behavior + success_criteria) and metric_expectations only for
+the run's selected metrics that need a question-specific value (expectations.py).
+
+Validation keeps the deterministic, structural checks only: schema / enums, counts and limits
+of the existing hard policy (deliverables, sources, words, criteria, complexity, follow-ups),
+canonical product data-source membership, metric-expectation shape and canonical tool / source
+membership, exact structural duplicates (normalized text equality) and the reference-name leak
+check (a security check). There is no regex / keyword semantic rejection and no similarity-based
+duplicate detection: semantic fairness is the prompt's job and offline regression tests'.
 """
 
 from __future__ import annotations
@@ -19,8 +32,8 @@ from pydantic import Field, ValidationError
 from synthetic_user.core.config import AppConfig, QuestionGenerationSettings
 from synthetic_user.core.exceptions import (
     ArtifactIntegrityError,
-    InputAssetError,
     LLMOutputValidationError,
+    LLMProviderError,
     format_validation_error,
 )
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
@@ -28,8 +41,7 @@ from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import AmbiguityLevel, StrictModel
-from synthetic_user.models.evaluation_profile import EvaluationProfile
-from synthetic_user.models.golden_set import GoldenSet
+from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.persona import AmbiguityPreference, Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
@@ -46,9 +58,15 @@ from synthetic_user.models.question import (
 )
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
-from synthetic_user.models.scenario import CapabilityClassification, Scenario
+from synthetic_user.models.scenario import Scenario
+from synthetic_user.nodes.question.expectations import (
+    ExpectationRequest,
+    build_expectations,
+    canonical_problems,
+    expectation_request,
+    shape_problems,
+)
 from synthetic_user.nodes.question.prompt import QuestionPromptOptions, build_question_prompt
-from synthetic_user.references.golden_set import ground_agent_expectations
 from synthetic_user.references.leaks import find_leaks, pack_identifiers
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
@@ -61,45 +79,8 @@ PERSONA_AMBIGUITY = {
 }
 VAGUE_NOT_ALLOWED = "vague_not_allowed"
 SURPLUS = "surplus: more questions returned than requested"
-
-# A plan item must describe one observable output. These narrow terms catch common cases where
-# the model hides several outputs in one subject (for example "themes with representative
-# comments" or "complaint volume and categories"). Filters and descriptive qualifiers are
-# intentionally absent to avoid treating "themes with low satisfaction" as two outputs.
-_OUTPUT_TERMS: dict[str, re.Pattern[str]] = {
-    "themes": re.compile(r"\b(?:themes?|topics?)\b", re.IGNORECASE),
-    "comments": re.compile(r"\b(?:comments?|quotes?|excerpts?)\b", re.IGNORECASE),
-    "examples": re.compile(r"\bexamples?\b", re.IGNORECASE),
-    "volume": re.compile(r"\bvolume\b", re.IGNORECASE),
-    "count": re.compile(r"\bcounts?|totals?\b", re.IGNORECASE),
-    "categories": re.compile(r"\bcategor(?:y|ies)\b", re.IGNORECASE),
-    "trend": re.compile(r"\btrends?\b", re.IGNORECASE),
-    "ranking": re.compile(r"\brank(?:ing|ings)?\b", re.IGNORECASE),
-    "breakdown": re.compile(r"\bbreakdowns?\b", re.IGNORECASE),
-    "recommendation": re.compile(r"\brecommendations?\b", re.IGNORECASE),
-    "explanation": re.compile(r"\bexplanations?\b", re.IGNORECASE),
-    "summary": re.compile(r"\bsummar(?:y|ies)\b", re.IGNORECASE),
-}
-_OUTPUT_CONNECTOR = re.compile(r"\b(?:and|plus|with|along with|as well as)\b", re.IGNORECASE)
-_SECOND_REQUEST = re.compile(
-    r"(?:,\s*)?\band\s+(?:what|which|how|why|where|when|who|"
-    r"provide|include|show|list|give|quote|summarize|explain|identify|rank|compare|recommend)\b|"
-    r"\b(?:along with|as well as)\b",
-    re.IGNORECASE,
-)
-_TOP_NUMBER = re.compile(r"\btop\s*[-\N{EN DASH}\N{EM DASH}]?\s*(\d+)\b", re.IGNORECASE)
-_RANKING_LIMIT_EXPECTATION = re.compile(
-    r"\btop\s*[-\N{EN DASH}\N{EM DASH}]?\s*n\b|\btop\s+\d+\b|"
-    r"\blimit\s+(?:the\s+)?(?:results?|rows?)\s+to\b|"
-    r"\b(?:results?|rows?)\s+limit(?:ed)?\s+to\s+\d+\b|\blimit\s+\d+\b",
-    re.IGNORECASE,
-)
-_CURRENCY_LANGUAGE = re.compile(
-    r"\bcurrenc(?:y|ies)\b|\b(?:usd|eur|gbp|cad|aud|jpy|inr)\b|"
-    r"\b(?:exchange|fx)\s+rates?\b|\b(?:dollars?|euros?|pounds?)\b",
-    re.IGNORECASE,
-)
-_CONDITIONAL_LANGUAGE = re.compile(r"\b(?:if|when|unless|where)\b", re.IGNORECASE)
+_WORD = re.compile(r"\b[\w'-]+\b")
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
 class _RawQuestionBatch(StrictModel):
@@ -130,7 +111,7 @@ def persona_question_rules(persona: Persona, settings: AppConfig) -> PersonaQues
 
 @dataclass
 class _ScenarioOutcome:
-    drafts: list[tuple[QuestionDraft, dict[str, Any]]] = field(default_factory=list)
+    drafts: list[tuple[QuestionDraft, Expectations, dict[str, Any]]] = field(default_factory=list)
     rejected: list[RejectedQuestion] = field(default_factory=list)
 
 
@@ -157,56 +138,39 @@ class QuestionGenerator:
         packs: Sequence[ReferencePack] = (),
         *,
         count: int | None = None,
-        evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL,
-        golden_set: GoldenSet | None = None,
+        metrics: Sequence[MetricDefinition] = (),
     ) -> QuestionGenerationResult:
-        """``reference`` and ``packs`` are needed only for grounded scenarios."""
-        per_scenario = (
-            count if count is not None else self._settings.generation.question.question_count
-        )
+        """``reference`` and ``packs`` are needed only for grounded scenarios; ``metrics`` are
+        the run's selected (frozen) metric definitions."""
+        cfg = self._settings.generation.question
+        per_scenario = count if count is not None else cfg.question_count
         if per_scenario < 1:
             raise ValueError("question count must be >= 1")
-        groundings = [_grounding(s, reference, packs, evaluation_profile) for s in scenarios]
-        semaphore = asyncio.Semaphore(self._settings.llm.max_concurrency)
+        groundings = [_grounding(s, reference, packs) for s in scenarios]
+        semaphore = asyncio.Semaphore(cfg.max_parallel_scenarios)
         outcomes = await asyncio.gather(
             *(
                 self._for_scenario(
-                    persona,
-                    product,
-                    s,
-                    grounding,
-                    per_scenario,
-                    pack_identifiers(grounding[0]) if grounding is not None else [],
-                    semaphore,
-                    evaluation_profile,
-                    reference,
-                    golden_set,
+                    persona, product, s, grounding, per_scenario, semaphore, reference, metrics
                 )
                 for s, grounding in zip(scenarios, groundings, strict=True)
             )
         )
 
         result = QuestionGenerationResult()
-        seen = _NearDuplicates(self._settings.generation.question.near_duplicate_threshold)
+        seen: dict[str, str] = {}
         for utterance in persona.example_utterances:
-            seen.add(utterance, "persona example utterance")
+            seen.setdefault(_normalise(utterance), "persona example utterance")
         for utterance in product.typical_user_questions:
-            seen.add(utterance, "product typical user question")
-        if golden_set is not None:
-            for case in golden_set.cases:
-                seen.add(case.question, f"golden case {case.case_id}")
+            seen.setdefault(_normalise(utterance), "product typical user question")
         for scenario, grounding, outcome in zip(scenarios, groundings, outcomes, strict=True):
             identifiers = pack_identifiers(grounding[0]) if grounding is not None else []
             result.rejected.extend(outcome.rejected)
-            for draft, raw in outcome.drafts:
-                duplicate_of = seen.find(draft.utterance)
-                if duplicate_of is not None:
+            for draft, expectations, raw in outcome.drafts:
+                key = _normalise(draft.utterance)
+                if (duplicate_of := seen.get(key)) is not None:
                     result.rejected.append(
-                        RejectedQuestion(
-                            scenario_id=scenario.id,
-                            payload=raw,
-                            reasons=[f"near-duplicate of {duplicate_of}"],
-                        )
+                        _reject(scenario, raw, [f"exact duplicate of {duplicate_of}"])
                     )
                     continue
                 question = QuestionCase(
@@ -214,12 +178,7 @@ class QuestionGenerator:
                     scenario_id=scenario.id,
                     persona_id=persona.id,
                     mode=scenario.mode,
-                    evaluation_profile=evaluation_profile,
-                    reference_pack_id=(
-                        scenario.reference_pack_id
-                        if evaluation_profile is EvaluationProfile.NL2SQL
-                        else None
-                    ),
+                    reference_pack_id=scenario.reference_pack_id,
                     utterance=draft.utterance,
                     intended_goal=scenario.business_goal,
                     intent=draft.intent,
@@ -228,21 +187,23 @@ class QuestionGenerator:
                         ambiguity_level=draft.question_characteristics.ambiguity_level,
                         complexity=complexity_for_plan(draft.plan),
                     ),
-                    expectations=draft.expectations,
+                    expectations=expectations,
                     plan=draft.plan,
                     leak_warnings=[
                         f"mentions reference name {ident!r}"
                         for ident in find_leaks(draft.utterance, identifiers)
                     ],
                 )
-                seen.add(draft.utterance, question.question_id)
+                seen[key] = question.question_id
                 result.questions.append(question)
         self._log.info(
-            "Questions: %d accepted, %d rejected across %d scenario(s) (%d grounded)",
+            "Questions: %d accepted, %d rejected across %d scenario(s) (%d grounded); "
+            "%d generation call(s)",
             len(result.questions),
             len(result.rejected),
             len(scenarios),
             sum(1 for g in groundings if g is not None),
+            len(scenarios),
         )
         return result
 
@@ -253,16 +214,18 @@ class QuestionGenerator:
         scenario: Scenario,
         grounding: tuple[ReferencePack, Reference] | None,
         count: int,
-        identifiers: Sequence[str],
         semaphore: asyncio.Semaphore,
-        evaluation_profile: EvaluationProfile,
         reference: Reference | None,
-        golden_set: GoldenSet | None,
+        metrics: Sequence[MetricDefinition],
     ) -> _ScenarioOutcome:
         cfg = self._settings.generation.question
         rules = persona_question_rules(persona, self._settings)
+        identifiers = pack_identifiers(grounding[0]) if grounding is not None else []
         # Leak check only in grounded mode (there are no identifiers otherwise).
         enforce_leaks = bool(identifiers) and cfg.reject_reference_leaks and not rules.technical
+        request = expectation_request(
+            metrics, reference, grounding[0] if grounding is not None else None
+        )
         options = QuestionPromptOptions(
             count=count,
             max_deliverables=cfg.max_deliverables,
@@ -274,13 +237,10 @@ class QuestionGenerator:
             ),
             allow_follow_ups=cfg.allow_follow_ups,
             allow_cross_source_comparison=cfg.allow_cross_source_comparison,
-            agent_min_tool_calls=cfg.agent_min_tool_calls,
-            agent_min_data_sources=cfg.agent_min_data_sources,
             ambiguity_level=rules.ambiguity_level,
             language=cfg.language,
             allow_vague_questions=rules.allow_vague,
             technical_persona=rules.technical,
-            agent_golden_examples=cfg.agent_golden_examples,
         )
         system, user = build_question_prompt(
             persona,
@@ -288,15 +248,10 @@ class QuestionGenerator:
             scenario,
             grounding,
             options,
-            evaluation_profile=evaluation_profile,
-            agent_reference=reference if evaluation_profile is EvaluationProfile.AGENT else None,
-            golden_set=golden_set,
+            request.requested,
+            tool_definitions=reference if request.needs_tool_definitions else None,
         )
         last: list[_RawQuestionBatch] = []
-        avoid_questions = _NearDuplicates(cfg.near_duplicate_threshold)
-        if golden_set is not None:
-            for case in golden_set.cases:
-                avoid_questions.add(case.question, f"golden case {case.case_id}")
 
         def post_validate(batch: _RawQuestionBatch) -> list[str]:
             last[:] = [batch]
@@ -317,40 +272,18 @@ class QuestionGenerator:
                     continue
                 errors.extend(
                     f"question {i}: {problem}"
-                    for problem in question_policy_problems(draft, product, cfg)
+                    for problem in [
+                        *question_policy_problems(draft, product, cfg),
+                        *shape_problems(draft.expectations, request),
+                        *(
+                            problem
+                            for problems in canonical_problems(
+                                draft.expectations, request, reference
+                            ).values()
+                            for problem in problems
+                        ),
+                    ]
                 )
-                if (
-                    golden_set is not None
-                    and evaluation_profile is EvaluationProfile.AGENT
-                    and reference is not None
-                ):
-                    try:
-                        expectations = ground_agent_expectations(
-                            draft.expectations,
-                            reference,
-                            require_tools=(
-                                scenario.capability is CapabilityClassification.SUPPORTED
-                            ),
-                            require_sources=(
-                                scenario.capability is CapabilityClassification.SUPPORTED
-                            ),
-                        )
-                        if scenario.capability is CapabilityClassification.SUPPORTED:
-                            errors.extend(
-                                f"question {i}: {problem}"
-                                for problem in agent_operational_complexity_problems(
-                                    draft, expectations, cfg
-                                )
-                            )
-                    except InputAssetError as exc:
-                        errors.append(f"question {i}: {exc}")
-                if golden_set is not None and (
-                    duplicate_of := avoid_questions.find(draft.utterance)
-                ):
-                    errors.append(
-                        f"question {i}: near-duplicate of {duplicate_of}; create a genuinely "
-                        "new question inspired by, not copied from, the golden set"
-                    )
             return errors
 
         async with semaphore:
@@ -367,34 +300,26 @@ class QuestionGenerator:
             except LLMOutputValidationError as exc:
                 if not last:
                     return _ScenarioOutcome(
-                        rejected=[
-                            RejectedQuestion(
-                                scenario_id=scenario.id,
-                                payload={},
-                                reasons=list(exc.errors) or [str(exc)],
-                            )
-                        ]
+                        rejected=[_reject(scenario, {}, list(exc.errors) or [str(exc)])]
                     )
-                batch = last[0]  # leaks persisted after retries; reject those questions below
+                batch = last[0]  # problems persisted after retries: judged item by item below
+            except LLMProviderError as exc:
+                # One scenario's failed call never sinks the others (isolated, not retried).
+                self._log.warning("%s: question generation call failed: %s", scenario.id, exc)
+                return _ScenarioOutcome(
+                    rejected=[_reject(scenario, {}, [f"question generation call failed: {exc}"])]
+                )
 
         outcome = _ScenarioOutcome()
         for raw in batch.questions:
             if len(outcome.drafts) >= count:
                 outcome.rejected.append(_reject(scenario, raw, [SURPLUS]))
                 continue
-            checked = self._check(
-                raw,
-                product,
-                identifiers,
-                enforce_leaks,
-                rules,
-                evaluation_profile=evaluation_profile,
-                reference=reference,
-                require_agent_grounding=(scenario.capability is CapabilityClassification.SUPPORTED),
-                ground_agent_contract=golden_set is not None,
-            )
-            if isinstance(checked, QuestionDraft):
-                outcome.drafts.append((checked, raw))
+            checked = self._check(raw, product, identifiers, enforce_leaks, rules, request)
+            if isinstance(checked, tuple):
+                draft, _ = checked
+                expectations = build_expectations(draft.expectations, request, reference)
+                outcome.drafts.append((draft, expectations, raw))
             else:
                 outcome.rejected.append(_reject(scenario, raw, checked))
         if len(outcome.drafts) < count:
@@ -410,12 +335,8 @@ class QuestionGenerator:
         identifiers: Sequence[str],
         enforce_leaks: bool,
         rules: PersonaQuestionRules,
-        *,
-        evaluation_profile: EvaluationProfile,
-        reference: Reference | None,
-        require_agent_grounding: bool,
-        ground_agent_contract: bool,
-    ) -> QuestionDraft | list[str]:
+        request: ExpectationRequest,
+    ) -> tuple[QuestionDraft, None] | list[str]:
         try:
             draft = QuestionDraft.model_validate(raw)
         except ValidationError as exc:
@@ -425,32 +346,13 @@ class QuestionGenerator:
             reasons.append(f"reference leak: {leaks}")
         traits = draft.question_characteristics
         reasons.extend(question_policy_problems(draft, product, self._settings.generation.question))
+        reasons.extend(shape_problems(draft.expectations, request))
         if traits.style is QuestionStyle.VAGUE:
             if not rules.allow_vague:
                 reasons.append(VAGUE_NOT_ALLOWED)
             if traits.ambiguity_level is AmbiguityLevel.LOW:
                 reasons.append("vague question must have ambiguity_level medium or high")
-        if evaluation_profile is EvaluationProfile.AGENT and ground_agent_contract:
-            if reference is None:
-                reasons.append("Agent question generation requires operational Reference data")
-            else:
-                try:
-                    expectations = ground_agent_expectations(
-                        draft.expectations,
-                        reference,
-                        require_tools=require_agent_grounding,
-                        require_sources=require_agent_grounding,
-                    )
-                    draft = draft.model_copy(update={"expectations": expectations})
-                    if require_agent_grounding:
-                        reasons.extend(
-                            agent_operational_complexity_problems(
-                                draft, expectations, self._settings.generation.question
-                            )
-                        )
-                except InputAssetError as exc:
-                    reasons.append(str(exc))
-        return reasons or draft
+        return reasons or (draft, None)
 
 
 def complexity_for_plan(plan: QuestionPlan) -> QuestionComplexity:
@@ -461,51 +363,6 @@ def complexity_for_plan(plan: QuestionPlan) -> QuestionComplexity:
     if len(sources) >= 2 or len(plan.deliverables) >= 3:
         return QuestionComplexity.COMPLEX
     return QuestionComplexity.MEDIUM
-
-
-def agent_operational_complexity_problems(
-    draft: QuestionDraft,
-    expectations: Expectations,
-    policy: QuestionGenerationSettings,
-) -> list[str]:
-    """Enforce selected Agent complexity using observable plans and canonical expectations."""
-
-    plan_sources = {
-        source.casefold() for item in draft.plan.deliverables for source in item.sources
-    }
-    expected_sources = {source.casefold() for source in expectations.expected_data_sources}
-    problems: list[str] = []
-    if len(plan_sources) < policy.agent_min_data_sources:
-        problems.append(
-            f"plan uses {len(plan_sources)} data source(s); selected Agent complexity requires "
-            f"at least {policy.agent_min_data_sources}"
-        )
-    if len(expected_sources) < policy.agent_min_data_sources:
-        problems.append(
-            f"expected_data_sources names {len(expected_sources)} canonical source(s); selected "
-            f"Agent complexity requires at least {policy.agent_min_data_sources}"
-        )
-    if len(expectations.expected_tools) < policy.agent_min_tool_calls:
-        problems.append(
-            f"expected_tools records {len(expectations.expected_tools)} tool call(s); selected "
-            f"Agent complexity requires at least {policy.agent_min_tool_calls}"
-        )
-    return problems
-
-
-def _output_terms(text: str) -> set[str]:
-    return {name for name, pattern in _OUTPUT_TERMS.items() if pattern.search(text)}
-
-
-def _compound_output_problem(subject: str) -> str | None:
-    """Explain when one subject joins two independently observable output types."""
-    for connector in _OUTPUT_CONNECTOR.finditer(subject):
-        before = _output_terms(subject[: connector.start()])
-        after = _output_terms(subject[connector.end() :])
-        if before and after:
-            combined = ", ".join(sorted(before | after))
-            return f"combines multiple requested outputs ({combined}); split them into items"
-    return None
 
 
 def question_policy_problems(
@@ -534,8 +391,6 @@ def question_policy_problems(
         problems.append(f"plan uses unknown product data sources: {unknown}")
 
     for index, item in enumerate(deliverables, start=1):
-        if problem := _compound_output_problem(item.subject):
-            problems.append(f"deliverable {index} {problem}")
         if len({source.casefold() for source in item.sources}) != len(item.sources):
             problems.append(f"deliverable {index} repeats a data source")
         if item.action is not DeliverableAction.COMPARE and len(item.sources) > 1:
@@ -549,15 +404,9 @@ def question_policy_problems(
         ):
             problems.append("cross-source comparison is disabled")
 
-    if len(deliverables) == 1 and _SECOND_REQUEST.search(draft.utterance):
-        problems.append(
-            "utterance appears to request a second output but plan has one deliverable; "
-            "split the outputs into separate plan items or simplify the question"
-        )
-
     if plan.is_follow_up and not policy.allow_follow_ups:
         problems.append("follow-up questions are disabled")
-    words = re.findall(r"\b[\w'-]+\b", draft.utterance)
+    words = _WORD.findall(draft.utterance)
     if len(words) > policy.max_words:
         problems.append(f"utterance has {len(words)} words; maximum is {policy.max_words}")
     if len(draft.expectations.success_criteria) > policy.max_success_criteria:
@@ -565,7 +414,6 @@ def question_policy_problems(
             f"question has {len(draft.expectations.success_criteria)} success criteria; maximum "
             f"is {policy.max_success_criteria}"
         )
-    problems.extend(expectation_policy_problems(draft))
     complexity = complexity_for_plan(plan)
     allowed_complexities = {QuestionComplexity(item) for item in policy.allowed_complexities}
     if complexity not in allowed_complexities:
@@ -580,96 +428,22 @@ def question_policy_problems(
     return problems
 
 
-def expectation_policy_problems(draft: QuestionDraft) -> list[str]:
-    """Reject expectations that add unsupported limits or unconditional currency duties.
-
-    The LLM still writes the natural-language expectations. These deterministic checks cover the
-    two high-impact additions that are machine-checkable from the question plan: invented result
-    counts and data-state-dependent currency safeguards presented as unconditional requirements.
-    """
-    problems: list[str] = []
-    plan_limits = {item.limit for item in draft.plan.deliverables if item.limit is not None}
-    utterance_limits = {int(value) for value in _TOP_NUMBER.findall(draft.utterance)}
-    missing_from_plan = sorted(utterance_limits - plan_limits)
-    if missing_from_plan:
-        problems.append(
-            f"utterance requests top {missing_from_plan} but plan deliverables do not record "
-            "the same numeric limit"
-        )
-
-    expectation_texts = [
-        ("expected_behavior", draft.expectations.expected_behavior),
-        *(
-            (f"success criterion {index}", criterion)
-            for index, criterion in enumerate(draft.expectations.success_criteria, start=1)
-        ),
-    ]
-    question_requests_currency = bool(_CURRENCY_LANGUAGE.search(draft.utterance))
-    for label, text in expectation_texts:
-        if _RANKING_LIMIT_EXPECTATION.search(text):
-            if not plan_limits:
-                problems.append(
-                    f"{label} invents a top-N/result limit that is absent from the plan"
-                )
-            else:
-                stated = {int(value) for value in _TOP_NUMBER.findall(text)}
-                mismatched = sorted(stated - plan_limits)
-                if mismatched:
-                    problems.append(
-                        f"{label} requires top {mismatched}, which does not match plan limit(s) "
-                        f"{sorted(plan_limits)}"
-                    )
-        if (
-            _CURRENCY_LANGUAGE.search(text)
-            and not question_requests_currency
-            and not _CONDITIONAL_LANGUAGE.search(text)
-        ):
-            problems.append(
-                f"{label} adds an unconditional currency requirement not requested by the "
-                'utterance; express a necessary data-dependent safeguard as "If ..."'
-            )
-    return problems
-
-
 def _reject(scenario: Scenario, raw: dict[str, Any], reasons: list[str]) -> RejectedQuestion:
     return RejectedQuestion(scenario_id=scenario.id, payload=raw, reasons=reasons)
 
 
-class _NearDuplicates:
-    """Utterances seen so far, compared by exact text and token similarity."""
-
-    def __init__(self, threshold: float) -> None:
-        self._threshold = threshold
-        self._seen: list[tuple[str, frozenset[str], str]] = []
-
-    def add(self, utterance: str, owner: str) -> None:
-        normalised = _normalise(utterance)
-        self._seen.append((normalised, frozenset(normalised.split()), owner))
-
-    def find(self, utterance: str) -> str | None:
-        normalised = _normalise(utterance)
-        tokens = frozenset(normalised.split())
-        for other_text, other_tokens, owner in self._seen:
-            if normalised == other_text:
-                return owner
-            union = tokens | other_tokens
-            if union and len(tokens & other_tokens) / len(union) >= self._threshold:
-                return owner
-        return None
-
-
 def _normalise(text: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+    """Case / punctuation / spacing normalization for EXACT duplicate detection only."""
+    return " ".join(_NON_ALNUM.sub(" ", text.casefold()).split())
 
 
 def _grounding(
     scenario: Scenario,
     reference: Reference | None,
     packs: Sequence[ReferencePack],
-    evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL,
 ) -> tuple[ReferencePack, Reference] | None:
     """Grounded scenario -> (its pack, the reference); ungrounded -> None."""
-    if evaluation_profile is EvaluationProfile.AGENT or scenario.mode == GenerationMode.UNGROUNDED:
+    if scenario.mode == GenerationMode.UNGROUNDED:
         return None
     pack = next((p for p in packs if p.pack_id == scenario.reference_pack_id), None)
     if reference is None or pack is None:

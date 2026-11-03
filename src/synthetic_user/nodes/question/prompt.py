@@ -1,47 +1,41 @@
 """Assemble the Node 3 (question) prompt; the prompt text itself is in ``prompt.yaml``.
 
-Both modes: persona (read as prompts/persona.py says) + product + scenario. The persona alone
-decides HOW the question is asked; the scenario says only WHAT the user wants (D204).
-Grounded adds the scenario's cheat sheet (Reference Pack) and the usage instructions, for the
-model's understanding only - reference names are never quoted. Each question owns its
-expectations: expected_behavior (written) and 1-4 success_criteria (design v3).
+ONE scenario per prompt. Both modes: persona (read as prompts/persona.py says) + product +
+scenario. The persona alone decides HOW the question is asked; the scenario says only WHAT the
+user wants (D204). Grounded adds the scenario's cheat sheet (Reference Pack), the usage
+instructions and - when a selected metric needs them - the authoritative tool definitions, for
+the model's understanding only. Each question owns its expectations: the universal
+expected_behavior + 1-4 success_criteria, plus metric_expectations ONLY for the selected
+metrics whose definition needs a question-specific value.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from synthetic_user.models.base import AmbiguityLevel
-from synthetic_user.models.evaluation_profile import EvaluationProfile
-from synthetic_user.models.golden_set import GoldenSet
+from synthetic_user.models.metrics import ExpectationFieldType, MetricDefinition
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
     MAX_DELIVERABLES,
     MAX_SUCCESS_CRITERIA,
     DeliverableAction,
+    MetricExpectationStatus,
     QuestionComplexity,
     QuestionStyle,
 )
 from synthetic_user.models.reference import Reference, ReferencePack
-from synthetic_user.models.scenario import CapabilityClassification, Scenario, TaskType
+from synthetic_user.models.scenario import Scenario, TaskType
 from synthetic_user.prompts.contracts import choices, render_contract
 from synthetic_user.prompts.persona import question_persona_block
 from synthetic_user.prompts.templates import prompts_beside
-from synthetic_user.references.golden_set import golden_inspiration, golden_set_summary
 
 PROMPTS = prompts_beside(__file__)
 SYSTEM = PROMPTS.text("system")
-QUESTION_EXAMPLE: dict[str, Any] = PROMPTS.data(
-    "question_example",
-    deliverable_actions=choices(DeliverableAction),
-    task_types=choices(TaskType),
-    styles=choices(QuestionStyle),
-    ambiguity_levels=choices(AmbiguityLevel),
-    max_success_criteria=MAX_SUCCESS_CRITERIA,
-)
 # Fields of the product description and the scenario shown to the question generator.
 PRODUCT_FIELDS = {
     "name",
@@ -63,15 +57,11 @@ SCENARIO_FIELDS = {
     "success_criteria",
     "question_intent",
 }
-# Fields of each golden-set example shown as inspiration (NL2SQL; Agent shows whole examples).
-GOLDEN_EXAMPLE_FIELDS = (
-    "case_id",
-    "scenario_type",
-    "question",
-    "expected_behavior",
-    "success_criteria",
-    "uploaded_criteria",
-)
+_FIELD_PLACEHOLDERS = {
+    ExpectationFieldType.STRING: "<text>",
+    ExpectationFieldType.STRING_LIST: ["<item>"],
+    ExpectationFieldType.BOOLEAN: "<true | false>",
+}
 
 
 @dataclass(frozen=True)
@@ -80,7 +70,6 @@ class QuestionPromptOptions:
     ambiguity_level: AmbiguityLevel
     language: str
     allow_vague_questions: bool
-    agent_golden_examples: int = 6
     max_deliverables: int = MAX_DELIVERABLES
     max_sources: int = 1
     max_success_criteria: int = MAX_SUCCESS_CRITERIA
@@ -91,37 +80,64 @@ class QuestionPromptOptions:
     )
     allow_follow_ups: bool = False
     allow_cross_source_comparison: bool = False
-    agent_min_tool_calls: int = 1
-    agent_min_data_sources: int = 1
     # True when this persona would normally use technical identifiers (e.g. a data engineer).
     technical_persona: bool = False
 
 
-def _golden_question_guidance(
-    golden_set: GoldenSet | None,
-    scenario: Scenario,
-    options: QuestionPromptOptions,
-) -> str:
-    if golden_set is None:
-        return ""
-    examples = golden_inspiration(
-        golden_set, query=_golden_query(scenario), limit=options.agent_golden_examples
+def question_example(metrics: Sequence[MetricDefinition]) -> dict[str, Any]:
+    example: dict[str, Any] = PROMPTS.data(
+        "question_example",
+        deliverable_actions=choices(DeliverableAction),
+        task_types=choices(TaskType),
+        styles=choices(QuestionStyle),
+        ambiguity_levels=choices(AmbiguityLevel),
+        max_success_criteria=MAX_SUCCESS_CRITERIA,
     )
-    patterns = [{field: example[field] for field in GOLDEN_EXAMPLE_FIELDS} for example in examples]
-    return PROMPTS.text(
-        "golden_guidance",
-        summary=json.dumps(golden_set_summary(golden_set), indent=2),
-        examples=json.dumps(patterns, indent=2),
-    )
-
-
-def _golden_query(scenario: Scenario) -> str:
-    """The text golden-set examples are ranked against."""
-    return " ".join((scenario.business_goal, scenario.question_intent, scenario.title))
+    if metrics:
+        expectations = example["questions"][0]["expectations"]
+        entry = PROMPTS.data(
+            "metric_expectation_example", statuses=choices(MetricExpectationStatus)
+        )
+        expectations["metric_expectations"] = {
+            m.metric_id: {
+                "status": entry["status"],
+                "value": {
+                    f.name: _FIELD_PLACEHOLDERS[f.type] for f in m.question_expectation_schema
+                },
+                "reason": entry["reason"],
+            }
+            for m in metrics
+        }
+    return example
 
 
 def _allowed(flag: bool) -> str:
     return PROMPTS.text("allowed" if flag else "not_allowed")
+
+
+def _metric_rules(metrics: Sequence[MetricDefinition]) -> str:
+    if not metrics:
+        return PROMPTS.text("no_metric_rules")
+    requirements = "\n".join(
+        PROMPTS.text(
+            "metric_requirement",
+            metric_id=m.metric_id,
+            display_name=m.display_name,
+            instructions=m.generation_instructions or m.description,
+            fields="; ".join(
+                PROMPTS.text(
+                    "metric_field",
+                    name=f.name,
+                    type=f.type.value,
+                    required=PROMPTS.text("field_required" if f.required else "field_optional"),
+                    description=f.description,
+                )
+                for f in m.question_expectation_schema
+            ),
+        )
+        for m in metrics
+    )
+    return PROMPTS.text("metric_rules", metrics=requirements)
 
 
 def build_question_prompt(
@@ -130,13 +146,15 @@ def build_question_prompt(
     scenario: Scenario,
     grounding: tuple[ReferencePack, Reference] | None,
     options: QuestionPromptOptions,
-    evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL,
-    agent_reference: Reference | None = None,
-    golden_set: GoldenSet | None = None,
+    metrics: Sequence[MetricDefinition] = (),
+    *,
+    tool_definitions: Reference | None = None,
 ) -> tuple[str, str]:
     """Return (system, user) asking for ``options.count`` questions for ``scenario``.
 
     ``grounding`` (pack + reference) is given for grounded scenarios, None for ungrounded.
+    ``metrics`` = the selected metrics whose question-specific expectation is requested.
+    ``tool_definitions`` = the reference whose agent_context a requested metric needs.
     """
     product_json = product.model_dump(mode="json", include=PRODUCT_FIELDS)
     scenario_json = scenario.model_dump(mode="json", include=SCENARIO_FIELDS)
@@ -148,20 +166,22 @@ def build_question_prompt(
             "vague_allowed" if options.allow_vague_questions else "vague_not_allowed"
         ),
     )
-    is_agent = evaluation_profile is EvaluationProfile.AGENT
-    if is_agent:
-        reference_block, missing = _agent_reference(scenario, options, agent_reference, golden_set)
-    elif grounding is not None:
+    tools = (
+        PROMPTS.text("grounded_tools", tools=tool_definitions.render_agent_context())
+        if tool_definitions is not None and tool_definitions.agent_context is not None
+        else ""
+    )
+    if grounding is not None:
         pack, reference = grounding
         reference_block = PROMPTS.text(
             "grounded_reference",
             pack=pack.render(),
             instructions=reference.instructions_text(),
-            golden_guidance=_golden_question_guidance(golden_set, scenario, options),
+            tools=tools,
         )
         missing = PROMPTS.text("grounded_missing")
     else:
-        reference_block, missing = "", PROMPTS.text("ungrounded_missing")
+        reference_block, missing = tools, PROMPTS.text("ungrounded_missing")
 
     user = PROMPTS.text(
         "core",
@@ -181,54 +201,8 @@ def build_question_prompt(
         identifiers_rule=PROMPTS.text(
             "identifiers_technical" if options.technical_persona else "identifiers_plain"
         ),
-        profile_rules=_agent_rules(scenario, options, golden_set) if is_agent else "",
-        golden_rules=PROMPTS.text("golden_rules") if golden_set is not None else "",
-        contract=render_contract(QUESTION_EXAMPLE),
+        metric_rules=_metric_rules(metrics),
+        contract=render_contract(question_example(metrics)),
         missing=missing,
     )
     return SYSTEM, user
-
-
-def _agent_reference(
-    scenario: Scenario,
-    options: QuestionPromptOptions,
-    agent_reference: Reference | None,
-    golden_set: GoldenSet | None,
-) -> tuple[str, str]:
-    """The Agent operational reference (+ golden-set inspiration) and the missing-info rule."""
-    if agent_reference is not None and agent_reference.agent_context is not None:
-        operational = agent_reference.render_agent_context()
-    else:
-        operational = PROMPTS.text("agent_no_context")
-    block = PROMPTS.text("agent_reference", context=operational)
-    if golden_set is not None:
-        inspiration = golden_inspiration(
-            golden_set, query=_golden_query(scenario), limit=options.agent_golden_examples
-        )
-        block += PROMPTS.text(
-            "agent_inspiration",
-            summary=json.dumps(golden_set_summary(golden_set), indent=2),
-            examples=json.dumps(inspiration, indent=2),
-        )
-    return block, PROMPTS.text("agent_missing")
-
-
-def _agent_rules(
-    scenario: Scenario, options: QuestionPromptOptions, golden_set: GoldenSet | None
-) -> str:
-    """The Agent answer-key rules, with this scenario's operational complexity floor."""
-    if scenario.capability is CapabilityClassification.SUPPORTED:
-        minimum = PROMPTS.text(
-            "agent_minimum_supported",
-            min_data_sources=options.agent_min_data_sources,
-            min_tool_calls=options.agent_min_tool_calls,
-        )
-    else:
-        minimum = PROMPTS.text("agent_minimum_unsupported")
-    return PROMPTS.text(
-        "agent_rules",
-        operational_minimum=minimum,
-        golden_rule=PROMPTS.text(
-            "agent_golden_rule" if golden_set is not None else "agent_no_golden_rule"
-        ),
-    )

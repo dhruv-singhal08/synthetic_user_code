@@ -5,11 +5,10 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from synthetic_user.models.base import AmbiguityLevel, NonEmptyStr, StrictModel
-from synthetic_user.models.evaluation_profile import EvaluationProfile
-from synthetic_user.models.run import GenerationMode, mode_mismatch
+from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import TaskType
 
 
@@ -53,9 +52,6 @@ class QuestionCharacteristics(StrictModel):
 
 MAX_SUCCESS_CRITERIA = 4
 MAX_DELIVERABLES = 3
-# Canonical reference definitions / uploaded golden-set criteria kept per question.
-MAX_REFERENCE_CONTEXT = 40
-MAX_GOLDEN_SET_CRITERIA = 40
 
 
 class QuestionDeliverable(StrictModel):
@@ -87,8 +83,47 @@ class QuestionDraftCharacteristics(StrictModel):
     ambiguity_level: AmbiguityLevel
 
 
+class MetricExpectationStatus(StrEnum):
+    GENERATED = "generated"  # a validated, question-specific value exists
+    NOT_APPLICABLE = "not_applicable"  # the metric does not apply to this question
+    # The metric may apply, but its expectation cannot be established from the question and
+    # the authoritative assets: no value is fabricated and the metric is never scored 0.
+    CANNOT_GENERATE = "cannot_generate"
+
+
+class MetricExpectation(StrictModel):
+    status: MetricExpectationStatus
+    value: dict[NonEmptyStr, JsonValue] | None = None
+    reason: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> Self:
+        if self.status is MetricExpectationStatus.GENERATED:
+            if not self.value:
+                raise ValueError("a generated metric expectation needs a value")
+        elif self.value is not None:
+            raise ValueError(f"a {self.status.value} metric expectation has value null")
+        if self.status is MetricExpectationStatus.CANNOT_GENERATE and self.reason is None:
+            raise ValueError("cannot_generate needs a specific reason")
+        return self
+
+
+# Fields of the pre-metric-registry expectation schema (Agent profile / golden set). Old
+# artifacts keep them under ``legacy_expectations`` (labelled, never used by the new judges).
+LEGACY_EXPECTATION_FIELDS = (
+    "expected_tools",
+    "expected_journey",
+    "expected_time_period",
+    "expected_data_sources",
+    "expected_context",
+    "prohibited_behaviors",
+    "reference_context",
+    "golden_set_criteria",
+)
+
+
 class Expectations(StrictModel):
-    """What the evaluator judges against (design v3). The question owns these."""
+    """What the evaluator judges against. Universal fields + selected-metric expectations only."""
 
     expected_behavior: NonEmptyStr = Field(
         description="1-3 sentences: what the product should do for this exact question"
@@ -96,34 +131,33 @@ class Expectations(StrictModel):
     success_criteria: list[NonEmptyStr] = Field(
         min_length=1,
         max_length=MAX_SUCCESS_CRITERIA,
-        description="must-haves of a goal-complete answer; may be negative "
-        '("does not mix currencies")',
+        description="observable, fair must-haves of a goal-complete answer",
     )
-    expected_tools: list[NonEmptyStr] = Field(default_factory=list, max_length=12)
-    expected_journey: NonEmptyStr | None = None
-    expected_time_period: NonEmptyStr | None = None
-    expected_data_sources: list[NonEmptyStr] = Field(default_factory=list, max_length=8)
-    expected_context: list[NonEmptyStr] = Field(default_factory=list, max_length=12)
-    prohibited_behaviors: list[NonEmptyStr] = Field(default_factory=list, max_length=12)
-    reference_context: list[NonEmptyStr] = Field(
-        default_factory=list,
-        max_length=MAX_REFERENCE_CONTEXT,
-        description="Canonical tool/source/workflow definitions copied from reference data",
-    )
-    golden_set_criteria: dict[NonEmptyStr, NonEmptyStr] = Field(
-        default_factory=dict,
-        max_length=MAX_GOLDEN_SET_CRITERIA,
-        description="Every non-empty expected criterion preserved exactly from the uploaded row",
-    )
+    # Only metrics that need a question-specific value appear here (never empty placeholders).
+    metric_expectations: dict[NonEmptyStr, MetricExpectation] = Field(default_factory=dict)
+    # Read-only carrier for artifacts written before the metric registry (see module docs).
+    legacy_expectations: dict[NonEmptyStr, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or not any(k in value for k in LEGACY_EXPECTATION_FIELDS):
+            return value
+        data = dict(value)
+        legacy = dict(data.get("legacy_expectations") or {})
+        for key in LEGACY_EXPECTATION_FIELDS:
+            item = data.pop(key, None)
+            if item not in (None, "", [], {}):
+                legacy[key] = item
+        data["legacy_expectations"] = legacy
+        return data
 
 
 class QuestionCase(StrictModel):
     question_id: NonEmptyStr = Field(pattern=r"^Q_\d{3,}$")
     scenario_id: NonEmptyStr = Field(pattern=r"^SCN_\d{3,}$")
-    golden_case_id: NonEmptyStr | None = Field(default=None, pattern=r"^GOLD_\d{3,}$")
     persona_id: NonEmptyStr
     mode: GenerationMode
-    evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL
     reference_pack_id: NonEmptyStr | None = None
     utterance: NonEmptyStr
     intended_goal: NonEmptyStr
@@ -135,21 +169,37 @@ class QuestionCase(StrictModel):
     # Reference names (identifier-like core_ref names) the utterance repeats.
     leak_warnings: list[NonEmptyStr] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy(cls, value: Any) -> Any:
+        """Artifacts from the profile / golden-set era: the profile is not a question property
+        any more and golden cases no longer exist (mode and expectations are kept)."""
+        if isinstance(value, dict) and ("evaluation_profile" in value or "golden_case_id" in value):
+            data = dict(value)
+            data.pop("evaluation_profile", None)
+            data.pop("golden_case_id", None)
+            return data
+        return value
+
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        if self.evaluation_profile is EvaluationProfile.NL2SQL:
-            problem = mode_mismatch(
-                self.mode, self.reference_pack_id is not None, "a reference_pack_id"
-            )
-        else:
-            problem = (
-                "Agent questions must not have a reference_pack_id"
-                if self.reference_pack_id is not None
-                else None
-            )
-        if problem:
-            raise ValueError(f"question {self.question_id}: {problem}")
+        # Agent-profile questions of earlier runs were grounded without a pack: accepted on
+        # read only (no new question is created that way).
+        if self.mode is GenerationMode.UNGROUNDED and self.reference_pack_id is not None:
+            raise ValueError(f"question {self.question_id}: mode ungrounded must not have a pack")
         return self
+
+
+class MetricExpectationDraft(StrictModel):
+    status: MetricExpectationStatus
+    value: dict[NonEmptyStr, JsonValue] | None = None
+    reason: NonEmptyStr | None = None
+
+
+class ExpectationsDraft(StrictModel):
+    expected_behavior: NonEmptyStr
+    success_criteria: list[NonEmptyStr] = Field(min_length=1, max_length=MAX_SUCCESS_CRITERIA)
+    metric_expectations: dict[NonEmptyStr, MetricExpectationDraft] = Field(default_factory=dict)
 
 
 class QuestionDraft(StrictModel):
@@ -159,7 +209,7 @@ class QuestionDraft(StrictModel):
     plan: QuestionPlan
     intent: QuestionIntent
     question_characteristics: QuestionDraftCharacteristics
-    expectations: Expectations
+    expectations: ExpectationsDraft
 
 
 class QuestionBatchDraft(StrictModel):

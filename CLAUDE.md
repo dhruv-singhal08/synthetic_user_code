@@ -13,14 +13,19 @@ Pipeline (single-turn, design v3: `docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md`):
 
 ```
 Persona + Product [+ Reference (data_catalog | document_collection) + optional instructions]
-  -> [1] Scenarios (+ Reference Pack only when grounded) -> [2] Questions
-  -> [3] Product Executor (ProductAdapter) -> [4] Evaluator (one generic judge, 5 metrics;
-     correctness / groundedness against the cheat sheet when grounded) -> Bug Candidates
+  + run metric selection (11 built-in metrics + custom metrics; no evaluation profiles)
+  -> [0] frozen metric config (compiler call only for custom metrics)
+  -> [1] Scenarios (one call; + Reference Pack only when grounded)
+  -> [2] Questions (one call per scenario; metric expectations only where needed)
+  -> [3] Product Executor (ProductAdapter; + tool trace / retrieved context)
+  -> [4] Evaluator (deterministic applicability; General Judge + Retrieval/Grounding Judge,
+     at most one call each; provisional verdict policy) -> Bug Candidates
 ```
 
 One orchestrator. Nodes are classes, not agents. One package per node
 (`nodes/{scenario,question,executor,evaluator}/`): its code, the code that assembles its
-prompts (`*prompt.py`) and the prompt text (`*prompt.yaml`). Layout: README "Code layout".
+prompts (`*prompt.py`) and the prompt text (`*prompt.yaml`). Metric definitions (rubrics)
+are data in `metrics/catalog.yaml`. Layout: README "Code layout". Decisions D211-D224.
 
 ## HARD RULES (v2.1)
 

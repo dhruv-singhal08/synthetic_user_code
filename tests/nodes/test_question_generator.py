@@ -6,18 +6,20 @@ from typing import Any
 import pytest
 
 from synthetic_user.core.config import AppConfig
-from synthetic_user.core.exceptions import ArtifactIntegrityError
+from synthetic_user.core.exceptions import ArtifactIntegrityError, LLMProviderError
 from synthetic_user.core.identifiers import SequentialIdGenerator
-from synthetic_user.llm.fake import FakeLLMClient
+from synthetic_user.llm.fake import FakeCall, FakeLLMClient
+from synthetic_user.metrics.registry import builtin_metric_config
 from synthetic_user.models.base import AmbiguityLevel
 from synthetic_user.models.persona import ExpertiseLevel, Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionGenerationResult
-from synthetic_user.models.reference import Reference, ReferencePack
+from synthetic_user.models.reference import CatalogPackDraft, Reference, ReferencePack, TablePick
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario, TaskType
 from synthetic_user.nodes.question.generator import SURPLUS, VAGUE_NOT_ALLOWED, QuestionGenerator
 from synthetic_user.nodes.question.prompt import QuestionPromptOptions, build_question_prompt
+from synthetic_user.references.pack import build_pack
 
 
 def plan_for(complexity: str, limit: int | None = None) -> dict[str, Any]:
@@ -95,6 +97,8 @@ class Env:
         scenarios: int = 1,
         count: int = 2,
         persona: Persona | None = None,
+        metrics: tuple[str, ...] = (),
+        reference: Reference | None = None,
         **question: Any,
     ) -> QuestionGenerationResult:
         generator = QuestionGenerator(
@@ -107,9 +111,10 @@ class Env:
             persona or self.persona,
             self.product,
             self.scenarios[:scenarios],
-            self.reference,
+            reference or self.reference,
             self.packs,
             count=count,
+            metrics=builtin_metric_config(list(metrics)).definitions if metrics else (),
         )
 
 
@@ -266,7 +271,8 @@ async def test_vague_rejected_when_not_allowed(env: Env) -> None:
 # --- dedupe -----------------------------------------------------------------------------------
 
 
-async def test_near_duplicates_dropped_and_recorded(env: Env) -> None:
+async def test_only_exact_duplicates_are_rejected(env: Env) -> None:
+    """Exact (case / punctuation / spacing normalized) duplicates only: no similarity score."""
     llm = FakeLLMClient(
         [
             batch(
@@ -274,7 +280,7 @@ async def test_near_duplicates_dropped_and_recorded(env: Env) -> None:
                 q("Who are our top card spenders, this quarter?!"),
             ),
             batch(
-                q("who are our TOP card spenders this quarter"),
+                q("Who were our top card spenders over this quarter?"),  # similar, not equal
                 q("How is category spend trending?"),
             ),
         ]
@@ -282,13 +288,10 @@ async def test_near_duplicates_dropped_and_recorded(env: Env) -> None:
     result = await env.run(llm, scenarios=2)
     assert [x.utterance for x in result.questions] == [
         "Who are our top card spenders this quarter?",
+        "Who were our top card spenders over this quarter?",
         "How is category spend trending?",
     ]
-    assert [r.reasons for r in result.rejected] == [
-        ["near-duplicate of Q_001"],
-        ["near-duplicate of Q_001"],
-    ]
-    assert [r.scenario_id for r in result.rejected] == ["SCN_001", "SCN_002"]
+    assert [r.reasons for r in result.rejected] == [["exact duplicate of Q_001"]]
 
 
 async def test_copying_persona_example_rejected(env: Env) -> None:
@@ -296,7 +299,7 @@ async def test_copying_persona_example_rejected(env: Env) -> None:
     llm = FakeLLMClient([batch(q(example))])
     result = await env.run(llm, count=1)
     assert not result.questions
-    assert result.rejected[0].reasons == ["near-duplicate of persona example utterance"]
+    assert result.rejected[0].reasons == ["exact duplicate of persona example utterance"]
 
 
 async def test_copying_a_typical_user_question_rejected(env: Env) -> None:
@@ -310,7 +313,232 @@ async def test_copying_a_typical_user_question_rejected(env: Env) -> None:
         env.persona, product, env.scenarios[:1], env.reference, env.packs, count=1
     )
     assert not result.questions
-    assert result.rejected[0].reasons == ["near-duplicate of product typical user question"]
+    assert result.rejected[0].reasons == ["exact duplicate of product typical user question"]
+
+
+# --- one call per scenario, concurrency, isolation ---------------------------------------------
+
+
+class _CountingLLM(FakeLLMClient):
+    """Tracks how many generation calls are in flight at once."""
+
+    def __init__(self, reply: dict[str, Any], fail_on: str | None = None) -> None:
+        super().__init__()
+        self._reply, self._fail_on = reply, fail_on
+        self.in_flight = 0
+        self.peak = 0
+
+    async def generate_json(self, system: str, user: str) -> dict[str, Any]:
+        import asyncio
+        import copy
+
+        self.calls.append(FakeCall("generate_json", system, user))
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        await asyncio.sleep(0.01)
+        self.in_flight -= 1
+        if self._fail_on is not None and self._fail_on in user:
+            raise LLMProviderError("provider down for this scenario")
+        reply = copy.deepcopy(self._reply)
+        title = user.split('"title": "', 1)[1].split('"', 1)[0]
+        reply["questions"][0]["utterance"] = f"Question about {title}?"
+        return reply
+
+
+def _many_scenarios(env: Env, n: int) -> list[Scenario]:
+    base = env.scenarios[0]
+    return [
+        base.model_copy(update={"id": f"SCN_{i:03d}", "title": f"Goal {i}", "signature": f"s{i}"})
+        for i in range(1, n + 1)
+    ]
+
+
+async def _generate_for(env: Env, llm: FakeLLMClient, scenarios: list[Scenario], **cfg: Any) -> Any:
+    generator = QuestionGenerator(
+        llm,
+        _settings(env.settings, **cfg),
+        logging.getLogger("test"),
+        id_generator=SequentialIdGenerator(),
+    )
+    packs = [
+        env.packs[0].model_copy(update={"pack_id": s.reference_pack_id, "scenario_id": s.id})
+        for s in scenarios
+    ]
+    scenarios = [s.model_copy(update={"reference_pack_id": f"RP_{s.id}"}) for s in scenarios]
+    packs = [p.model_copy(update={"pack_id": f"RP_{p.scenario_id}"}) for p in packs]
+    return await generator.generate(
+        env.persona, env.product, scenarios, env.reference, packs, count=1
+    )
+
+
+async def test_one_call_per_scenario_concurrency_default_five(env: Env) -> None:
+    llm = _CountingLLM(batch(q("x")))
+    result = await _generate_for(env, llm, _many_scenarios(env, 8))
+    assert len(llm.calls) == 8  # exactly one generation call per accepted scenario
+    assert llm.peak == 5  # generation.question.max_parallel_scenarios default
+    # results keep the input scenario order whatever order the calls finish in
+    assert [x.scenario_id for x in result.questions] == [f"SCN_{i:03d}" for i in range(1, 9)]
+    assert [x.question_id for x in result.questions] == [f"Q_{i:03d}" for i in range(1, 9)]
+
+
+async def test_concurrency_is_configurable(env: Env) -> None:
+    llm = _CountingLLM(batch(q("x")))
+    await _generate_for(env, llm, _many_scenarios(env, 4), max_parallel_scenarios=2)
+    assert llm.peak == 2
+
+
+async def test_failed_scenario_call_is_isolated(env: Env) -> None:
+    llm = _CountingLLM(batch(q("x")), fail_on='"title": "Goal 2"')
+    result = await _generate_for(env, llm, _many_scenarios(env, 3))
+    assert [x.scenario_id for x in result.questions] == ["SCN_001", "SCN_003"]
+    assert [(r.scenario_id, r.reasons) for r in result.rejected] == [
+        ("SCN_002", ["question generation call failed: provider down for this scenario"])
+    ]
+
+
+# --- metric expectations -----------------------------------------------------------------------
+
+
+def with_metric_expectations(question: dict[str, Any], entries: dict[str, Any]) -> dict[str, Any]:
+    question = {**question, "expectations": {**question["expectations"]}}
+    question["expectations"]["metric_expectations"] = entries
+    return question
+
+
+async def test_metrics_without_question_expectations_get_no_entries(env: Env) -> None:
+    llm = FakeLLMClient([batch(q("Who spends most?"))])
+    result = await env.run(llm, count=1, metrics=("relevance", "correctness_completeness"))
+    assert result.questions[0].expectations.metric_expectations == {}
+    prompt = llm.calls[0].user
+    assert "metric_expectations must be {}" in prompt
+    assert '"metric_expectations": {}' in prompt
+
+
+async def test_context_recall_checklist_generated_and_stored(env: Env) -> None:
+    entry = {
+        "context_recall": {
+            "status": "generated",
+            "value": {"required_information": ["card spend per employee", "the last quarter"]},
+        }
+    }
+    llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
+    result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
+    stored = result.questions[0].expectations.metric_expectations["context_recall"]
+    assert stored.status == "generated"
+    assert stored.value == {"required_information": ["card spend per employee", "the last quarter"]}
+    prompt = llm.calls[0].user
+    assert "required_information (string_list, required)" in prompt
+    assert "never invent" in prompt.lower()
+    assert '"context_recall": {' in prompt  # only the metric that needs an expectation
+
+
+async def test_cannot_generate_is_recorded_and_question_kept(env: Env) -> None:
+    entry = {
+        "context_recall": {
+            "status": "cannot_generate",
+            "value": None,
+            "reason": "the question does not say which period",
+        }
+    }
+    llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
+    result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
+    assert len(result.questions) == 1 and not result.rejected
+    stored = result.questions[0].expectations.metric_expectations["context_recall"]
+    assert (stored.status, stored.value, stored.reason) == (
+        "cannot_generate",
+        None,
+        "the question does not say which period",
+    )
+
+
+@pytest.mark.parametrize(
+    ("entries", "problem"),
+    [
+        ({}, "metric_expectations is missing ['context_recall']"),
+        (
+            {
+                "context_recall": {"status": "generated", "value": {"required_information": []}},
+            },
+            "required field 'required_information' is missing",
+        ),
+        (
+            {
+                "context_recall": {"status": "generated", "value": {"other": ["x"]}},
+            },
+            "unknown field 'other'",
+        ),
+        (
+            {
+                "context_recall": {"status": "cannot_generate", "value": None},
+            },
+            "needs a specific reason",
+        ),
+        (
+            {
+                "context_recall": {"status": "not_applicable", "value": None, "reason": "n/a"},
+                "relevance": {"status": "not_applicable", "value": None, "reason": "n/a"},
+            },
+            "must not include ['relevance']",
+        ),
+    ],
+)
+async def test_malformed_metric_expectations_rejected(
+    env: Env, entries: dict[str, Any], problem: str
+) -> None:
+    bad = with_metric_expectations(q("Who spends most?"), entries)
+    llm = FakeLLMClient([batch(bad)] * 3)
+    result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
+    assert not result.questions
+    assert any(problem in reason for reason in result.rejected[0].reasons), result.rejected
+
+
+async def test_tool_expectation_cannot_generate_without_tool_definitions(env: Env) -> None:
+    """No agent_context in the reference: code records cannot_generate, the LLM is not asked."""
+    llm = FakeLLMClient([batch(q("Who spends most?"))])
+    result = await env.run(llm, count=1, metrics=("relevance", "tool_correctness"))
+    stored = result.questions[0].expectations.metric_expectations["tool_correctness"]
+    assert stored.status == "cannot_generate"
+    assert "no authoritative tool definitions" in (stored.reason or "")
+    assert "tool_correctness (" not in llm.calls[0].user
+
+
+async def test_tool_expectation_canonical_names_and_unknown_tools(
+    env: Env, tool_reference: Reference
+) -> None:
+    pack, _ = build_pack(
+        CatalogPackDraft(tables=[TablePick(table="complaints_t", columns=["theme"], why="x")]),
+        tool_reference,
+        "SCN_001",
+    )
+    assert pack is not None
+    scenario = env.scenarios[0].model_copy(update={"reference_id": tool_reference.reference_id})
+    tools_env = Env(env.persona, env.product, [scenario], tool_reference, [pack], env.settings)
+    good = {
+        "tool_correctness": {
+            "status": "generated",
+            "value": {"expected_tools": ["aggregate"], "expected_data_sources": ["Survey data"]},
+        }
+    }
+    bad = {
+        "tool_correctness": {
+            "status": "generated",
+            "value": {"expected_tools": ["invented_tool"]},
+        }
+    }
+    llm = FakeLLMClient([batch(with_metric_expectations(q("Which complaints rank top?"), good))])
+    result = await tools_env.run(llm, count=1, metrics=("tool_correctness",))
+    value = result.questions[0].expectations.metric_expectations["tool_correctness"].value
+    # aliases are stored as the canonical names of the authoritative tool definitions
+    assert value == {"expected_tools": ["aggregate_feedback"], "expected_data_sources": ["csat"]}
+    assert "aggregate_feedback" in llm.calls[0].user  # authoritative definitions are shown
+
+    llm = FakeLLMClient([batch(with_metric_expectations(q("Which complaints rank top?"), bad))] * 3)
+    result = await tools_env.run(llm, count=1, metrics=("tool_correctness",))
+    assert len(llm.calls) == 3  # retried with the membership problem as feedback
+    assert "unknown tool 'invented_tool'" in llm.calls[1].user
+    # never fabricated or silently fixed: recorded as cannot_generate, the question is kept
+    stored = result.questions[0].expectations.metric_expectations["tool_correctness"]
+    assert stored.status == "cannot_generate" and "invented_tool" in (stored.reason or "")
 
 
 # --- other ------------------------------------------------------------------------------------
@@ -588,23 +816,6 @@ def _draft(utterance: str, **changes: Any) -> Any:
     ("utterance", "changes", "problem"),
     [
         (
-            "Show complaint themes?",
-            {"plan__deliverables": [{"action": "rank", "subject": "themes with comments"}]},
-            "combines multiple requested outputs",
-        ),
-        ("Who spent most and what did they buy?", {}, "appears to request a second output"),
-        ("Top 5 spenders?", {}, "do not record the same numeric limit"),
-        (
-            "Who spent most?",
-            {"expectations__expected_behavior": "Return the top 10 spenders."},
-            "invents a top-N",
-        ),
-        (
-            "Who spent most?",
-            {"expectations__success_criteria": ["shows amounts in USD"]},
-            "unconditional currency requirement",
-        ),
-        (
             "Who spent most?",
             {"plan__deliverables": [{"action": "rank", "subject": "spend", "sources": ["CRM"]}]},
             "unknown product data sources",
@@ -633,3 +844,51 @@ def test_clean_question_has_no_policy_problems(env: Env) -> None:
         )
         == []
     )
+
+
+@pytest.mark.parametrize(
+    ("utterance", "changes"),
+    [
+        (
+            "Show complaint themes?",
+            {"plan__deliverables": [{"action": "rank", "subject": "themes with comments"}]},
+        ),
+        ("Who spent most and what did they buy?", {}),
+        ("Top 5 spenders?", {}),
+        ("Who spent most?", {"expectations__expected_behavior": "Return the top 10 spenders."}),
+        ("Who spent most?", {"expectations__success_criteria": ["shows amounts in USD"]}),
+    ],
+)
+def test_no_regex_semantic_rejection(env: Env, utterance: str, changes: dict[str, Any]) -> None:
+    """Former keyword/regex semantic checks (compound outputs, second request, top-N, currency)
+    are gone: semantic fairness is the prompt's job, not a regex gate."""
+    from synthetic_user.nodes.question.generator import question_policy_problems
+
+    assert (
+        question_policy_problems(
+            _draft(utterance, **changes), env.product, env.settings.generation.question
+        )
+        == []
+    )
+
+
+def test_prompt_guards_replace_the_former_regex_gates(env: Env) -> None:
+    """Regressions of earlier completed runs (invented top-N limits, unconditional currency or
+    privacy duties, unsupported drift) are now prevented by prompt instructions."""
+    options = QuestionPromptOptions(
+        count=1, ambiguity_level=AmbiguityLevel.LOW, language="en", allow_vague_questions=False
+    )
+    unsupported = env.scenarios[2]
+    _system, user = build_question_prompt(
+        env.persona, env.product, unsupported, (env.packs[2], env.reference), options
+    )
+    for guard in (
+        "Never require LIMIT, top N, top 5, top 10 or another result count",
+        "Do not add a currency, unit, conversion",
+        'write it explicitly as a conditional criterion beginning with "If ..."',
+        "used only internally to compute a requested aggregate",
+        "keep the unsupported request",
+        "Write the utterance FIRST",
+    ):
+        assert guard in user, guard
+    assert "COUNT(DISTINCT" not in user  # no SQL wording in the generic question prompt

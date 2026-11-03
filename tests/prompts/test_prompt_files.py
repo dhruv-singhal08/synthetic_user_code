@@ -34,8 +34,10 @@ def test_every_node_has_its_prompt_file() -> None:
     names = {path.relative_to(PACKAGE).as_posix() for path in PROMPT_FILES}
     assert names == {
         "adapters/mock_llm_prompt.yaml",
-        "nodes/evaluator/agent_prompt.yaml",
-        "nodes/evaluator/nl2sql_prompt.yaml",
+        "metrics/compiler_prompt.yaml",
+        "nodes/evaluator/general_prompt.yaml",
+        "nodes/evaluator/judge_common_prompt.yaml",
+        "nodes/evaluator/retrieval_prompt.yaml",
         "nodes/executor/prompt.yaml",
         "nodes/question/prompt.yaml",
         "nodes/scenario/prompt.yaml",
@@ -55,7 +57,11 @@ def test_prompt_file_loads_and_every_placeholder_is_valid(path: Path) -> None:
 
 def test_prompt_python_holds_no_prompt_text() -> None:
     """Prompt builders read their text from YAML: no multi-line prompt string literals left."""
-    builders = [*PACKAGE.glob("nodes/*/*prompt.py"), PACKAGE / "adapters" / "mock_llm_prompt.py"]
+    builders = [
+        *PACKAGE.glob("nodes/*/*prompt.py"),
+        PACKAGE / "adapters" / "mock_llm_prompt.py",
+        PACKAGE / "metrics" / "compiler_prompt.py",
+    ]
     for path in builders:
         source = path.read_text(encoding="utf-8")
         assert 'f"""' not in source, path

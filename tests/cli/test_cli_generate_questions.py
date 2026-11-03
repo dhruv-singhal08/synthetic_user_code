@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from synthetic_user import cli
 from synthetic_user.cli import app
 from synthetic_user.llm.fake import FakeLLMClient
+from synthetic_user.metrics.registry import builtin_metric_config
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
@@ -20,6 +21,7 @@ from synthetic_user.storage.runs import run_artifact, save_run_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
+TEST_METRICS = ("relevance", "correctness_completeness", "semantic_correctness")
 
 
 @pytest.fixture
@@ -38,6 +40,7 @@ def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.delenv(var, raising=False)
     data = yaml.safe_load((REPO_ROOT / "config" / "app.yaml").read_text(encoding="utf-8"))
     data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
+    data["evaluation"]["default_metrics"] = list(TEST_METRICS)
     data["inputs"] = {
         key: (
             [str(REPO_ROOT / x) for x in value]
@@ -59,6 +62,9 @@ def _seed_run(
     persona_id: str,
 ) -> None:
     store = JsonArtifactStore(tmp_path / "artifacts")
+    store.write_model(
+        run_artifact(RUN_ID, "metric_config.json"), builtin_metric_config(list(TEST_METRICS))
+    )
     store.write_models(run_artifact(RUN_ID, "scenarios.json"), scenarios[:2], Scenario)
     store.write_models(run_artifact(RUN_ID, "reference_packs.json"), packs[:2], ReferencePack)
     save_run_manifest(

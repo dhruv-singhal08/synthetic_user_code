@@ -20,9 +20,13 @@ from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.core.logging import get_run_logger
 from synthetic_user.llm.scripted import ScriptedLLMClient
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
-from synthetic_user.models.evaluation_profile import EvaluationProfile
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.kpi import RunKpis
+from synthetic_user.models.metrics import (
+    CustomMetricInput,
+    MetricSelection,
+    ResolvedMetricConfig,
+)
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
 from synthetic_user.models.reference import CatalogPackDraft, ReferencePack, TablePick
 from synthetic_user.models.run import RunManifest
@@ -112,9 +116,14 @@ def _load(run_dir: Path, name: str, adapter: TypeAdapter[Any]) -> Any:
 async def test_full_run_files_types_refs_and_outcomes(
     settings: AppConfig, inputs: RunInputs
 ) -> None:
-    pipeline, _llm, product = _pipeline(settings)
+    pipeline, llm, product = _pipeline(settings)
     summary = await pipeline.run(inputs, run_id=RUN_ID)
     run_dir = Path(summary.run_dir)
+
+    # the frozen metric configuration exists before scenarios and is used by every step
+    config = ResolvedMetricConfig.model_validate_json((run_dir / "metric_config.json").read_bytes())
+    assert config.selected_metric_ids == list(settings.evaluation.default_metrics)
+    assert not config.compiler_called and summary.metric_config_id == config.config_id
 
     # all files exist and load typed
     scenarios = _load(run_dir, "scenarios.json", TypeAdapter(list[Scenario]))
@@ -135,15 +144,25 @@ async def test_full_run_files_types_refs_and_outcomes(
     log = (run_dir / "run.log").read_text(encoding="utf-8")
     for step in STEP_NAMES:
         assert f"step {step} STARTED" in log and f"step {step} FINISHED" in log
-    assert "LLM CALL  round 1  _RawScenarioBatch attempt 1" in log
+    assert "LLM CALL  scenario batch  _RawScenarioBatch attempt 1" in log
     assert "VALIDATION _RawScenarioBatch attempt 1: ACCEPTED" in log
     for scenario in scenarios:
         assert f"LLM CALL  {scenario.id}  _RawQuestionBatch attempt 1" in log
     for question in questions:
         assert f"PRODUCT CALL  {question.question_id}  fixture adapter" in log
     for evaluation in evaluations:
-        judged = f"LLM CALL  {evaluation.question_id}  EvaluationDraft"
+        judged = f"LLM CALL  {evaluation.question_id} general  GeneralJudgeDraft"
         assert (judged in log) is (evaluation.verdict is not None)
+        assert evaluation.metric_config_id == config.config_id
+
+    # normal-path call budget: compiler 0, scenarios 1, questions 1 per accepted scenario,
+    # evaluation <= 2 per evaluable response (only the general judge has metrics here)
+    calls = [c.system for c in llm.calls if "MOCK of" not in c.system]
+    assert sum("You design realistic test scenarios" in c for c in calls) == 1
+    assert sum("You role-play" in c for c in calls) == len(scenarios)
+    assert not any("You compile user-written evaluation metrics" in c for c in calls)
+    assert sum("General Judge" in c for c in calls) == 2
+    assert not any("Retrieval and Grounding Judge" in c for c in calls)
     assert log.count(">>> SYSTEM PROMPT") == log.count(">>> OUTPUT") == log.count("LLM CALL")
     assert manifest.reference_id == summary.reference_id == inputs.reference_id
     assert [p.pack_id for p in packs] == [s.reference_pack_id for s in scenarios]
@@ -157,39 +176,62 @@ async def test_full_run_files_types_refs_and_outcomes(
         evaluations=evaluations,
     )
 
-    # the wrong join fails rules adherence with a bug; clarification and denial are recorded only
+    # the wrong join fails rules adherence with a bug; the substantive denial is judged
+    # (answer-level metrics only); the unresolved clarification is recorded only
     failed = [e for e in evaluations if e.verdict == "fail"]
     assert failed and all(e.bug_candidates for e in failed)
     assert [f.category for e in failed for f in e.findings] == ["rules_adherence"]
-    assert all(e.evaluation_profile == "nl2sql" for e in evaluations)
     recorded = [e.product_outcome for e in evaluations if e.verdict is None]
-    assert sorted(recorded) == ["clarification", "denied"]
+    assert recorded == ["clarification"]
+    by_outcome = {e.product_outcome.value: e for e in evaluations}
+    assert by_outcome["answered"].response_classification == "answered"
+    assert by_outcome["answered"].classification_source == "general_judge"
+    denial = by_outcome["denied"]
+    assert (denial.verdict, denial.response_classification) == ("pass", "unable_to_answer")
+    assert {m: r.status.value for m, r in denial.metrics.items()} == {
+        "relevance": "scored",
+        "correctness_completeness": "scored",
+        "semantic_correctness": "not_applicable",
+        "rules_adherence": "not_applicable",
+        "schema_faithfulness": "not_applicable",
+    }
+    assert by_outcome["clarification"].response_classification == "clarification"
     assert [b.bug_id for b in bugs] == [b.bug_id for e in evaluations for b in e.bug_candidates]
 
     # run KPIs (kpis.json / kpis.csv)
     kpis = RunKpis.model_validate_json((run_dir / "kpis.json").read_bytes())
     assert kpis == summary.kpis
     assert (kpis.judged, kpis.accuracy, kpis.task_success_rate, kpis.availability) == (
-        1,
-        0.0,
-        0.0,
+        2,
+        0.5,
+        0.5,
         1.0,
     )
-    means = {m.metric.value: m.mean for m in kpis.metrics}
+    means = {m.metric: m.mean for m in kpis.metrics}
     assert means == {
+        "relevance": 1.0,
+        "correctness_completeness": 1.0,
         "semantic_correctness": 1.0,
         "rules_adherence": 0.0,
         "schema_faithfulness": 1.0,
     }
+    assert kpis.selected_metrics == config.selected_metric_ids
+    assert kpis.response_classifications == {
+        "answered": 1,
+        "clarification": 1,
+        "unable_to_answer": 1,
+    }
     assert (kpis.new_bugs, kpis.new_bugs_by_severity["high"], kpis.known_gap_bugs) == (1, 1, 0)
     kpi_csv = (run_dir / "kpis.csv").read_text(encoding="utf-8")
-    assert "Rules Adherence (mean),0,1" in kpi_csv and "Accuracy,0,1" in kpi_csv
-    judged = next(e for e in evaluations if e.metrics is not None)
-    assert judged.metrics is not None
+    assert "Rules Adherence (mean),0,1" in kpi_csv and "Accuracy,0.5,2" in kpi_csv
+    judged = by_outcome["answered"]
     assert [c.tag for c in judged.criteria_results] == ["CRIT-01", "CRIT-02"]
+    assert judged.metrics["correctness_completeness"].details["factual_verification"] == (
+        "unverified"
+    )
 
     assert summary.steps_run == list(Step)
-    assert summary.verdicts == {"pass": 0, "fail": 1, "inconclusive": 0, "recorded_only": 2}
+    assert summary.verdicts == {"pass": 1, "fail": 1, "inconclusive": 0, "recorded_only": 1}
     assert summary.outcomes["answered"] == 1
     assert len(product.asked) == len(questions) == 3
 
@@ -215,7 +257,7 @@ async def test_from_step_regenerates_downstream_only(
     summary = await pipeline2.run(inputs, run_id=RUN_ID, from_step=Step.EXECUTE)
     assert summary.steps_run == [Step.EXECUTE, Step.EVALUATE]
     assert len(product2.asked) == 3
-    assert llm2.calls and all("three narrow NL2SQL comparisons" in c.system for c in llm2.calls)
+    assert llm2.calls and all("General Judge" in c.system for c in llm2.calls)
 
 
 async def test_force_step_cascades(settings: AppConfig, inputs: RunInputs) -> None:
@@ -257,9 +299,9 @@ def test_cli_run_offline(fake_config: Path) -> None:
         app, ["--config", str(fake_config), "--log-level", "WARNING", "run", "--run-id", RUN_ID]
     )
     assert result.exit_code == 0, result.output
-    assert "verdicts pass=0 fail=1 inconclusive=0 recorded_only=2" in result.output
+    assert "verdicts pass=1 fail=1 inconclusive=0 recorded_only=1" in result.output
     assert "bug_candidates=1" in result.output
-    assert "kpi accuracy=0 judged=1" in result.output
+    assert "kpi accuracy=0.5 judged=2" in result.output
     assert "kpi rules_adherence mean=0 pass_rate=0 n=1" in result.output
     assert "run_folder=" in result.output
 
@@ -430,16 +472,53 @@ async def test_execute_resumes_from_a_question_keeping_earlier_records(
         await pipeline2.execute_questions(RUN_ID, inputs, start_from_question=9)
 
 
-async def test_changing_the_evaluation_profile_invalidates_the_run(
+async def test_changing_the_metric_selection_invalidates_the_run(
     settings: AppConfig, inputs: RunInputs
 ) -> None:
     pipeline, _, _ = _pipeline(settings)
     await pipeline.run(inputs, run_id=RUN_ID)
-    agent_inputs = RunInputs(
+    other = RunInputs(
         persona=inputs.persona,
         product=inputs.product,
         reference=inputs.reference,
-        evaluation_profile=EvaluationProfile.AGENT,
+        metric_selection=MetricSelection(selected_metrics=["relevance"]),
     )
-    with pytest.raises(ArtifactIntegrityError, match="was built for nl2sql, not agent"):
-        await pipeline.generate_questions(RUN_ID, agent_inputs)
+    with pytest.raises(ArtifactIntegrityError, match="different metric selection"):
+        await pipeline.generate_questions(RUN_ID, other)
+    # a full run with the new selection regenerates everything from scenarios
+    pipeline2, _, _ = _pipeline(settings)
+    summary = await pipeline2.run(other, run_id=RUN_ID)
+    assert summary.steps_run == list(Step) and summary.selected_metrics == ["relevance"]
+
+
+async def test_custom_metrics_compile_once_per_run_and_never_block_others(
+    settings: AppConfig, inputs: RunInputs
+) -> None:
+    custom = RunInputs(
+        persona=inputs.persona,
+        product=inputs.product,
+        reference=inputs.reference,
+        metric_selection=MetricSelection(
+            selected_metrics=list(settings.evaluation.default_metrics),
+            custom_inputs=[
+                CustomMetricInput(text="Uses ANSI SQL only", provenance="free text item 1")
+            ],
+        ),
+    )
+    pipeline, llm, _ = _pipeline(settings)
+    summary = await pipeline.run(custom, run_id=RUN_ID)
+    compiler_calls = [c for c in llm.calls if "You compile user-written evaluation" in c.system]
+    assert len(compiler_calls) == 1  # one structured compilation call for the whole run
+    assert summary.selected_metrics[-1] == "custom_01"
+    (failure,) = summary.kpis.compiler_failures
+    assert failure.source_text == "Uses ANSI SQL only" and "SQL dialect" in failure.reason
+    # the built-in metrics were evaluated as usual; the custom one is reported unavailable
+    assert summary.verdicts == {"pass": 1, "fail": 1, "inconclusive": 0, "recorded_only": 1}
+    run_dir = Path(summary.run_dir)
+    evaluations = _load(run_dir, "evaluations.json", TypeAdapter(list[EvaluationResult]))
+    judged = [e for e in evaluations if e.verdict is not None]
+    assert all(e.metrics["custom_01"].status == "unavailable" for e in judged)
+    # the frozen configuration is reused: a rerun makes no compiler call
+    pipeline2, llm2, _ = _pipeline(settings)
+    await pipeline2.run(custom, run_id=RUN_ID)
+    assert llm2.calls == []

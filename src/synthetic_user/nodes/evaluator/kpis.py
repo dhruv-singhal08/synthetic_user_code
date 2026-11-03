@@ -1,10 +1,15 @@
 """Compute run KPIs from stored artifacts (pure code, no LLM) and render them as CSV.
 
-Definitions (docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md section 11):
-- metric mean / pass rate over answers where the metric was scored; not_applicable and
-  inconclusive answers are counted separately, never averaged in;
-- metric pass rate = share scoring 1;
-- final accuracy = pass verdicts / judged answers (every applicable evaluation driver passes);
+Definitions:
+- one KPI row per SELECTED metric (frozen metric config; legacy runs: the ids they recorded);
+  mean / pass rate over responses where the metric was scored (n = the denominator); every
+  non-scored status (not_applicable, cannot_generate, evidence_unavailable, inconclusive,
+  evaluation_error) is counted separately with its most frequent reasons, never averaged in;
+- metric pass rate = share scoring the best value;
+- MRR = mean reciprocal rank over questions with ranked chunks + relevance labels; per-question
+  rows and exclusions are reported;
+- categories are descriptive groupings only (no composite category score);
+- accuracy = pass verdicts / judged responses (provisional verdict policy);
 - availability = 1 - (error + timeout) / questions asked;
 - latency p50 / p95 (nearest rank) over executions with a measured latency;
 - a bug is a known-gap bug when every one of its findings matches a known gap, else new;
@@ -19,16 +24,14 @@ import io
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from synthetic_user.metrics.catalog import builtin, builtin_definitions, category_labels
 from synthetic_user.models.evaluation import (
-    LOWER_IS_BETTER,
-    NL2SQL_METRICS,
     EvaluationResult,
     Finding,
-    MetricName,
     MetricStatus,
     Severity,
     Verdict,
@@ -36,27 +39,31 @@ from synthetic_user.models.evaluation import (
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
 from synthetic_user.models.kpi import (
     MAX_ISSUE_EXAMPLES,
+    CompilerFailure,
     ConsolidatedIssue,
     GroupKpi,
     IssueSummary,
     MetricKpi,
+    MrrKpi,
+    ReciprocalRankRow,
     RunKpis,
 )
+from synthetic_user.models.metrics import EvidenceKind, ResolvedMetricConfig
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
-from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
+from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 
 _SEVERITY_RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2, Severity.CRITICAL: 3}
-METRIC_LABELS = {
-    MetricName.SEMANTIC_CORRECTNESS: "Semantic Correctness",
-    MetricName.RULES_ADHERENCE: "Rules Adherence",
-    MetricName.SCHEMA_FAITHFULNESS: "Schema Faithfulness",
-    MetricName.RELEVANCE: "Relevance",
-    MetricName.COMPLETION: "Completion",
-    MetricName.TOOL_SELECTION: "Tool Selection",
-    MetricName.FAITHFULNESS: "Faithfulness",
-    MetricName.CONTEXT_PRECISION: "Context Precision",
-    MetricName.CONTEXT_RECALL: "Context Recall",
+MRR_METRIC_ID = "mrr"
+MAX_REASONS = 5
+CONTEXT_RECALL_NOTE = (
+    "expectation-based coverage of each question's required-information checklist, not "
+    "exhaustive corpus recall"
+)
+# Display names of metric ids written by earlier versions (kept, never relabelled).
+LEGACY_METRIC_LABELS = {
+    "completion": "Completion (legacy)",
+    "tool_selection": "Tool Selection (legacy)",
 }
 
 
@@ -120,7 +127,7 @@ _ISSUE_THEMES = (
         "Unsupported request was handled incorrectly",
         "State the limitation and ask for the missing input or offer a supported alternative.",
         re.compile(
-            r"\bunsupported\b|\bnot supported\b|\bmissing (?:merchant|dimension|metric)\b|"
+            r"\bunsupported\b|\bnot supported\b|\bmissing (?:dimension|metric)\b|"
             r"\bpropose an alternative\b|\bflag (?:the|that).{0,40}\blimitation\b",
             re.IGNORECASE,
         ),
@@ -152,7 +159,7 @@ _ISSUE_THEMES = (
         "Uses an incorrect aggregation or calculation",
         "Use the requested measure, aggregation grain, and documented formula.",
         re.compile(
-            r"\b(?:sum|count|average|avg|aggregate|aggregation|calculation|formula|ratio|cpm)\b",
+            r"\b(?:sum|count|average|avg|aggregate|aggregation|calculation|formula|ratio)\b",
             re.IGNORECASE,
         ),
     ),
@@ -183,76 +190,75 @@ _ISSUE_THEMES = (
     ),
 )
 
-_FALLBACK_THEMES = {
-    MetricName.SEMANTIC_CORRECTNESS.value: _IssueTheme(
-        "other_semantic_correctness",
+# Fallback theme wording for built-in (and legacy) metric ids; any other id - e.g. a compiled
+# custom metric - gets a generic theme, so consolidation never fails on an unknown category.
+_FALLBACK_TEXT = {
+    "semantic_correctness": (
         "Query does not produce the requested result",
         "Implement every applicable expected criterion for the requested result.",
-        re.compile(r"$^"),
     ),
-    MetricName.RULES_ADHERENCE.value: _IssueTheme(
-        "other_rules_adherence",
+    "rules_adherence": (
         "Query violates an applicable rule or join",
         "Follow the applicable table/business rules and documented joins.",
-        re.compile(r"$^"),
     ),
-    MetricName.SCHEMA_FAITHFULNESS.value: _IssueTheme(
-        "other_schema_faithfulness",
+    "schema_faithfulness": (
         "Query uses undocumented tables or columns",
         "Use only the allowed table and column names.",
-        re.compile(r"$^"),
     ),
-    MetricName.RELEVANCE.value: _IssueTheme(
-        "other_relevance",
-        "Answer does not address the request",
-        "Respond directly to the user's request.",
-        re.compile(r"$^"),
+    "relevance": ("Answer does not address the request", "Respond directly to the user's request."),
+    "correctness_completeness": (
+        "Requested output is incomplete or incorrect",
+        "Deliver every requested part, consistent with the trusted evidence.",
     ),
-    MetricName.COMPLETION.value: _IssueTheme(
-        "other_completion",
-        "Requested task is incomplete",
-        "Complete every requested output and action.",
-        re.compile(r"$^"),
+    "completion": ("Requested task is incomplete", "Complete every requested output and action."),
+    "tool_correctness": (
+        "Tool, source or arguments do not match the task",
+        "Align tool, source, arguments, grouping, filters and time window with the request.",
     ),
-    MetricName.TOOL_SELECTION.value: _IssueTheme(
-        "other_tool_selection",
+    "tool_selection": (
         "Tool or data-source selection does not match the task",
         "Align tool, source, metric, grouping, filters and time window with the request.",
-        re.compile(r"$^"),
     ),
-    MetricName.FAITHFULNESS.value: _IssueTheme(
-        "other_faithfulness",
-        "Answer claims are not supported by exposed context",
+    "faithfulness": (
+        "Answer claims are not supported by retrieved evidence",
         "Ground every material claim in the retrieved context or tool results.",
-        re.compile(r"$^"),
     ),
-    MetricName.CONTEXT_PRECISION.value: _IssueTheme(
-        "other_context_precision",
+    "citation_correctness": (
+        "Citations do not support the cited claims",
+        "Cite the specific retrieved chunk that supports each claim.",
+    ),
+    "context_precision": (
         "Retrieved context is not sufficiently relevant",
         "Retrieve focused context that is relevant to the user's request.",
-        re.compile(r"$^"),
     ),
-    MetricName.CONTEXT_RECALL.value: _IssueTheme(
-        "other_context_recall",
+    "context_recall": (
         "Retrieved context misses required information",
-        "Retrieve all context necessary to complete the task.",
-        re.compile(r"$^"),
+        "Retrieve the information the question's checklist requires.",
     ),
 }
+
+
+def _fallback_theme(category: str, labels: Mapping[str, str]) -> _IssueTheme:
+    title, action = _FALLBACK_TEXT.get(
+        category,
+        (
+            f"{labels.get(category, category)} issues",
+            f"Review the findings for {labels.get(category, category)}.",
+        ),
+    )
+    key = "other_" + re.sub(r"[^a-z0-9_]+", "_", category.casefold()).strip("_")
+    return _IssueTheme(key, title, action, re.compile(r"$^"))
 
 
 def consolidate_findings(
     evaluations: Sequence[EvaluationResult],
     executions: Sequence[ExecutionRecord] = (),
+    metric_config: ResolvedMetricConfig | None = None,
 ) -> IssueSummary:
     """Group findings into stable, product-actionable themes without another LLM call."""
 
-    sql_expected = run_expects_sql(executions, evaluations)
-    no_sql_questions = {
-        execution.question_id
-        for execution in executions
-        if no_sql_execution(execution, sql_expected=sql_expected)
-    }
+    labels = metric_labels(metric_config, evaluations)
+    no_sql_questions = {e.question_id for e in evaluations if NO_SQL_REASON in e.notes}
     no_sql_findings = [
         finding
         for evaluation in evaluations
@@ -276,7 +282,7 @@ def consolidate_findings(
     )
     groups: dict[str, tuple[_IssueTheme, list[tuple[str, Finding]]]] = {}
     for question_id, finding in rows:
-        theme = _issue_theme(finding)
+        theme = _issue_theme(finding, labels)
         groups.setdefault(theme.key, (theme, []))[1].append((question_id, finding))
 
     issues = []
@@ -321,7 +327,7 @@ def consolidate_findings(
         ):
             categories.add("availability")
         if not categories:
-            categories.add(MetricName.SEMANTIC_CORRECTNESS.value)
+            categories.add("semantic_correctness")
         worst = max(
             (finding.severity for finding in no_sql_findings),
             key=lambda value: _SEVERITY_RANK[value],
@@ -365,7 +371,8 @@ def consolidate_findings(
     )
 
 
-def _issue_theme(finding: Finding) -> _IssueTheme:
+def _issue_theme(finding: Finding, labels: Mapping[str, str]) -> _IssueTheme:
+    """Report grouping only (not a validation gate): first matching theme, else the metric's."""
     text = " ".join(
         (
             finding.description,
@@ -375,7 +382,7 @@ def _issue_theme(finding: Finding) -> _IssueTheme:
     )
     return next(
         (theme for theme in _ISSUE_THEMES if theme.pattern.search(text)),
-        _FALLBACK_THEMES[finding.category],
+        _fallback_theme(finding.category, labels),
     )
 
 
@@ -392,6 +399,7 @@ def compute_kpis(
     scenarios: Sequence[Scenario],
     executions: Sequence[ExecutionRecord],
     evaluations: Sequence[EvaluationResult],
+    metric_config: ResolvedMetricConfig | None = None,
     now: datetime | None = None,
 ) -> RunKpis:
     outcomes = Counter(e.outcome.value for e in executions)
@@ -414,18 +422,14 @@ def compute_kpis(
             new_bugs[worst.severity.value] += 1
 
     by_scenario = {s.id: s for s in scenarios}
-    active_metrics = (
-        tuple(
-            dict.fromkeys(
-                metric
-                for evaluation in evaluations
-                for metric in (
-                    evaluation.metrics.by_name() if evaluation.metrics is not None else ()
-                )
-            )
-        )
-        or NL2SQL_METRICS
+    metric_ids = _metric_ids(metric_config, evaluations)
+    labels = metric_labels(metric_config, evaluations)
+    accuracy = _ratio(verdicts[Verdict.PASS.value], len(judged))
+    classifications = Counter(
+        e.response_classification.value if e.response_classification else "none"
+        for e in evaluations
     )
+    policies = sorted({e.verdict_policy for e in judged if e.verdict_policy})
     return RunKpis(
         run_id=run_id,
         product_id=product_id,
@@ -433,11 +437,26 @@ def compute_kpis(
         computed_at=now or datetime.now(UTC),
         questions_asked=asked,
         outcomes={o.value: outcomes.get(o.value, 0) for o in ProductOutcome},
+        response_classifications=dict(sorted(classifications.items())),
         judged=len(judged),
         verdicts={v.value: verdicts.get(v.value, 0) for v in Verdict},
-        accuracy=_ratio(verdicts[Verdict.PASS.value], len(judged)),
-        task_success_rate=_ratio(verdicts[Verdict.PASS.value], len(judged)),
-        metrics=[_metric_kpi(name, judged) for name in active_metrics],
+        accuracy=accuracy,
+        task_success_rate=accuracy,
+        metric_config_id=metric_config.config_id if metric_config is not None else None,
+        verdict_policy=", ".join(policies) or None,
+        selected_metrics=list(metric_config.selected_metric_ids) if metric_config else [],
+        category_groups=_category_groups(metric_config),
+        compiler_failures=[
+            CompilerFailure(
+                metric_id=d.metric_id,
+                source_text=d.source_text or d.description,
+                provenance=d.source_provenance or "custom metric",
+                reason=d.unavailable_reason or "not compiled",
+            )
+            for d in (metric_config.unavailable() if metric_config is not None else [])
+        ],
+        metrics=[_metric_kpi(metric_id, judged, metric_config, labels) for metric_id in metric_ids],
+        mrr=_mrr(evaluations, metric_config),
         availability=_round(1 - failed_calls / asked) if asked else None,
         latency_p50_ms=_percentile(latencies, 50),
         latency_p95_ms=_percentile(latencies, 95),
@@ -446,12 +465,45 @@ def compute_kpis(
         known_gap_bugs=known,
         inconclusive_rate=_ratio(verdicts[Verdict.INCONCLUSIVE.value], len(judged)),
         by_task_type=_breakdown(
-            evaluations, lambda ev: _scenario_attr(by_scenario, ev, "task_type")
+            evaluations, lambda ev: _scenario_attr(by_scenario, ev, "task_type"), metric_ids
         ),
         by_capability=_breakdown(
-            evaluations, lambda ev: _scenario_attr(by_scenario, ev, "capability")
+            evaluations, lambda ev: _scenario_attr(by_scenario, ev, "capability"), metric_ids
         ),
     )
+
+
+def metric_labels(
+    metric_config: ResolvedMetricConfig | None, evaluations: Sequence[EvaluationResult] = ()
+) -> dict[str, str]:
+    """metric id -> display name (frozen config first; built-in catalog; legacy names)."""
+    labels = {d.metric_id: d.display_name for d in builtin_definitions()}
+    labels.update(LEGACY_METRIC_LABELS)
+    if metric_config is not None:
+        labels.update({d.metric_id: d.display_name for d in metric_config.definitions})
+    for evaluation in evaluations:
+        for metric_id in evaluation.metrics:
+            labels.setdefault(metric_id, metric_id.replace("_", " ").title())
+    return labels
+
+
+def _metric_ids(
+    metric_config: ResolvedMetricConfig | None, evaluations: Sequence[EvaluationResult]
+) -> list[str]:
+    if metric_config is not None:
+        return list(metric_config.selected_metric_ids)
+    # Legacy runs: the metrics their evaluations actually recorded, original ids kept.
+    return list(dict.fromkeys(metric_id for ev in evaluations for metric_id in ev.metrics))
+
+
+def _category_groups(metric_config: ResolvedMetricConfig | None) -> dict[str, list[str]]:
+    if metric_config is None:
+        return {}
+    names = category_labels()
+    groups: dict[str, list[str]] = {}
+    for definition in metric_config.definitions:
+        groups.setdefault(names[definition.category], []).append(definition.metric_id)
+    return groups
 
 
 def kpis_csv(kpis: RunKpis) -> str:
@@ -467,14 +519,32 @@ def kpis_csv(kpis: RunKpis) -> str:
         "Accuracy",
         kpis.accuracy,
         kpis.judged,
-        note="answers passing every applicable evaluation check / evaluated answers",
+        note="pass verdicts / evaluated responses (answers + substantive denials); "
+        f"verdict policy {kpis.verdict_policy or 'n/a'} (provisional). task_success_rate in "
+        "kpis.json is the same value, kept for older readers",
     )
     for m in kpis.metrics:
-        excluded = f"{m.not_applicable} not applicable, {m.inconclusive} inconclusive"
+        label = m.display_name or m.metric
+        excluded = (
+            f"{m.not_applicable} not applicable, {m.cannot_generate} cannot generate, "
+            f"{m.evidence_unavailable} evidence unavailable, {m.inconclusive} inconclusive, "
+            f"{m.evaluation_error} evaluation error"
+        )
         direction = "lower is better" if m.lower_is_better else "higher is better"
-        row(f"{METRIC_LABELS[m.metric]} (mean)", m.mean, m.n, excluded, direction)
+        note = "; ".join([direction, *m.notes])
+        row(f"{label} (mean)", m.mean, m.n, excluded, note)
         best = "share scoring 0" if m.lower_is_better else "share scoring 1"
-        row(f"{METRIC_LABELS[m.metric]} (pass rate)", m.pass_rate, m.n, excluded, best)
+        row(f"{label} (pass rate)", m.pass_rate, m.n, excluded, best)
+    if kpis.mrr is not None:
+        row(
+            "MRR (run level)",
+            kpis.mrr.value,
+            kpis.mrr.denominator,
+            f"{kpis.mrr.excluded_missing_rank} missing rank, {kpis.mrr.excluded_other} other",
+            kpis.mrr.definition,
+        )
+    for failure in kpis.compiler_failures:
+        row(f"Custom metric {failure.metric_id} (unavailable)", None, note=failure.reason)
     row(
         "Availability",
         kpis.availability,
@@ -488,7 +558,15 @@ def kpis_csv(kpis: RunKpis) -> str:
     row("Known-gap bugs", kpis.known_gap_bugs, note="every finding matches a known gap")
     row("Inconclusive rate", kpis.inconclusive_rate, kpis.judged)
     not_judged = ", ".join(
-        f"{k} {v}" for k, v in kpis.outcomes.items() if k != ProductOutcome.ANSWERED.value and v
+        f"{k} {v}"
+        for k, v in kpis.outcomes.items()
+        if k
+        in (
+            ProductOutcome.CLARIFICATION.value,
+            ProductOutcome.ERROR.value,
+            ProductOutcome.TIMEOUT.value,
+        )
+        and v
     )
     row("Questions asked", kpis.questions_asked, note=f"recorded only: {not_judged or 'none'}")
     buffer = io.StringIO()
@@ -496,29 +574,107 @@ def kpis_csv(kpis: RunKpis) -> str:
     return buffer.getvalue()
 
 
-def _metric_kpi(name: MetricName, judged: Sequence[EvaluationResult]) -> MetricKpi:
-    results = [
-        result
-        for ev in judged
-        if ev.metrics is not None
-        if (result := ev.metrics.by_name().get(name)) is not None
-    ]
+def _metric_kpi(
+    metric_id: str,
+    judged: Sequence[EvaluationResult],
+    metric_config: ResolvedMetricConfig | None,
+    labels: Mapping[str, str],
+) -> MetricKpi:
+    results = [r for ev in judged if (r := ev.metrics.get(metric_id)) is not None]
     scores = [r.score for r in results if r.status is MetricStatus.SCORED and r.score is not None]
-    lower = name in LOWER_IS_BETTER
+    definition = metric_config.definition(metric_id) if metric_config is not None else None
+    builtin_definition = builtin(metric_id)
+    lower = definition is not None and not definition.higher_is_better
     best = 0.0 if lower else 1.0
+    counts = Counter(r.status for r in results)
+    reasons = Counter(
+        f"{r.status.value}: {r.rationale}" for r in results if r.status is not MetricStatus.SCORED
+    )
+    notes: list[str] = []
+    if definition is not None and not definition.available:
+        notes.append(f"unavailable: {definition.unavailable_reason}")
+    if any("disclosure" in r.details for r in results):
+        notes.append(CONTEXT_RECALL_NOTE)
+    if definition is not None and definition.continuous_score:
+        notes.append("mean of per-question reciprocal ranks over scored questions (= MRR)")
+    origin = (
+        definition.origin.value
+        if definition is not None
+        else ("builtin" if builtin_definition is not None else "legacy")
+    )
+    category = definition or builtin_definition
     return MetricKpi(
-        metric=name,
+        metric=metric_id,
+        display_name=labels.get(metric_id, metric_id),
+        category=category_labels()[category.category] if category is not None else None,
+        origin=origin,
         mean=_round(sum(scores) / len(scores)) if scores else None,
         pass_rate=_ratio(sum(1 for s in scores if s == best), len(scores)),
         n=len(scores),
-        not_applicable=sum(1 for r in results if r.status is MetricStatus.NOT_APPLICABLE),
-        inconclusive=sum(1 for r in results if r.status is MetricStatus.INCONCLUSIVE),
+        not_applicable=counts[MetricStatus.NOT_APPLICABLE],
+        inconclusive=counts[MetricStatus.INCONCLUSIVE],
+        cannot_generate=counts[MetricStatus.CANNOT_GENERATE],
+        evidence_unavailable=counts[MetricStatus.EVIDENCE_UNAVAILABLE],
+        evaluation_error=counts[MetricStatus.EVALUATION_ERROR] + counts[MetricStatus.UNAVAILABLE],
         lower_is_better=lower,
+        reasons=dict(reasons.most_common(MAX_REASONS)),
+        notes=notes,
+    )
+
+
+def _mrr(
+    evaluations: Sequence[EvaluationResult], metric_config: ResolvedMetricConfig | None
+) -> MrrKpi | None:
+    if metric_config is None or metric_config.definition(MRR_METRIC_ID) is None:
+        return None
+    rows: list[ReciprocalRankRow] = []
+    for ev in evaluations:
+        result = ev.metrics.get(MRR_METRIC_ID)
+        if result is None:
+            rows.append(
+                ReciprocalRankRow(
+                    question_id=ev.question_id,
+                    reciprocal_rank=None,
+                    status=f"excluded: {ev.product_outcome.value} (not evaluated)",
+                )
+            )
+            continue
+        first = result.details.get("first_relevant_rank")
+        rows.append(
+            ReciprocalRankRow(
+                question_id=ev.question_id,
+                reciprocal_rank=result.score,
+                first_relevant_rank=first if isinstance(first, int) else None,
+                status="scored"
+                if result.status is MetricStatus.SCORED
+                else f"excluded: {result.status.value}",
+            )
+        )
+    scored = [r.reciprocal_rank for r in rows if r.reciprocal_rank is not None]
+    missing_rank = sum(
+        1
+        for ev in evaluations
+        if (r := ev.metrics.get(MRR_METRIC_ID)) is not None
+        and r.missing_requirement == EvidenceKind.RANKED_CONTEXT.value
+    )
+    return MrrKpi(
+        value=_round(sum(scored) / len(scored)) if scored else None,
+        denominator=len(scored),
+        excluded_missing_rank=missing_rank,
+        excluded_other=len(rows) - len(scored) - missing_rank,
+        per_question=rows,
+        definition=(
+            "mean over questions with ranked retrieved chunks and relevance labels of "
+            "1 / rank of the first relevant chunk (0 when none is relevant or nothing was "
+            "retrieved); questions without exposed ranks or not evaluated are excluded"
+        ),
     )
 
 
 def _breakdown(
-    evaluations: Sequence[EvaluationResult], key: Callable[[EvaluationResult], str]
+    evaluations: Sequence[EvaluationResult],
+    key: Callable[[EvaluationResult], str],
+    metric_ids: Sequence[str],
 ) -> list[GroupKpi]:
     groups: dict[str, list[EvaluationResult]] = {}
     for ev in evaluations:
@@ -533,19 +689,21 @@ def _breakdown(
                 questions=len(items),
                 judged=len(judged),
                 pass_rate=_ratio(passed, len(judged)),
-                metric_means={
-                    m: _metric_kpi(m, judged).mean
-                    for m in dict.fromkeys(
-                        metric
-                        for evaluation in judged
-                        for metric in (
-                            evaluation.metrics.by_name() if evaluation.metrics is not None else ()
-                        )
-                    )
-                },
+                metric_means={m: _mean(m, judged) for m in metric_ids},
             )
         )
     return out
+
+
+def _mean(metric_id: str, judged: Sequence[EvaluationResult]) -> float | None:
+    scores = [
+        r.score
+        for ev in judged
+        if (r := ev.metrics.get(metric_id)) is not None
+        and r.status is MetricStatus.SCORED
+        and r.score is not None
+    ]
+    return _round(sum(scores) / len(scores)) if scores else None
 
 
 def _scenario_attr(by_scenario: dict[str, Scenario], ev: EvaluationResult, attr: str) -> str:

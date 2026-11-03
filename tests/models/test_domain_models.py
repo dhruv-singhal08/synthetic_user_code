@@ -13,7 +13,7 @@ from synthetic_user.models.evaluation import (
     EvaluationResult,
     EvaluationStatus,
     Finding,
-    MetricName,
+    MetricStatus,
     Verdict,
 )
 from synthetic_user.models.persona import Persona
@@ -50,6 +50,7 @@ def _finding(**overrides: Any) -> dict[str, Any]:
 
 def _evaluation(**overrides: Any) -> dict[str, Any]:
     return {
+        "schema_version": 2,
         "evaluation_id": "EVAL_001",
         "question_id": "Q_001",
         "scenario_id": "SCN_001",
@@ -197,7 +198,7 @@ def test_valid_payloads_parse() -> None:
 # --- invariants --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("outcome", ["clarification", "denied", "error", "timeout"])
+@pytest.mark.parametrize("outcome", ["clarification", "error", "timeout"])
 def test_non_answers_are_recorded_only(outcome: str) -> None:
     result = EvaluationResult.model_validate(
         _evaluation(product_outcome=outcome, verdict=None, evaluation_status="recorded_only")
@@ -207,8 +208,33 @@ def test_non_answers_are_recorded_only(outcome: str) -> None:
         EvaluationResult.model_validate(_evaluation(product_outcome=outcome, verdict="pass"))
 
 
+def test_substantive_denials_are_judged_but_legacy_denials_stay_readable() -> None:
+    denied = EvaluationResult.model_validate(
+        _evaluation(
+            product_outcome="denied",
+            verdict="pass",
+            response_classification="unable_to_answer",
+            classification_source="typed_outcome",
+        )
+    )
+    assert denied.verdict is Verdict.PASS
+    with pytest.raises(ValidationError, match="evaluable denied response needs a verdict"):
+        EvaluationResult.model_validate(
+            _evaluation(product_outcome="denied", verdict=None, evaluation_status="recorded_only")
+        )
+    legacy = {
+        k: v
+        for k, v in _evaluation(
+            product_outcome="denied", verdict=None, evaluation_status="recorded_only"
+        ).items()
+        if k != "schema_version"
+    }
+    old = EvaluationResult.model_validate(legacy)  # schema 1: denials were recorded only
+    assert old.schema_version == 1 and old.verdict is None
+
+
 def test_answers_need_a_verdict() -> None:
-    with pytest.raises(ValidationError, match="an answered response needs a verdict"):
+    with pytest.raises(ValidationError, match="an evaluable answered response needs a verdict"):
         EvaluationResult.model_validate(
             _evaluation(verdict=None, evaluation_status="recorded_only")
         )
@@ -377,7 +403,6 @@ def test_ungrounded_scenario_has_no_reference() -> None:
 @pytest.mark.parametrize(
     ("payload", "match"),
     [
-        (_scenario(reference_pack_id=None), "mode grounded requires a reference_pack_id"),
         (_scenario(reference_id=None), "mode grounded requires a reference_id"),
         (_scenario(mode="ungrounded", reference_id=None), "must not have a reference_pack_id"),
         (_ungrounded_scenario(reference_id="r-1"), "must not have a reference_id"),
@@ -403,10 +428,37 @@ def test_success_criteria_required_in_both_modes(mode: str) -> None:
 def test_question_pack_iff_grounded() -> None:
     ungrounded = QuestionCase.model_validate(_question(mode="ungrounded", reference_pack_id=None))
     assert ungrounded.reference_pack_id is None
-    with pytest.raises(ValidationError, match="mode grounded requires a reference_pack_id"):
-        QuestionCase.model_validate(_question(reference_pack_id=None))
-    with pytest.raises(ValidationError, match="must not have a reference_pack_id"):
+    with pytest.raises(ValidationError, match="must not have a pack"):
         QuestionCase.model_validate(_question(mode="ungrounded"))
+
+
+def test_profile_era_artifacts_stay_readable() -> None:
+    """Agent-profile scenarios / questions were grounded without a pack and carried the profile
+    and golden ids: readable, with the profile dropped (generation enforces packs now)."""
+    scenario = Scenario.model_validate(
+        _scenario(reference_pack_id=None, evaluation_profile="agent", golden_case_id=None)
+    )
+    assert scenario.reference_pack_id is None
+    question = QuestionCase.model_validate(
+        _question(
+            reference_pack_id=None,
+            evaluation_profile="agent",
+            golden_case_id="GOLD_001",
+            expectations={
+                "expected_behavior": "b",
+                "success_criteria": ["c"],
+                "expected_tools": ["aggregate_feedback"],
+                "golden_set_criteria": {"Journey": "card"},
+                "expected_context": [],
+            },
+        )
+    )
+    # old fields are kept, labelled legacy, never used as metric expectations
+    assert question.expectations.metric_expectations == {}
+    assert question.expectations.legacy_expectations == {
+        "expected_tools": ["aggregate_feedback"],
+        "golden_set_criteria": {"Journey": "card"},
+    }
 
 
 @pytest.mark.parametrize(
@@ -418,6 +470,23 @@ def test_question_pack_iff_grounded() -> None:
         {"success_criteria": ["a"]},  # expected_behavior required
         {"expected_behavior": "answers", "success_criteria": ["a"], "clarification": "x"},
         {"expected_behavior": "a", "success_criteria": ["a"], "unacceptable_behaviors": ["b"]},
+        {
+            "expected_behavior": "a",
+            "success_criteria": ["a"],
+            "metric_expectations": {"context_recall": {"status": "generated", "value": None}},
+        },
+        {
+            "expected_behavior": "a",
+            "success_criteria": ["a"],
+            "metric_expectations": {"context_recall": {"status": "cannot_generate"}},
+        },
+        {
+            "expected_behavior": "a",
+            "success_criteria": ["a"],
+            "metric_expectations": {
+                "context_recall": {"status": "not_applicable", "value": {"x": 1}}
+            },
+        },
     ],
 )
 def test_question_expectations_shape(expectations: dict[str, Any]) -> None:
@@ -429,75 +498,84 @@ def _metric(score: float | None = 1.0, status: str = "scored") -> dict[str, Any]
     return {"status": status, "score": score, "rationale": "checked"}
 
 
-def _metrics(**overrides: dict[str, Any]) -> dict[str, Any]:
-    base = {
-        name: _metric()
-        for name in ("semantic_correctness", "rules_adherence", "schema_faithfulness")
-    }
-    return {**base, **overrides}
+def test_evaluation_metrics_are_keyed_by_any_metric_id() -> None:
+    result = EvaluationResult.model_validate(
+        _evaluation(
+            verdict="pass",
+            metrics={
+                "relevance": _metric(),
+                "custom_01": _metric(0.5),
+                "mrr": _metric(1 / 3),  # code-computed reciprocal rank (continuous)
+                "context_recall": _metric(None, "evidence_unavailable"),
+            },
+        )
+    )
+    assert result.metrics["custom_01"].score == 0.5
+    assert result.metrics["context_recall"].status is MetricStatus.EVIDENCE_UNAVAILABLE
 
 
-NA = _metric(None, "not_applicable")
-
-
-def test_evaluation_carries_profile_metrics() -> None:
-    result = EvaluationResult.model_validate(_evaluation(verdict="pass", metrics=_metrics()))
-    assert result.metrics is not None and result.evaluation_profile == "nl2sql"
-    assert result.metrics.by_name()[MetricName.SCHEMA_FAITHFULNESS].score == 1.0
+@pytest.mark.parametrize("status", [s.value for s in MetricStatus if s.value != "scored"])
+def test_non_scored_statuses_never_carry_a_score(status: str) -> None:
+    ok = EvaluationResult.model_validate(
+        _evaluation(verdict="inconclusive", metrics={"m": _metric(None, status)})
+    )
+    assert ok.metrics["m"].score is None
+    with pytest.raises(ValidationError, match="score is set exactly when status is scored"):
+        EvaluationResult.model_validate(
+            _evaluation(verdict="pass", metrics={"m": _metric(0.0, status)})
+        )
 
 
 def test_metric_score_iff_scored_and_bounded() -> None:
     with pytest.raises(ValidationError, match="score is set exactly when status is scored"):
         EvaluationResult.model_validate(
-            _evaluation(verdict="pass", metrics=_metrics(semantic_correctness=_metric(None)))
+            _evaluation(verdict="pass", metrics={"relevance": _metric(None)})
         )
     with pytest.raises(ValidationError):
         EvaluationResult.model_validate(
-            _evaluation(verdict="pass", metrics=_metrics(semantic_correctness=_metric(1.5)))
+            _evaluation(verdict="pass", metrics={"relevance": _metric(1.5)})
         )
 
 
-def test_each_profile_requires_its_own_metrics() -> None:
-    agent_only = {"relevance": _metric(), "completion": _metric()}
-    with pytest.raises(ValidationError, match="nl2sql evaluations require exactly"):
-        EvaluationResult.model_validate(_evaluation(verdict="pass", metrics=agent_only))
+def _legacy(**overrides: Any) -> dict[str, Any]:
+    data = {k: v for k, v in _evaluation(verdict="pass").items() if k != "schema_version"}
+    return {**data, **overrides}
+
+
+def test_legacy_profile_evaluations_keep_their_original_metric_ids() -> None:
+    """Never relabelled: completion / tool_selection stay as judged under the old rubrics."""
     agent = EvaluationResult.model_validate(
-        {
-            **_evaluation(mode="ungrounded", verdict="pass", metrics=agent_only),
-            "evaluation_profile": "agent",
-        }
-    )
-    assert agent.metrics is not None and set(agent.metrics.by_name()) == {
-        MetricName.RELEVANCE,
-        MetricName.COMPLETION,
-    }
-    with pytest.raises(ValidationError, match="agent evaluations require required"):
-        EvaluationResult.model_validate(
-            {
-                **_evaluation(verdict="pass", metrics={"relevance": _metric()}),
-                "evaluation_profile": "agent",
-            }
+        _legacy(
+            mode="ungrounded",
+            evaluation_profile="agent",
+            metrics={"relevance": _metric(), "completion": _metric(), "tool_selection": _metric()},
         )
+    )
+    assert agent.schema_version == 1 and agent.legacy_evaluation_profile == "agent"
+    assert set(agent.metrics) == {"relevance", "completion", "tool_selection"}
+    nl2sql = EvaluationResult.model_validate(
+        _legacy(metrics={"semantic_correctness": _metric(), "rules_adherence": _metric()})
+    )
+    assert nl2sql.legacy_evaluation_profile == "nl2sql"
 
 
 def test_former_voc_profile_reads_as_agent() -> None:
     result = EvaluationResult.model_validate(
-        {
-            **_evaluation(
-                verdict="pass",
-                metrics={"answer_relevance": _metric(), "answer_completeness": _metric()},
-            ),
-            "evaluation_profile": "voc",
-        }
+        _legacy(
+            metrics={"answer_relevance": _metric(), "answer_completeness": _metric()},
+            evaluation_profile="voc",
+        )
     )
-    assert result.evaluation_profile == "agent"
-    assert result.metrics is not None and result.metrics.relevance is not None
+    assert result.legacy_evaluation_profile == "agent"
+    assert set(result.metrics) == {"relevance", "completion"}
 
 
 def test_old_check_fields_are_gone() -> None:
     for field in ("checks", "check_rationale", "grounded_checks", "clarification_evaluation"):
         with pytest.raises(ValidationError, match="Extra inputs"):
             EvaluationResult.model_validate(_evaluation(verdict="pass", **{field: {}}))
+    with pytest.raises(ValidationError, match="Extra inputs"):  # no profile on new results
+        EvaluationResult.model_validate(_evaluation(verdict="pass", evaluation_profile="agent"))
 
 
 SAMPLE_CHATBOT = Path(__file__).resolve().parents[2] / "data" / "products" / "sample_chatbot.yaml"

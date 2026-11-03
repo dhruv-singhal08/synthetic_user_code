@@ -260,18 +260,57 @@ def test_every_shipped_config_loads(name: str, env: dict[str, str]) -> None:
     """The new evaluation / web / question-policy keys are accepted in every config."""
     cfg = load_config(REPO_CONFIG.parent / name, env=env)
     assert cfg.generation.question.max_success_criteria == 2
-    assert cfg.evaluation.agent_metrics[:2] == ["relevance", "completion"]
+    assert set(cfg.evaluation.default_metrics) >= {"relevance", "correctness_completeness"}
+    assert cfg.generation.question.max_parallel_scenarios == 5
     assert cfg.web.max_step_count == 100
 
 
 def test_safechain_config_keeps_its_run_policy() -> None:
     cfg = load_config(REPO_CONFIG.parent / "app.safechain.yaml", env={})
     assert cfg.product.clarification_policy == "ask"
-    assert cfg.evaluation.ignore_dummy_cg_id_filter is True
+    # The product workaround is configuration now, not code (a generic predicate list).
+    assert cfg.evaluation.ignored_sql_predicates == ["cg_id IN ('DUMMY')"]
 
 
-def test_agent_metrics_in_config_cannot_drop_required_ones(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("section", "key", "message"),
+    [
+        ("evaluation", "agent_metrics", "there are no evaluation profiles"),
+        ("evaluation", "ignore_dummy_cg_id_filter", "ignored_sql_predicates"),
+    ],
+)
+def test_removed_evaluation_keys_are_refused_with_their_replacement(
+    tmp_path: Path, section: str, key: str, message: str
+) -> None:
     data = _minimal()
-    data["evaluation"] = {"agent_metrics": ["tool_selection"]}
-    with pytest.raises(ConfigError, match="cannot disable required metrics"):
+    data[section] = {key: True}
+    with pytest.raises(ConfigError, match=message):
+        load_config(_write(tmp_path, data), env={})
+
+
+@pytest.mark.parametrize(
+    ("key", "message"),
+    [
+        ("max_topup_rounds", "one LLM call"),
+        ("agent_golden_examples", "golden set was removed"),
+    ],
+)
+def test_removed_scenario_keys_are_refused(tmp_path: Path, key: str, message: str) -> None:
+    data = _minimal()
+    data["generation"] = {"scenario": {key: 1}}
+    with pytest.raises(ConfigError, match=message):
+        load_config(_write(tmp_path, data), env={})
+
+
+def test_removed_question_keys_are_refused(tmp_path: Path) -> None:
+    data = _minimal()
+    data["generation"] = {"question": {"near_duplicate_threshold": 0.8}}
+    with pytest.raises(ConfigError, match="only exact duplicates"):
+        load_config(_write(tmp_path, data), env={})
+
+
+def test_default_metrics_must_be_builtin_ids(tmp_path: Path) -> None:
+    data = _minimal()
+    data["evaluation"] = {"default_metrics": ["completion"]}
+    with pytest.raises(ConfigError, match="default_metrics must be distinct built-in"):
         load_config(_write(tmp_path, data), env={})

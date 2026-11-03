@@ -3,9 +3,9 @@
 Cases (tests/fixtures/benchmark/labeled_cases.jsonl) cover both modes (taken from each case's
 scenario) and several product types (each case names its product_id). A case states what the
 product answered (answered text and/or artifacts such as a query, clarification or denial
-message), what the product was expected to do, and the expected verdict. Only answered
-responses are judged (design v3 KPIs); clarification / denied cases are reported as not
-judged and left out of the agreement. The scenarios file
+message), what the product was expected to do, and the expected verdict. Answered and denied
+responses are judged with the configured default metrics (evaluation.default_metrics);
+clarification cases are reported as not judged and left out of the agreement. The scenarios file
 holds {"scenarios": [...], "reference_packs": [...]} (packs for the grounded scenarios).
 """
 

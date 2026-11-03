@@ -14,18 +14,34 @@ the reference and checked by code, and answers are checked against it. Without o
 ## Pipeline
 
 ```
-Persona + Product [+ Reference + instructions] ──> [reference check] ──> [2] Scenarios
-        (+ Reference Pack when grounded) ──> [3] Questions ──> [4] Product Executor
-        ──> [5] Evaluator ──> Bug Candidates
+Persona + Product [+ Reference + instructions] + run metric selection (built-in + custom)
+  ──> [reference check] ──> [metric config: frozen once; compiler only for custom metrics]
+  ──> [2] Scenarios (+ Reference Pack when grounded; ONE call) ──> [3] Questions (one call
+  per scenario, max 5 in parallel) ──> [4] Product Executor (+ tool trace / retrieved context)
+  ──> [5] Evaluator (General Judge + Retrieval/Grounding Judge) ──> Bug Candidates
 ```
+
+There are **no evaluation profiles**: the user selects any combination of the 11 built-in
+metrics (plus custom metrics written as text or a workbook) for the whole run; categories only
+group them in the UI. The selection is frozen in `metric_config.json` before scenarios and used
+by every later step. See [docs/DECISIONS.md](docs/DECISIONS.md) D211-D224.
+
+| Category | Metric id | Judge |
+|---|---|---|
+| Answer Quality / Task Fulfilment | `relevance`, `correctness_completeness` | general |
+| Retrieval Quality | `context_precision`, `context_recall` (expectation-based checklist coverage), `mrr` (computed by code from chunk labels) | retrieval |
+| Grounding & Citations | `faithfulness`, `citation_correctness` | retrieval |
+| SQL Quality | `semantic_correctness`, `rules_adherence`, `schema_faithfulness` (with the SQL parser's output as evidence) | general |
+| Agent | `tool_correctness` | general |
+| Custom | compiled once per run (`custom_01`, ...); unavailable ones are reported with the reason | general / retrieval |
 
 | Node | What it does | LLM? |
 |---|---|---|
 | Reference check | Loads your reference (data_catalog or document_collection, YAML/JSON, size-capped) and optional usage instructions; the id changes when either changes. None given -> ungrounded. | no |
 | 2 Scenarios | Business goal + success criteria (guidance) for tasks this persona would do with this product. Grounded: also a **cheat sheet** (Reference Pack) - the tables / columns / joins / rule ids, or the documents, a correct answer needs, picked by exact name; code checks every pick and copies the reference's own text in (unknown picks dropped and recorded; none valid -> scenario rejected). Saved in `reference_packs.json`, editable in the UI. | yes |
-| 3 Questions | Natural-language questions in the persona's voice, each with its own `expected_behavior` (written, including which readings are acceptable) and 1-4 `success_criteria`. The persona decides how it is phrased. Grounded: the cheat sheet + instructions inform the question; identifier-like names must not leak into it. | yes |
-| 4 Product executor | Sends each question through the configured product adapter and records answered (text + artifacts, e.g. SQL) / clarification / denied / error / timeout. Artifacts are **never executed**. | no |
-| 5 Evaluator | One judge per **answered** response, by evaluation profile (D207). **NL2SQL**: semantic correctness, rules adherence and schema faithfulness (0 / 0.5 / 1) against the question's contract and, when grounded, the cheat sheet. **Agent**: relevance and completion, plus the optional tool selection, faithfulness, context precision and context recall when the response exposes what they need. Each success criterion is rated; code computes the verdict and bug candidates, and each score comes with its reason. Clarification / denied / error / timeout are recorded only. Run KPIs (accuracy, metric means and pass rates, availability, latency, new vs known-gap bugs) go to `kpis.json` / `kpis.csv`. | yes |
+| 3 Questions | One call per accepted scenario (concurrent, `generation.question.max_parallel_scenarios`, default 5; order kept, failures isolated). Natural-language questions in the persona's voice; each carries `expected_behavior`, 1-4 `success_criteria` and `metric_expectations` **only** for selected metrics that need a question-specific value (`generated` / `not_applicable` / `cannot_generate` with a reason). Grounded: the cheat sheet + instructions inform the question; identifier-like names must not leak into it. Only structural checks (counts, limits, canonical names, exact duplicates, leaks) - no regex semantic gates. | yes |
+| 4 Product executor | Sends each question through the configured product adapter and records answered (text + artifacts, e.g. SQL) / clarification / denied / error / timeout, plus the exposed tool trace and the retrieved context (from the response, or a separate context API for the same execution). Artifacts are **never executed**. | no |
+| 5 Evaluator | Applicability is decided by code from the frozen metric definitions, the question's expectations, the reference and the captured evidence. Then at most two LLM calls per evaluable response: the **General Judge** and the **Retrieval/Grounding Judge** (each only when it has metrics). Every selected metric gets a score (0 / 0.5 / 1; MRR's reciprocal rank by code) or a status with its reason: `not_applicable`, `cannot_generate`, `evidence_unavailable`, `inconclusive`, `evaluation_error`, `unavailable`. Answers and **substantive denials** are judged; unresolved clarifications, errors and timeouts are recorded only. `product_outcome` (transport) and `response_classification` (answered / unable_to_answer / clarification / unknown) are separate columns. A provisional verdict policy decides pass / fail / inconclusive. Run KPIs go to `kpis.json` / `kpis.csv`. | yes |
 
 One orchestrator (`src/synthetic_user/pipeline.py`) runs the nodes; nodes are plain classes.
 
@@ -43,15 +59,21 @@ src/synthetic_user/
     question/                 [3] generator.py · prompt.py · prompt.yaml
     executor/                 [4] executor.py · prompt.py · prompt.yaml (clarification reply,
                                   "assume" instruction)
-    evaluator/                [5] evaluator.py (routing, bug candidates)
-                                  nl2sql.py · nl2sql_prompt.py · nl2sql_prompt.yaml
-                                  agent.py · agent_prompt.py · agent_prompt.yaml
+    evaluator/                [5] evaluator.py (routing, classification, bug candidates)
+                                  applicability.py (deterministic metric planning)
+                                  general_judge.py · general_prompt.py · general_prompt.yaml
+                                  retrieval_judge.py · retrieval_prompt.py · retrieval_prompt.yaml
+                                  judge_common.py · judge_common_prompt.yaml · verdict.py
                                   kpis.py · trace_tags.py · no_sql.py · benchmark.py · plugins/
+  metrics/                    catalog.yaml (the 11 built-in metrics) · catalog.py · registry.py
+                              (freeze the run config) · compiler.py · compiler_prompt.py/.yaml
+                              · custom_input.py (free text / workbook parsing)
+  sql/                        parser.py: pluggable SQL AST parser (sqlglot); evidence only
   prompts/                    shared: templates.py (prompt-file loader), persona.py/.yaml,
                               contracts.py, structured.py, smoke.py, common.yaml
   adapters/                   ProductAdapter + fixture / http_json / http_sse / python / mock
                               (mock_llm_prompt.yaml)
-  references/                 reference loader, cheat sheet (pack), leaks, golden sets
+  references/                 reference loader, cheat sheet (pack), leaks
   llm/                        LLMClient + gemini / safechain / fake, structured output
   models/                     Pydantic models;  core/  config, errors, ids, logging, trace
   storage/                    run artifacts;    web/   local FastAPI UI
@@ -138,8 +160,13 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `generation.scenario.scenario_count` | `10` | Scenarios requested per run |
 | `generation.scenario.include_unsupported_scenarios` | `true` | Keep scenarios the product should refuse |
 | `generation.scenario.diversity_preference` | `balanced` | Free-text hint to the scenario generator |
-| `generation.scenario.max_topup_rounds` | `1` | Extra calls if too few scenarios are accepted (never padded) |
-| `generation.question.question_count` | `1` | Questions per scenario |
+| `generation.question.question_count` | `1` | Questions per scenario (the UI run selection wins) |
+| `generation.question.max_parallel_scenarios` | `5` | Internal: concurrent per-scenario question calls (not a UI control) |
+| `evaluation.default_metrics` | `[relevance, correctness_completeness]` | Built-in metrics when a run does not choose its own (CLI) |
+| `evaluation.sql_dialect` | `null` | Explicit SQL dialect for the parser (never guessed) |
+| `evaluation.ignored_sql_predicates` | `[]` | Predicates removed from the judge's copy of SQL only (e.g. a temporary product workaround) |
+| `evaluation.max_custom_metrics` | `20` | Custom metrics per run (text + workbook rows) |
+| `product.context_max_chunks` / `context_max_chunk_chars` | `50` / `4000` | Bounds of the stored retrieved context |
 | `generation.question.ambiguity_level` | `low` | `low` \| `medium` \| `high` mix of precise/vague/investigative |
 | `generation.question.language` | `en` | Question language |
 | `generation.question.allow_vague_questions` | `false` | Allow `style: vague` questions |
@@ -166,12 +193,13 @@ Global options `--config PATH`, `--log-level LEVEL` (also accepted after the com
 | `smoke-llm` | – | One tiny JSON request; prints provider, model, latency |
 | `check-reference` | `--reference PATH` (required), `--reference-guide PATH` | Load a reference (+ instructions); prints id, kind, counts, size; exit 1 on load errors |
 | `convert-reference` | `--input` REFIDX JSON, `--out` YAML | Convert an existing reference index into the `data_catalog` format (validated before writing) |
-| `generate-scenarios` | `--run-id` (new), `--persona`/`--product` (inputs), `--reference` / `--reference-guide` (`inputs.reference_file` / `reference_guide_file`; none -> ungrounded), `--count` (`scenario_count`) | Node 2 (+ reference packs when grounded); always regenerates |
+| `generate-scenarios` | `--run-id` (new), `--persona`/`--product` (inputs), `--reference` / `--reference-guide` (`inputs.reference_file` / `reference_guide_file`; none -> ungrounded), `--count` (`scenario_count`), `--metrics a,b` (`evaluation.default_metrics`), `--custom-metrics-text`, `--custom-metrics-file` (.xlsx / .csv) | Freezes the metric config, then Node 2 (+ reference packs when grounded); always regenerates |
 | `generate-questions` | `--run-id` (required), `--count` (`question_count`) | Node 3; always regenerates |
 | `execute` | `--run-id` (required), `--adapter-config FILE` (config `product_adapter`) | Node 4 via the product adapter; always regenerates |
 | `export-fixture-template` | `--run-id` (required), `--out` (`runs/<run_id>/fixture_template.json`) | Template (question_id, utterance, outcome, text, artifacts[]) to paste real answers into, for any product |
-| `evaluate` | `--run-id`, **or** `--questions --executions --scenarios` (+ `--reference-packs` for grounded questions, `--out-dir`, default: executions file's folder) | Node 5 |
-| `run` | `--run-id` (new), `--reference-index`, `--from-step STEP`, `--force-step STEP` (repeatable), `--scenario-count`, `--question-count` | Full pipeline with reuse |
+| `evaluate` | `--run-id`, **or** `--questions --executions --scenarios` (+ `--reference-packs` for grounded questions, `--metric-config` (a run's `metric_config.json`; default: built-in `default_metrics`), `--out-dir`, default: executions file's folder) | Node 5 |
+| `run` | `--run-id` (new), `--reference`, `--from-step STEP`, `--force-step STEP` (repeatable), `--scenario-count`, `--question-count`, `--metrics`, `--custom-metrics-text`, `--custom-metrics-file` | Full pipeline with reuse (a changed metric selection regenerates from scenarios) |
+| `migrate-run` | `--run-id` (required), `--map-completion` | Legacy (profile-era) runs: reports their metric ids; with `--map-completion` explicitly relabels `completion` as `correctness_completeness` (marked; original kept as `evaluations.legacy.json`) |
 | `benchmark-evaluator` | `--cases`, `--scenarios` (from `inputs.benchmark_*`; products from `inputs.benchmark_product_paths`) | **Live only**: evaluator agreement with labeled cases, per mode/product and overall |
 | `serve` | `--host` (`127.0.0.1`), `--port` (`8000`) | Web UI + API (see [Web UI](#web-ui)) |
 
@@ -246,10 +274,17 @@ A local FastAPI server (`src/synthetic_user/web/`) with a single-page UI. It bin
 `127.0.0.1` by default and has no authentication, so do not expose it on a network.
 API docs are at `/api/docs`.
 
-The UI (`static/`, D199 / D201) has a workflow sidebar, one page per step (Test setup,
-Product connection, Run tests, Test report), recent runs, and a printable test report
-(executive summary, the 5 quality metrics, bug candidates, breakdown by task type /
-capability, results table). No external assets (system fonts, inline icons).
+The UI (`static/`, D199 / D201 / D221) has a workflow sidebar, one page per step (Test setup,
+Evaluation, Product connection, Run tests, Test report), recent runs, and a printable test
+report (executive summary, the selected metrics with their status counts, MRR, compiler
+failures, bug candidates, breakdown by task type / capability, results table). No external
+assets (system fonts, inline icons).
+
+**Evaluation tab:** tick any built-in metrics (grouped by category), add custom metrics as text
+and/or an Excel / CSV workbook, and set the scenario count, questions per scenario and question
+complexity. The choice is sent with **Start run**, applies to the whole run and is frozen at the
+scenarios step (start a new run to change it). Internal settings (concurrency, retries) are
+not shown.
 
 1. **Inputs:**
    - **Persona:** the sample persona or your own YAML upload, plus optional **sample queries**
@@ -267,7 +302,11 @@ capability, results table). No external assets (system fonts, inline icons).
    `response_mapping` (dotted paths for text / artifacts, clarification / denied conditions).
    It is the `http_json` adapter's options (a `*.adapter.yaml` file works too); download a
    template from the UI (`/api/contract-template`). The URL field wins over a `url` in the
-   contract. Header values are never shown or returned by the API. **Mock product** (demo
+   contract. Header values are never shown or returned by the API. When a selected metric
+   needs retrieved context, a **context source** selector appears: *in the product response*
+   (`response_mapping.context` / `citations`) or a *separate context API* (`context_api`,
+   called for the same execution by request / session / trace id); the choice must match the
+   contract. **Mock product** (demo
    only) instead routes questions to an LLM stand-in for the described product (using the
    reference when there is one).
    Not connected -> the configured `product_adapter` answers.
@@ -276,11 +315,12 @@ capability, results table). No external assets (system fonts, inline icons).
    everything after it. After scenarios, open a row to **review or edit its cheat sheet**
    (the picks as JSON; every name is re-checked against the reference); saving makes
    questions and later steps stale.
-4. **Results:** KPI scorecard (task success, availability + latency, new bugs, and the 4
-   reported quality metrics with pass rate and n), verdict distribution, filters/search and one
-   row per question - the same table as `runs/<run_id>/results.csv` (28 columns: each metric
-   followed by its reason, then final_verdict + verdict_reason, bug_ids, evaluation_notes; cells with several
-   items use "• " bullet lines), rewritten after every step; **Download kpis.csv** for the
+4. **Results:** KPI scorecard (accuracy, availability + latency, new bugs, and each selected
+   metric with mean, pass rate, n and its non-scored status counts), verdict distribution,
+   filters/search and one row per question - the same table as `runs/<run_id>/results.csv`
+   (product_outcome and response_classification, then per selected metric `<id>`,
+   `<id>_status`, `<id>_reason`, then final_verdict + verdict_reason, bug_ids,
+   evaluation_notes; cells with several items use "• " bullet lines), rewritten after every step; **Download kpis.csv** for the
    run-level KPIs. Click a row
    for every field (scenario, reference pack, question + expectations, response, checks,
    findings, bug). The table and CSV show only what evaluation uses;
@@ -360,7 +400,7 @@ models or the pipeline.
 | type | Use | Options |
 |---|---|---|
 | `fixture` | offline / captured answers | `path` |
-| `http_json` | any JSON-over-HTTP product, config only | `url`, `method`, `headers` (`${ENV_VAR}` filled from env), `timeout`, `tls_ca_bundle` (`amexcerts`, a PEM path or `${ENV_VAR}`), `ssl_verify` (default `true`), `request_template` (`{utterance}`, `{uuid}` = fresh per question, `{session_id}`), `response_mapping` (dotted paths + `path == value` rules) |
+| `http_json` | any JSON-over-HTTP product, config only | `url`, `method`, `headers` (`${ENV_VAR}` filled from env), `timeout`, `tls_ca_bundle` (`amexcerts`, a PEM path or `${ENV_VAR}`), `ssl_verify` (default `true`), `request_template` (`{utterance}`, `{uuid}` = fresh per question, `{session_id}`), `response_mapping` (dotted paths + `path == value` rules; optional metric telemetry: `tool_trace`, `context`, `citations`, `unable_to_answer_when`, `correlation_id`), optional `context_api` (separate context endpoint; never together with `response_mapping.context`) |
 | `python` | anything else (SDK, websockets, custom auth) | `class: "pkg.module:Class"`, `init: {...}` (keyword args) |
 
 Examples: `config/products/sample_nl2sql.adapter.yaml` (fixture),

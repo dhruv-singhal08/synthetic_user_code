@@ -23,22 +23,18 @@ product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.
 reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 evaluation:
-  # Temporary NL2SQL workaround approved by the product team. Remove after their fix ships.
-  # Only this exact dummy predicate is ignored; other cg_id usages are still evaluated.
-  ignore_dummy_cg_id_filter: true
+  default_metrics: [relevance, correctness_completeness]  # CLI default; the UI selects per run
+  sql_dialect: null          # explicit sqlglot dialect for the SQL parser; never guessed
+  # Temporary product workaround approved by the product team. Remove after their fix ships.
+  # Only this exact predicate is removed from the JUDGE's copy of the SQL (AST match).
+  ignored_sql_predicates: ["cg_id IN ('DUMMY')"]
 generation:
   scenario:
     scenario_count: 3
     include_unsupported_scenarios: true
     diversity_preference: balanced
-    max_topup_rounds: 1
-    agent_golden_examples: 12
   question:
     question_count: 1
-    agent_golden_max_questions_per_scenario: 2
-    agent_min_tool_calls: 1
-    agent_min_data_sources: 1
-    agent_golden_examples: 6
     max_deliverables: 2                 # hard limit; filters do not count as deliverables
     max_sources: 1                      # one data source per question by default
     max_success_criteria: 2

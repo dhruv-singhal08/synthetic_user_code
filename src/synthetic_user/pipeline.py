@@ -1,11 +1,11 @@
 """The single orchestrator: reference -> scenarios -> questions -> execute -> evaluate.
 
 The "reference" step only checks the user's reference file + usage guide (never generated
-here); without one the run is ungrounded. Grounded NL2SQL scenarios write reference_packs.json;
-Agent questions carry their answer keys as expected behaviour and success criteria instead.
-When a golden set is present, scenarios and questions are deterministic projections of its rows;
-their canonical tool/source definitions were validated against Reference data during setup.
-A person may edit an NL2SQL pack before questions, invalidating the later steps.
+here); without one the run is ungrounded. The scenarios step first resolves the run's metric
+selection ONCE into the frozen ``metric_config.json`` (the metric compiler is called only when
+custom metrics exist); questions, evaluation and reporting read exactly that snapshot. Grounded
+scenarios write reference_packs.json; a person may edit a pack before questions, invalidating
+the later steps. There are no evaluation profiles: the selected metrics apply to the whole run.
 
 Run artifacts live in ``<artifacts_dir>/runs/<run_id>/``. Existing artifacts are reused;
 a step is regenerated only when asked (from_step / force_steps), when its files are missing,
@@ -39,17 +39,12 @@ from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator, new_r
 from synthetic_user.core.trace import RUN_LOG, trace_step
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.tracing import TracingLLMClient
+from synthetic_user.metrics.registry import resolve_metric_config
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
-from synthetic_user.models.evaluation_profile import (
-    AgentMetric,
-    EvaluationProfile,
-    EvaluationProfileSelection,
-    resolve_evaluation_profile,
-)
 from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
-from synthetic_user.models.golden_set import GoldenSet
 from synthetic_user.models.kpi import RunKpis
+from synthetic_user.models.metrics import MetricSelection, ResolvedMetricConfig
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase, RejectedQuestion
@@ -82,6 +77,7 @@ STEP_ORDER: tuple[Step, ...] = tuple(Step)
 STEP_ARTIFACTS: dict[Step, dict[str, str]] = {
     Step.REFERENCE: {},
     Step.SCENARIOS: {
+        "metric_config": "metric_config.json",
         "scenarios": "scenarios.json",
         "scenarios_rejected": "scenarios_rejected.json",
         "reference_packs": "reference_packs.json",
@@ -112,9 +108,8 @@ class RunInputs:
     product: ProductDescription
     # The user's reference file (+ usage guide); None -> ungrounded run.
     reference: Reference | None = None
-    # SME-authored Agent examples used with Reference data to guide new scenario/question synthesis.
-    golden_set: GoldenSet | None = None
-    evaluation_profile: EvaluationProfile | None = None
+    # The run-level metric selection; None -> evaluation.default_metrics of the config.
+    metric_selection: MetricSelection | None = None
 
     @property
     def mode(self) -> GenerationMode:
@@ -124,11 +119,9 @@ class RunInputs:
     def reference_id(self) -> str | None:
         return self.reference.reference_id if self.reference else None
 
-    @property
-    def profile(self) -> EvaluationProfile:
-        return (
-            self.evaluation_profile
-            or resolve_evaluation_profile(self.product, EvaluationProfileSelection.AUTO)[0]
+    def selection(self, settings: AppConfig) -> MetricSelection:
+        return self.metric_selection or MetricSelection(
+            selected_metrics=list(settings.evaluation.default_metrics)
         )
 
 
@@ -142,8 +135,9 @@ class ReferenceStep:
 @dataclass(frozen=True)
 class ScenarioStep:
     accepted: list[Scenario]
-    rejected: list[RejectedScenario]  # includes duplicates (reasons say "duplicate of ...")
+    rejected: list[RejectedScenario]  # includes exact duplicates ("exact duplicate of ...")
     packs: list[ReferencePack]
+    metric_config: ResolvedMetricConfig
     reused: bool
 
 
@@ -173,6 +167,8 @@ class RunSummary(StrictModel):
     run_dir: NonEmptyStr
     mode: GenerationMode
     reference_id: NonEmptyStr | None
+    metric_config_id: NonEmptyStr | None = None
+    selected_metrics: list[NonEmptyStr] = Field(default_factory=list)
     steps_run: list[Step] = Field(default_factory=list)
     steps_reused: list[Step] = Field(default_factory=list)
     scenarios_accepted: int
@@ -225,11 +221,6 @@ def validate_run(
         owner = scenario_by_id.get(q.scenario_id)
         if owner is None:
             problems.append(f"{q.question_id} -> unknown scenario {q.scenario_id}")
-        elif q.evaluation_profile is not owner.evaluation_profile:
-            problems.append(
-                f"{q.question_id} profile {q.evaluation_profile} != scenario's "
-                f"{owner.evaluation_profile}"
-            )
         elif q.reference_pack_id != owner.reference_pack_id:
             problems.append(
                 f"{q.question_id} uses reference pack {q.reference_pack_id}, its scenario "
@@ -321,31 +312,41 @@ class SyntheticUserPipeline:
     ) -> ScenarioStep:
         manifest = self._manifest_or_none(run_id)
         if not force and manifest is not None and self._has(run_id, Step.SCENARIOS):
-            self._check_manifest(manifest, inputs)
+            self._check_manifest(manifest, inputs, self._settings)
             return ScenarioStep(
                 accepted=self._load_scenarios(run_id),
                 rejected=self._store.read_models(
                     self._file(run_id, "scenarios_rejected"), RejectedScenario
                 ),
                 packs=self._load_packs(run_id),
+                metric_config=self.load_metric_config(run_id),
                 reused=True,
             )
 
-        if inputs.golden_set is not None and inputs.reference is None:
-            raise ArtifactIntegrityError("Golden-guided generation requires Reference data")
-        generator = ScenarioGenerator(
-            self._llm, self._settings, self._log, id_generator=self._ids()
-        )
+        selection = inputs.selection(self._settings)
         with self._trace(run_id, Step.SCENARIOS):
+            # Freeze the run's metric configuration BEFORE any scenario exists.
+            metric_config = await resolve_metric_config(
+                selection,
+                inputs.product,
+                inputs.reference,
+                llm=self._llm,
+                logger=self._log,
+                max_retries=self._settings.llm.max_validation_retries,
+                sql_dialect=self._settings.evaluation.sql_dialect,
+            )
+            generator = ScenarioGenerator(
+                self._llm, self._settings, self._log, id_generator=self._ids()
+            )
             result = await generator.generate(
                 inputs.persona,
                 inputs.product,
                 inputs.reference,
                 count=count,
-                evaluation_profile=inputs.profile,
-                golden_set=inputs.golden_set,
+                metrics=metric_config.active(),
             )
         rejected = [*result.rejected, *result.duplicates]
+        self._store.write_model(self._file(run_id, "metric_config"), metric_config)
         self._store.write_models(self._file(run_id, "scenarios"), result.accepted, Scenario)
         self._store.write_models(
             self._file(run_id, "scenarios_rejected"), rejected, RejectedScenario
@@ -355,7 +356,7 @@ class SyntheticUserPipeline:
             self._store.write_models(
                 self._file(run_id, "reference_packs"), result.packs, ReferencePack
             )
-        else:  # Agent and ungrounded runs do not have schema reference packs.
+        else:  # ungrounded runs have no reference packs
             self._store.delete(self._file(run_id, "reference_packs"))
             skip.add("reference_packs")
         self._save_manifest(
@@ -366,7 +367,8 @@ class SyntheticUserPipeline:
                 product_id=inputs.product.product_id,
                 mode=inputs.mode,
                 reference_id=inputs.reference_id,
-                evaluation_profile=inputs.profile,
+                metric_config_id=metric_config.config_id,
+                metric_selection_fingerprint=selection.fingerprint(),
                 llm_provider=self._llm.provider_name,
                 llm_model=self._llm.model_name,
                 pipeline_version=__version__,
@@ -377,8 +379,24 @@ class SyntheticUserPipeline:
             skip=skip,
         )
         return ScenarioStep(
-            accepted=result.accepted, rejected=rejected, packs=result.packs, reused=False
+            accepted=result.accepted,
+            rejected=rejected,
+            packs=result.packs,
+            metric_config=metric_config,
+            reused=False,
         )
+
+    def load_metric_config(self, run_id: str) -> ResolvedMetricConfig:
+        """The run's frozen metric configuration (descriptive error for pre-registry runs)."""
+        relative = self._file(run_id, "metric_config")
+        if not self._store.exists(relative):
+            raise ArtifactIntegrityError(
+                f"Run {run_id} has no metric_config.json: it was created before run-level "
+                "metric selection (evaluation profiles). Its stored results stay readable, "
+                "but generating or evaluating needs a new metric selection: regenerate from "
+                "the scenarios step."
+            )
+        return self._store.read_model(relative, ResolvedMetricConfig)
 
     def update_reference_pack(
         self, run_id: str, inputs: RunInputs, pack_id: str, draft: ReferencePackDraft
@@ -414,17 +432,7 @@ class SyntheticUserPipeline:
             )
             return QuestionStep(questions, rejected, reused=True)
 
-        golden_question_limit = (
-            self._settings.generation.question.agent_golden_max_questions_per_scenario
-        )
-        if inputs.golden_set is not None and count is not None and count > golden_question_limit:
-            raise ArtifactIntegrityError(
-                "Golden-guided runs accept at most "
-                f"{golden_question_limit} new questions per scenario"
-            )
-        resolved_count = (
-            golden_question_limit if inputs.golden_set is not None and count is None else count
-        )
+        metric_config = self.load_metric_config(run_id)
         generator = QuestionGenerator(
             self._llm, self._settings, self._log, id_generator=self._ids()
         )
@@ -435,9 +443,8 @@ class SyntheticUserPipeline:
                 scenarios,
                 inputs.reference,
                 packs,
-                count=resolved_count,
-                evaluation_profile=inputs.profile,
-                golden_set=inputs.golden_set,
+                count=count,
+                metrics=metric_config.active(),
             )
         self._store.write_models(self._file(run_id, "questions"), result.questions, QuestionCase)
         self._store.write_models(
@@ -537,8 +544,6 @@ class SyntheticUserPipeline:
         inputs: RunInputs,
         *,
         force: bool = False,
-        evaluation_profile: EvaluationProfile | None = None,
-        agent_metrics: Sequence[AgentMetric] | None = None,
     ) -> EvaluateStep:
         manifest = self._require_manifest(run_id, inputs)
         scenarios = self._load_scenarios(run_id)
@@ -576,13 +581,13 @@ class SyntheticUserPipeline:
                     e,
                 )
             )
+        metric_config = self.load_metric_config(run_id)
         evaluator = Evaluator(
             self._llm,
             self._settings,
             self._log,
             reference=inputs.reference,
-            profile=evaluation_profile or inputs.profile,
-            agent_metrics=agent_metrics,
+            metric_config=metric_config,
             id_generator=self._ids(),
         )
         with self._trace(run_id, Step.EVALUATE):
@@ -595,6 +600,7 @@ class SyntheticUserPipeline:
             scenarios=scenarios,
             executions=executions,
             evaluations=evaluations,
+            metric_config=metric_config,
         )
         self._store.write_models(self._file(run_id, "evaluations"), evaluations, EvaluationResult)
         self._store.write_models(self._file(run_id, "bug_candidates"), bugs, BugCandidate)
@@ -631,15 +637,15 @@ class SyntheticUserPipeline:
         cascade = manifest is not None and (
             manifest.reference_id != reference_id
             or manifest.mode is not inputs.mode
-            or (
-                manifest.evaluation_profile is not None
-                and manifest.evaluation_profile is not inputs.profile
-            )
+            or manifest.metric_selection_fingerprint
+            != inputs.selection(self._settings).fingerprint()
         )
         # "reused" = same reference (and mode) as the existing run; the check itself is cheap.
         note(Step.REFERENCE, manifest is not None and not cascade)
         if cascade:
-            self._log.info("Reference or mode changed; regenerating the run from scenarios")
+            self._log.info(
+                "Reference, mode or metric selection changed; regenerating the run from scenarios"
+            )
 
         scenario_step = await self.generate_scenarios(
             run_id,
@@ -663,10 +669,7 @@ class SyntheticUserPipeline:
         cascade = cascade or not execute_step.reused
 
         evaluate_step = await self.evaluate_executions(
-            run_id,
-            inputs,
-            force=cascade or Step.EVALUATE in regenerate,
-            evaluation_profile=inputs.profile,
+            run_id, inputs, force=cascade or Step.EVALUATE in regenerate
         )
         note(Step.EVALUATE, evaluate_step.reused)
 
@@ -679,6 +682,8 @@ class SyntheticUserPipeline:
             run_dir=str(self._store.path_for(run_artifact(run_id, ""))),
             mode=inputs.mode,
             reference_id=reference_id,
+            metric_config_id=scenario_step.metric_config.config_id,
+            selected_metrics=list(scenario_step.metric_config.selected_metric_ids),
             steps_run=ran,
             steps_reused=reused,
             scenarios_accepted=len(scenario_step.accepted),
@@ -711,11 +716,11 @@ class SyntheticUserPipeline:
 
     def _require_manifest(self, run_id: str, inputs: RunInputs) -> RunManifest:
         manifest = self._store.read_model(run_artifact(run_id, MANIFEST), RunManifest)
-        self._check_manifest(manifest, inputs)
+        self._check_manifest(manifest, inputs, self._settings)
         return manifest
 
     @staticmethod
-    def _check_manifest(manifest: RunManifest, inputs: RunInputs) -> None:
+    def _check_manifest(manifest: RunManifest, inputs: RunInputs, settings: AppConfig) -> None:
         expected = (manifest.persona_id, manifest.product_id, manifest.mode)
         actual = (inputs.persona.id, inputs.product.product_id, inputs.mode)
         if expected != actual:
@@ -728,13 +733,14 @@ class SyntheticUserPipeline:
                 f"not {inputs.reference_id} (file or usage guide changed); regenerate from the "
                 "scenarios step"
             )
+        fingerprint = inputs.selection(settings).fingerprint()
         if (
-            manifest.evaluation_profile is not None
-            and manifest.evaluation_profile is not inputs.profile
+            manifest.metric_selection_fingerprint is not None
+            and manifest.metric_selection_fingerprint != fingerprint
         ):
             raise ArtifactIntegrityError(
-                f"Run {manifest.run_id} was built for {manifest.evaluation_profile.value}, not "
-                f"{inputs.profile.value}; regenerate from the scenarios step"
+                f"Run {manifest.run_id} was built for a different metric selection; the frozen "
+                "metric configuration cannot change mid-run: regenerate from the scenarios step"
             )
 
     @contextmanager

@@ -24,6 +24,7 @@ from synthetic_user.storage.runs import run_artifact, save_run_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
+TEST_METRICS = ("relevance", "correctness_completeness", "semantic_correctness")
 
 
 @pytest.fixture
@@ -42,6 +43,7 @@ def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.delenv(var, raising=False)
     data = yaml.safe_load((REPO_ROOT / "config" / "app.yaml").read_text(encoding="utf-8"))
     data["paths"]["artifacts_dir"] = str(tmp_path / "artifacts")
+    data["evaluation"]["default_metrics"] = list(TEST_METRICS)
     data["inputs"] = {
         key: (
             [str(REPO_ROOT / x) for x in value]
@@ -189,10 +191,15 @@ def test_evaluate_file_mode(
     kpis = json.loads((out / "kpis.json").read_text(encoding="utf-8"))
     assert kpis["accuracy"] == kpis["task_success_rate"] == 0.5 and kpis["judged"] == 2
     assert (out / "kpis.csv").read_text(encoding="utf-8").startswith("kpi,value,n")
-    # one generic judgement per response; no SQL plugin call (design v3)
+    # one General Judge call per response (no retrieval metric selected); the SQL parser output
+    # and the cheat sheet are evidence in that same call
     assert len(llm.calls) == 2
-    assert all("Allowed schema names, rules, and joins" in c.user for c in llm.calls)
+    assert all("General Judge" in c.system for c in llm.calls)
     assert all('"allowed_table": "card_transactions"' in c.user for c in llm.calls)
+    assert all("SQL analysis (parser output" in c.user for c in llm.calls)
+    assert "parse failed" in llm.calls[1].user  # "SELEC broken": explicit, not a fail by itself
+    config = json.loads((out / "metric_config.json").read_text(encoding="utf-8"))
+    assert config["selected_metric_ids"] == list(TEST_METRICS)
 
 
 def test_grounded_file_mode_needs_the_packs(
@@ -233,6 +240,7 @@ def test_evaluate_run_mode_updates_manifest(
     sample_packs: list[ReferencePack],
     sample_reference: Reference,
     judge: Any,
+    seed_config: Callable[..., Any],
 ) -> None:
     _llm(monkeypatch, judge)
     store = JsonArtifactStore(tmp_path / "artifacts")
@@ -244,6 +252,7 @@ def test_evaluate_run_mode_updates_manifest(
     store.write_with(
         run_artifact(RUN_ID, "executions.json"), _executions(), TypeAdapter(list[ExecutionRecord])
     )
+    seed_config(store, RUN_ID, TEST_METRICS)
     save_run_manifest(
         store,
         RunManifest(
@@ -266,6 +275,45 @@ def test_evaluate_run_mode_updates_manifest(
     assert (run_dir / "evaluations.json").is_file()
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert {"scenarios", "evaluations", "bug_candidates"} <= set(manifest["artifacts"])
+
+
+def test_evaluate_legacy_run_without_metric_config_explains_migration(
+    config_path: Path,
+    tmp_path: Path,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+    sample_reference: Reference,
+) -> None:
+    store = JsonArtifactStore(tmp_path / "artifacts")
+    store.write_models(run_artifact(RUN_ID, "scenarios.json"), sample_scenarios, Scenario)
+    store.write_models(run_artifact(RUN_ID, "reference_packs.json"), sample_packs, ReferencePack)
+    store.write_models(
+        run_artifact(RUN_ID, "questions.json"), _questions(sample_scenarios), QuestionCase
+    )
+    store.write_with(
+        run_artifact(RUN_ID, "executions.json"), _executions(), TypeAdapter(list[ExecutionRecord])
+    )
+    save_run_manifest(
+        store,
+        RunManifest.model_validate(
+            {
+                "run_id": RUN_ID,
+                "created_at": "2026-10-13T00:00:00Z",
+                "persona_id": "finance_controller",
+                "product_id": "sample_nl2sql",
+                "mode": "grounded",
+                "reference_id": sample_reference.reference_id,
+                "evaluation_profile": "nl2sql",  # a profile-era manifest
+                "llm_provider": "fake",
+                "llm_model": "fake",
+                "pipeline_version": "0.1.0",
+                "effective_config": {},
+            }
+        ),
+    )
+    result = CliRunner().invoke(app, ["--config", str(config_path), "evaluate", "--run-id", RUN_ID])
+    assert result.exit_code == 1
+    assert "created before run-level metric selection" in result.output
 
 
 def test_evaluate_needs_exactly_one_mode(config_path: Path, tmp_path: Path) -> None:

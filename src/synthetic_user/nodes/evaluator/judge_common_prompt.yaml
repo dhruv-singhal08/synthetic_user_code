@@ -1,0 +1,43 @@
+# Prompt text shared by the two judges (general_judge.py, retrieval_judge.py; loaded by judge_common.py).
+# judge_common.py fills every ${placeholder}; a literal dollar sign is written $$.
+
+# Added to a response artifact / chunk cut to evaluation.artifact_max_chars characters.
+artifact_cut_marker: "\n[... cut: too long]"
+
+# Retry feedback when the judge's reply fails a check.
+copy_hint: >-
+  copy ONE shorter contiguous fragment character for character from the source, without "..."
+
+missing_finding: >-
+  ${metric} is scored ${score} (below 1) without a finding with category ${metric_repr}: if the
+  response really falls short on ${metric}, add that finding; if nothing is wrong, score
+  ${metric} 1. Never change a score only to satisfy this check
+
+ignored_predicates_note: >-
+  Ignored configured SQL predicate(s) during scoring: ${predicates}. The original SQL is
+  preserved in the product response.
+
+metric_block: |-
+  - ${metric_id} (${display_name}): ${rubric}
+    Score anchors: 1 = ${anchor_1}; 0.5 = ${anchor_half}; 0 = ${anchor_0}.
+    Evidence: ${evidence_requirements}
+
+score_example:
+  score: "<0 | 0.5 | 1 | null>"
+  rationale: "<why>"
+  evidence: "<one short exact fragment copied from the source, or null>"
+  evidence_ids: ["<retrieved chunk id / tool call number relied on; empty if none>"]
+  what_worked: ["<observable success; empty if none>"]
+  what_didnt: ["<observable gap; empty if none>"]
+
+finding_example:
+  category: "${metrics}"
+  description: "<the observable problem>"
+  expected_behavior: "<what should have happened>"
+  observed_behavior: "<what happened>"
+  evidence: "<one short exact fragment copied from the source, or null>"
+  severity: "${severities}"
+  confidence: "<0-1, or null>"
+  evidence_status: "${evidence_statuses}"
+  matches_known_gap: "<true | false>"
+  related_tags: ["<exact tag from the traceability catalog; empty if none>"]

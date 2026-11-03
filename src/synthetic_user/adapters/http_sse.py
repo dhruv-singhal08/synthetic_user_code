@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Self
@@ -12,12 +13,15 @@ from typing import Any, Self
 import aiohttp
 from pydantic import ValidationError
 
-from synthetic_user.adapters.base import ProductRequest
+from synthetic_user.adapters.base import ContextRequest, ProductRequest
 from synthetic_user.adapters.http_common import (
     ERROR_SNIPPET_CHARS,
     HttpOptionsBase,
     HttpRequest,
+    JsonTransport,
     ResponseMapper,
+    correlation_for,
+    fetch_context,
     host,
     lookup,
     redact_json,
@@ -27,10 +31,16 @@ from synthetic_user.adapters.http_common import (
     ssl_context,
     tls_settings,
 )
+from synthetic_user.adapters.http_json import urllib_transport
 from synthetic_user.core.exceptions import ConfigError, ProductAdapterError, format_validation_error
 from synthetic_user.core.trace import record_product_http
 from synthetic_user.models.base import NonEmptyStr, StrictModel
-from synthetic_user.models.execution import ErrorResponse, ProductResponse, TimeoutResponse
+from synthetic_user.models.execution import (
+    ErrorResponse,
+    ProductResponse,
+    RetrievedContext,
+    TimeoutResponse,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -95,11 +105,14 @@ class HttpSseAdapter:
         env: Mapping[str, str],
         ssl_verify: bool = True,
         transport: SseTransport = aiohttp_sse_transport,
+        context_transport: JsonTransport | None = None,
     ) -> None:
         self._options = options
         self._env = env
         self._ssl_verify, self._tls_ca_bundle = tls_settings(options, env, ssl_verify=ssl_verify)
         self._transport = transport
+        # The context API is plain JSON over HTTP, even when the answer is streamed.
+        self._context_transport = context_transport
         self._mapper = ResponseMapper(options.response_mapping)
 
     @classmethod
@@ -126,7 +139,8 @@ class HttpSseAdapter:
     async def send(self, req: ProductRequest) -> ProductResponse:
         options = self._options
         resolved = resolve_headers(options.headers, self._env)
-        rendered = render_template(options.request_template, req)
+        request_uuid = str(uuid.uuid4())
+        rendered = render_template(options.request_template, req, request_uuid=request_uuid)
         body = None if options.method == "GET" else json.dumps(rendered).encode("utf-8")
         request = HttpRequest(
             method=options.method,
@@ -197,7 +211,28 @@ class HttpSseAdapter:
             condition_documents=redacted_events,
             require_mapped_text=True,
         )
+        response = correlation_for(response, options, req, request_uuid)
         return response.model_copy(update={"raw_response": redacted_events})
+
+    async def fetch_context(self, req: ContextRequest) -> RetrievedContext:
+        options = self._options.context_api
+        if options is None:
+            return RetrievedContext()  # not_requested
+        transport = self._context_transport or urllib_transport
+        return await fetch_context(
+            options,
+            {
+                "correlation_id": req.correlation_id,
+                "session_id": req.session_id,
+                "question_id": req.question_id,
+                "utterance": req.utterance,
+                "uuid": req.correlation_id,
+            },
+            self._env,
+            transport,
+            tls_ca_bundle=self._tls_ca_bundle,
+            ssl_verify=self._ssl_verify,
+        )
 
     async def aclose(self) -> None:
         return None

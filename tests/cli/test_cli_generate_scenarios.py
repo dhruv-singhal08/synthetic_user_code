@@ -85,9 +85,7 @@ def test_writes_scenarios_rejected_and_manifest(
 ) -> None:
     bad = json.loads(json.dumps(scenario_drafts[1]))
     bad["reference_pack"] = {"tables": [{"table": "budgets", "why": "x"}]}
-    _script(
-        monkeypatch, {"scenarios": [scenario_drafts[0], bad, scenario_drafts[2]]}, {"scenarios": []}
-    )
+    _script(monkeypatch, {"scenarios": [scenario_drafts[0], bad, scenario_drafts[2]]})
 
     result = CliRunner().invoke(
         app,
@@ -118,6 +116,7 @@ def test_writes_scenarios_rejected_and_manifest(
     assert manifest["mode"] == "grounded"
     assert manifest["reference_id"] == sample_reference.reference_id
     assert manifest["artifacts"] == {
+        "metric_config": "metric_config.json",
         "scenarios": "scenarios.json",
         "scenarios_rejected": "scenarios_rejected.json",
         "reference_packs": "reference_packs.json",

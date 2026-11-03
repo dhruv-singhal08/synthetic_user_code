@@ -496,20 +496,13 @@ select {
 select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(0, 111, 207, 0.15); }
 .hint-warn { color: var(--warn); font-weight: 600; }
 
-/* --- evaluation profile --------------------------------------------------------------------- */
-.profile-options { display: flex; flex-direction: column; gap: 10px; }
-.profile-option {
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 14px 16px;
-  border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; transition: border-color 0.12s, background 0.12s;
-}
-.profile-option:hover { border-color: #b9cbe2; }
-.profile-option.on { border-color: var(--primary); background: var(--primary-soft); box-shadow: 0 0 0 3px rgba(0, 111, 207, 0.1); }
-.profile-option.disabled { opacity: 0.55; cursor: not-allowed; }
-.profile-option input { width: 18px; height: 18px; accent-color: var(--primary); margin: 0; }
-.profile-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.profile-text b { font-size: 14px; }
-.profile-text small { color: var(--muted); font-size: 12.5px; }
-.param-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+/* --- evaluation tab -------------------------------------------------------------------------- */
+.metric-groups { display: flex; flex-direction: column; gap: 18px; }
+.metric-group h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.custom-grid, .gen-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.gen-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.custom-grid textarea { width: 100%; }
+.param-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .param {
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
   padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0;
@@ -577,6 +570,7 @@ select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3p
   .step::after { display: none; }
 }
 @media (max-width: 1080px) {
+  .custom-grid, .gen-grid { grid-template-columns: minmax(0, 1fr); }
   .shell { grid-template-columns: minmax(0, 1fr); }
   .sidenav { position: static; height: auto; flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); }
   .sidenav nav { display: flex; flex-wrap: wrap; gap: 4px; width: 100%; }

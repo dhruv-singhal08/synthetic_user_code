@@ -1,4 +1,9 @@
-"""Stable trace tags linking evaluation results to the question and its cheat sheet."""
+"""Stable trace tags linking evaluation results to the question and its cheat sheet.
+
+Reporting aid only (never a validation gate). A failed criterion is linked to a finding when the
+General Judge assigned that criterion to the finding's metric (``metric_id``); older artifacts
+without that link fall back to keyword overlap between the finding and the criterion.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +17,6 @@ from synthetic_user.models.evaluation import (
     EvaluationResult,
     Finding,
     FindingDraft,
-    MetricName,
 )
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import ReferencePack
@@ -107,11 +111,8 @@ _RULE_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 _JOIN_SIGNAL = re.compile(r"\b(?:join|relationship|foreign key)\b", re.IGNORECASE)
-_SCHEMA_CRITERION = re.compile(
-    r"\b(?:allowed|documented|listed)\b.{0,60}\b(?:table|column|field|identifier|schema)\b|"
-    r"\b(?:table|column|field|identifier|schema)\b.{0,60}\b(?:allowed|documented|listed)\b",
-    re.IGNORECASE,
-)
+# The built-in metric whose findings may carry the SCHEMA-UNLISTED report tag.
+SCHEMA_METRIC = "schema_faithfulness"
 _WORDS = re.compile(r"[a-z][a-z0-9_]+")
 _STOPWORDS = frozenset(
     {
@@ -170,7 +171,7 @@ def link_finding_tags(
         result
         for result in criteria_results
         if result.status in {CriterionStatus.PARTLY, CriterionStatus.NOT_MET}
-        and _criterion_metric(result.criterion) == finding.category
+        and result.metric_id in (None, finding.category)
     ]
     if failed_criteria:
         if len(failed_criteria) == 1:
@@ -217,19 +218,11 @@ def link_finding_tags(
         elif item.kind == "document" and _mentions_identifier(text, item.text):
             linked.add(item.tag)
 
-    if finding.category == MetricName.SCHEMA_FAITHFULNESS.value and _SCHEMA_PROBLEM.search(text):
+    if finding.category == SCHEMA_METRIC and _SCHEMA_PROBLEM.search(text):
         linked.add("SCHEMA-UNLISTED")
 
     order = {item.tag: index for index, item in enumerate(catalog)}
     return sorted((tag for tag in linked if tag), key=lambda tag: (order.get(tag, 10_000), tag))
-
-
-def _criterion_metric(criterion: str) -> str:
-    if _JOIN_SIGNAL.search(criterion) or _RULE_SIGNAL.search(criterion):
-        return MetricName.RULES_ADHERENCE.value
-    if _SCHEMA_CRITERION.search(criterion):
-        return MetricName.SCHEMA_FAITHFULNESS.value
-    return MetricName.SEMANTIC_CORRECTNESS.value
 
 
 def merge_finding_tags(

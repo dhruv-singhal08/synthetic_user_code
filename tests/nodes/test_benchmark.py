@@ -11,6 +11,7 @@ from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import InputAssetError
 from synthetic_user.core.identifiers import SequentialIdGenerator
 from synthetic_user.llm.fake import FakeLLMClient
+from synthetic_user.metrics.registry import builtin_metric_config
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
 from synthetic_user.nodes.evaluator import Evaluator
@@ -50,13 +51,14 @@ async def test_agreement_computed_with_scripted_llm(
     sample_chatbot: ProductDescription,
     judge_factory: Callable[..., Any],
 ) -> None:
-    """A judge that approves everything: every answered case passes, so agreement = pass
-    labels among judged cases; clarification / denied cases are not judged (design v3)."""
+    """A judge that approves everything: every answered or denied case passes, so agreement =
+    pass labels among judged cases; unresolved clarifications are not judged."""
     evaluator = Evaluator(
         FakeLLMClient([judge_factory()] * 20),
         app_config,
         logging.getLogger("test"),
         reference=sample_reference,
+        metric_config=builtin_metric_config(list(app_config.evaluation.default_metrics)),
         id_generator=SequentialIdGenerator(),
     )
     cases = load_cases(BENCH / "labeled_cases.jsonl")
@@ -68,7 +70,7 @@ async def test_agreement_computed_with_scripted_llm(
         packs,
         {p.product_id: p for p in (sample_product, sample_chatbot)},
     )
-    answered = [c for c in cases if c.outcome == "answered"]
+    answered = [c for c in cases if c.outcome in ("answered", "denied")]
     assert {r.verdict for r in report.judged} == {"pass"}
     assert len(report.judged) == len(answered) < len(cases)
     assert all(r.verdict is None for r in report.rows if not r.judged)

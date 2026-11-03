@@ -1,10 +1,9 @@
 # Prompt text for Node 2 (scenarios). prompt.py picks the entries for the run's mode and
-# profile and fills every ${placeholder}; a literal dollar sign is written $$.
+# fills every ${placeholder}; a literal dollar sign is written $$.
 #
 # Variants (system prompt = system + " " + the mode's suffix):
 #   ungrounded  no reference: business-level goals only, no reference_pack
-#   grounded    NL2SQL with a reference: the scenario's cheat sheet (reference_pack)
-#   agent       Agent with a reference: tools / data sources, never a reference_pack
+#   grounded    with a reference: the scenario's cheat sheet (reference_pack)
 
 system: >-
   You design realistic test scenarios for a synthetic user who will later test a
@@ -19,10 +18,6 @@ system_grounded_suffix: >-
 system_ungrounded_suffix: >-
   No data schema is available: you never invent tables, fields, data structures or numbers.
 
-system_agent_suffix: >-
-  This is an Agent evaluation: work in user-visible product, tool, and data-source terms.
-  Never request or emit database tables, columns, joins, SQL, or a reference_pack.
-
 # --- the common user prompt -----------------------------------------------------------------
 
 core: |
@@ -36,7 +31,7 @@ core: |
   Product:
   ${product}
 
-  ${reference}Settings: count=${count}; diversity_preference=${diversity_preference}.
+  ${reference}${metrics}Settings: count=${count}; diversity_preference=${diversity_preference}.
 
   Existing scenario signatures to AVOID repeating:
   ${avoid}
@@ -65,7 +60,7 @@ core: |
     tone or phrasing: the question is written later, in the persona's own voice.
   ${constraints}
   - Vary task types and goals; do not repeat an avoided signature.
-
+  ${metric_rule}
   ## OUTPUT CONTRACT
   ${contract}
 
@@ -87,11 +82,25 @@ parts_with_pack: >-
 
 unsupported_included: >-
   Where the count allows, include scenarios the product does NOT support (see
-  not_supported / known_limitations) and classify them as unsupported.
+  not_supported / known_limitations) and classify them as unsupported. An unsupported scenario
+  keeps its unsupported objective: never turn it into a nearby supported proxy goal.
 
 unsupported_excluded: Only produce scenarios the product supports.
 
 no_signatures_to_avoid: "- (none)"
+
+# Selected run metrics: coverage guidance only (never a profile, never utterances).
+metrics_block: |
+  Evaluation metrics selected for this run (coverage guidance only):
+  ${metrics}
+
+metric_item: "- ${name}: ${description}"
+
+metric_rule: >-
+  - Where it is organic for this persona and product, include goals whose answers exercise the
+  selected metrics' evidence (e.g. retrieval-dependent, rule-dependent, query-generating or
+  tool-dependent tasks). Never force tools, retrieval or complexity a realistic task would not
+  need, and never write questions.
 
 # The output example (D204). Each <a | b> choice list is filled in from the model's enums.
 scenario_example:
@@ -117,18 +126,23 @@ ungrounded_missing: |-
   If the product description does not say whether something is supported, classify the
   capability as unknown and say what is missing in capability_rationale.
 
-# --- grounded (NL2SQL with a reference) -----------------------------------------------------
+# --- grounded (a reference was given) --------------------------------------------------------
 
 grounded_reference: |
   Reference (${label}; AUTHORITATIVE):
   <<<REFERENCE
   ${reference}
   REFERENCE>>>
-
+  ${tools}
   Usage instructions for the reference (follow them):
   ${instructions}
 
-  ${golden_guidance}
+grounded_tools: |
+
+  Authoritative tool / data-source definitions (part of the reference):
+  <<<TOOLS
+  ${tools}
+  TOOLS>>>
 
 grounded_label: '${kind} "${source_name}"'
 
@@ -138,7 +152,9 @@ kind_labels:
 
 grounded_constraints: |-
   ${pack_rules}
-  - Base goals and success_criteria on what the reference actually contains. Golden-set patterns are optional guidance and never override Reference data.
+  - Base goals and success_criteria on what the reference actually contains. If the reference
+    does not establish that a capability is supported, classify it unknown; never invent
+    support.
 
 grounded_prohibited: >-
   - Tables, columns, relationships, documents, facts or rules that are not in the reference.
@@ -154,8 +170,9 @@ pack_rules:
       from the catalog by exact name; code copies the descriptions and rules in and drops any
       name the catalog does not have.
       - tables (1-4): every table a correct answer must use, with the columns it needs, and why.
-        Include columns used only inside a required aggregate, including a sensitive identifier needed
-        for COUNT(DISTINCT ...). Aggregate-only use does not expose the underlying identifier values.
+        Include columns used only inside a required aggregate, including a sensitive identifier
+        needed to count distinct entities. Aggregate-only use does not expose the underlying
+        identifier values.
       - joins (0-3): the listed relationships needed to combine those tables, "from" / "to"
         exactly as listed. Only listed relationships exist.
       - rules (0-4): ids of the catalog rules the answer must respect (table rules come with
@@ -186,71 +203,3 @@ pack_examples:
     documents:
       - name: "<document name, exactly as listed>"
         why: "<why the goal needs it>"
-
-golden_guidance: |+
-  Optional SME golden set (INSPIRATION, not cases to replay):
-  Coverage across all uploaded examples:
-  ${summary}
-
-  Representative intent and evaluation patterns:
-  ${examples}
-
-  Use these patterns together with Persona, Product and the authoritative Reference to improve
-  coverage and success criteria. Create new business goals and intents; never copy or lightly
-  reword an uploaded question, expected behaviour, or success criterion.
-
-# --- agent (Agent profile with a reference) -------------------------------------------------
-
-agent_reference: |
-  Agent context (AUTHORITATIVE; no physical schema):
-  <<<AGENT_CONTEXT
-  ${context}
-  AGENT_CONTEXT>>>
-  ${inspiration}
-
-# Used when a data catalog has no agent_context: its description and catalog rules only.
-agent_catalog_title: "Operational reference: ${name}"
-agent_catalog_no_description: No additional operational description was supplied.
-agent_catalog_rules_title: "Product/tool constraints:"
-
-agent_inspiration: |
-
-  SME golden set (INSPIRATION, not test cases to replay):
-  Coverage across all uploaded cases:
-  ${summary}
-
-  Representative examples:
-  ${examples}
-
-  Use these examples to learn valid intents, evaluation detail, and realistic combinations. Create
-  NEW business goals and question intents. Do not copy or lightly reword a golden question, its
-  expected behaviour, or its success criteria.
-
-agent_constraints: |-
-  - There is no reference_pack for Agent scenarios. The evaluator will use each generated
-    question's expected_behavior and success_criteria as the answer key.
-  - Use only user-visible product capabilities, tools, and data sources. Never mention or select
-    database tables, columns, fields, joins, SQL, or other storage implementation details.
-  - Every supported goal must be achievable through at least one tool and data source in the Agent
-    context.
-  ${golden_constraint}
-  - For this run's selected complexity, every supported goal must genuinely require at least
-    ${min_data_sources} distinct Agent data source(s) and
-    ${min_tool_calls} operational tool call(s). A repeated tool is valid only when
-    separate calls with different sources or purposes are actually needed. Keep source results
-    separate when the operational rules prohibit blending them. Unsupported goals are exempt.
-
-agent_golden_constraint: |-
-  - Base goals and success_criteria on the product, operational context, and patterns in the optional golden set above.
-  - Generate novel coverage beyond the uploaded examples; do not replay a golden-set case.
-
-agent_no_golden_constraint: >-
-  - Base goals and success_criteria on the product and operational context.
-
-agent_prohibited: >-
-  - Database tables, columns, fields, joins, SQL, reference_pack, or physical-schema
-  requirements.
-
-agent_missing: |-
-  If the product description and operational context do not establish that a goal is supported,
-  classify it as unknown or unsupported and explain the missing capability.

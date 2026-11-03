@@ -9,7 +9,6 @@ from typing import Any, Self
 from pydantic import Field, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
-from synthetic_user.models.evaluation_profile import EvaluationProfile
 
 _SECRET_KEY_MARKERS = ("secret", "api_key", "password")
 
@@ -37,14 +36,28 @@ class RunManifest(StrictModel):
     product_id: NonEmptyStr
     mode: GenerationMode
     reference_id: NonEmptyStr | None = None
-    # None keeps manifests created before profile-aware generation readable. New runs always set
-    # this so changing profile invalidates scenario/question artifacts.
-    evaluation_profile: EvaluationProfile | None = None
+    # The frozen metric configuration (metric_config.json) and the selection it came from.
+    # None = a run created before run-level metric selection (legacy, read-only for evaluation).
+    metric_config_id: NonEmptyStr | None = None
+    metric_selection_fingerprint: NonEmptyStr | None = None
+    # Profile of a pre-registry run, kept as a label only; never used for routing.
+    legacy_evaluation_profile: NonEmptyStr | None = None
     llm_provider: NonEmptyStr
     llm_model: NonEmptyStr
     pipeline_version: NonEmptyStr
     effective_config: dict[str, Any]
     artifacts: dict[NonEmptyStr, NonEmptyStr] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_profile(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "evaluation_profile" in value:
+            data = dict(value)
+            profile = data.pop("evaluation_profile")
+            if profile is not None:
+                data.setdefault("legacy_evaluation_profile", str(profile))
+            return data
+        return value
 
     @model_validator(mode="after")
     def _reference_matches_mode(self) -> Self:

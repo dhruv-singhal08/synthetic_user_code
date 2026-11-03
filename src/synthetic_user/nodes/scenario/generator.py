@@ -1,14 +1,18 @@
-"""Node 2: generate scenarios with profile-specific grounding.
+"""Node 2: generate scenarios in ONE LLM call for the whole requested batch.
 
-NL2SQL grounded scenarios carry a validated schema reference pack. Agent scenarios use only
-business, product, tool, and data-source context and never carry schema packs. Ungrounded
-scenarios have neither a reference nor a pack.
+Grounded scenarios carry a validated Reference Pack (cheat sheet); ungrounded ones have neither
+a reference nor a pack. No top-up rounds and no separate validation call: each returned item is
+validated individually (schema, persona task, pack integrity, config filter) and rejected with
+its reasons, never fixed. Duplicates are only EXACT structural duplicates (identical signature:
+task type | capability | cheat-sheet items | hash of the normalized business goal); there is no
+keyword or similarity-based duplicate detection. The run's selected metrics reach the prompt as
+coverage guidance only; the generation mode never depends on them.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
-import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -21,8 +25,7 @@ from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import StrictModel
-from synthetic_user.models.evaluation_profile import EvaluationProfile
-from synthetic_user.models.golden_set import GoldenSet
+from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference, ReferencePack, pack_id_for
@@ -45,62 +48,6 @@ SURPLUS = "surplus: more scenarios returned than requested"
 MISSING_PACK = "mode grounded requires a reference_pack"
 UNEXPECTED_PACK = "mode ungrounded must not have a reference_pack"
 UNKNOWN_TYPICAL_TASK = "typical_task is not one of the persona's typical_tasks"
-UNEXPECTED_AGENT_PACK = "Agent scenarios must not have a reference_pack"
-
-_STOPWORDS = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "with",
-        "from",
-        "that",
-        "this",
-        "which",
-        "what",
-        "into",
-        "over",
-        "per",
-        "their",
-        "they",
-        "them",
-        "are",
-        "was",
-        "were",
-        "has",
-        "have",
-        "had",
-        "our",
-        "you",
-        "your",
-        "can",
-        "will",
-        "should",
-        "would",
-        "been",
-        "being",
-        "its",
-        "out",
-        "all",
-        "any",
-        "each",
-        "how",
-        "who",
-        "whom",
-        "why",
-        "when",
-        "where",
-        "than",
-        "then",
-        "also",
-        "only",
-        "more",
-        "most",
-        "less",
-        "least",
-        "very",
-    }
-)
 
 
 class _RawScenarioBatch(StrictModel):
@@ -110,39 +57,22 @@ class _RawScenarioBatch(StrictModel):
     scenarios: list[dict[str, Any]] = Field(default_factory=list)
 
 
-def _goal_keywords(business_goal: str) -> str:
-    words = re.findall(r"[a-z0-9]+", business_goal.lower())
-    return " ".join(sorted({w for w in words if len(w) > 2 and w not in _STOPWORDS}))
+def _goal_hash(business_goal: str) -> str:
+    """Hash of the whitespace/case-normalized goal: exact identity, no keyword heuristics."""
+    normalized = " ".join(business_goal.casefold().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 def scenario_signature(
     task_type: TaskType,
     business_goal: str,
     capability: CapabilityClassification,
-    pack: ReferencePack,
+    pack: ReferencePack | None = None,
 ) -> str:
-    """Grounded: task_type | goal keywords | capability | cheat-sheet item names."""
-    parts = [
-        task_type.value,
-        _goal_keywords(business_goal),
-        capability.value,
-        ",".join(sorted({name.strip().lower() for name in pack.item_names()})),
-    ]
+    """Structural id: task_type | capability | cheat-sheet item names | goal hash."""
+    items = ",".join(sorted({n.strip().casefold() for n in pack.item_names()})) if pack else ""
+    parts = [task_type.value, capability.value, items, _goal_hash(business_goal)]
     return "|".join(p.replace("|", "/") for p in parts)
-
-
-def ungrounded_signature(
-    task_type: TaskType, business_goal: str, capability: CapabilityClassification
-) -> str:
-    """Ungrounded: task_type | goal keywords | capability."""
-    parts = [task_type.value, _goal_keywords(business_goal), capability.value]
-    return "|".join(p.replace("|", "/") for p in parts)
-
-
-def _shape(signature: str) -> tuple[str, ...] | None:
-    """(task_type, core_ref names) of a grounded signature; None for ungrounded ones."""
-    parts = signature.split("|")
-    return (parts[0], parts[3]) if len(parts) == 4 else None
 
 
 class ScenarioGenerator:
@@ -167,65 +97,56 @@ class ScenarioGenerator:
         *,
         count: int | None = None,
         existing_signatures: Sequence[str] = (),
-        evaluation_profile: EvaluationProfile = EvaluationProfile.NL2SQL,
-        golden_set: GoldenSet | None = None,
+        metrics: Sequence[MetricDefinition] = (),
     ) -> ScenarioGenerationResult:
-        """mode = grounded if ``reference`` else ungrounded."""
+        """mode = grounded if ``reference`` else ungrounded. Exactly one LLM call (+ bounded
+        validation retries of that call)."""
         cfg = self._settings.generation.scenario
         requested = count if count is not None else cfg.scenario_count
         if requested < 1:
             raise ValueError("scenario count must be >= 1")
 
         mode = GenerationMode.GROUNDED if reference is not None else GenerationMode.UNGROUNDED
-        self._log.info("Generating %d scenario(s), mode %s", requested, mode)
-        state = _DedupState(existing_signatures)
+        self._log.info("Generating %d scenario(s) in one call, mode %s", requested, mode)
+        seen: dict[str, str] = dict.fromkeys(existing_signatures, "existing scenario")
         result = ScenarioGenerationResult()
-        for round_no in range(1 + cfg.max_topup_rounds):
-            needed = requested - len(result.accepted)
-            if needed <= 0:
-                break
-            options = ScenarioPromptOptions(
-                count=needed,
-                include_unsupported_scenarios=cfg.include_unsupported_scenarios,
-                diversity_preference=cfg.diversity_preference,
-                max_request_steps=self._settings.generation.question.max_deliverables,
-                agent_golden_examples=cfg.agent_golden_examples,
-                agent_min_tool_calls=self._settings.generation.question.agent_min_tool_calls,
-                agent_min_data_sources=self._settings.generation.question.agent_min_data_sources,
+        options = ScenarioPromptOptions(
+            count=requested,
+            include_unsupported_scenarios=cfg.include_unsupported_scenarios,
+            diversity_preference=cfg.diversity_preference,
+            max_request_steps=self._settings.generation.question.max_deliverables,
+        )
+        system, user = build_scenario_prompt(
+            persona,
+            product,
+            reference,
+            options,
+            avoid_signatures=list(existing_signatures),
+            metrics=metrics,
+        )
+        with trace_subject("scenario batch"):
+            batch = await generate_structured(
+                self._llm,
+                system,
+                user,
+                _RawScenarioBatch,
+                max_retries=self._settings.llm.max_validation_retries,
             )
-            system, user = build_scenario_prompt(
-                persona,
-                product,
-                reference,
-                options,
-                avoid_signatures=state.signatures(),
-                evaluation_profile=evaluation_profile,
-                golden_set=golden_set,
-            )
-            with trace_subject(f"round {round_no + 1}"):
-                batch = await generate_structured(
-                    self._llm,
-                    system,
-                    user,
-                    _RawScenarioBatch,
-                    max_retries=self._settings.llm.max_validation_retries,
-                )
-            for raw in batch.scenarios:
-                if len(result.accepted) >= requested:
-                    result.rejected.append(RejectedScenario(payload=raw, reasons=[SURPLUS]))
-                    continue
-                self._process(raw, persona, product, reference, evaluation_profile, state, result)
-            self._log.info(
-                "Scenario round %d: %d returned; totals accepted=%d rejected=%d duplicates=%d",
-                round_no + 1,
-                len(batch.scenarios),
-                len(result.accepted),
-                len(result.rejected),
-                len(result.duplicates),
-            )
+        for raw in batch.scenarios:
+            if len(result.accepted) >= requested:
+                result.rejected.append(RejectedScenario(payload=raw, reasons=[SURPLUS]))
+                continue
+            self._process(raw, persona, product, reference, seen, result)
+        self._log.info(
+            "Scenarios: %d returned; accepted=%d rejected=%d duplicates=%d",
+            len(batch.scenarios),
+            len(result.accepted),
+            len(result.rejected),
+            len(result.duplicates),
+        )
         if len(result.accepted) < requested:
             self._log.warning(
-                "Only %d of %d requested scenarios accepted (not padded)",
+                "Only %d of %d requested scenarios accepted (partial result, not padded)",
                 len(result.accepted),
                 requested,
             )
@@ -237,8 +158,7 @@ class ScenarioGenerator:
         persona: Persona,
         product: ProductDescription,
         reference: Reference | None,
-        evaluation_profile: EvaluationProfile,
-        state: _DedupState,
+        seen: dict[str, str],
         result: ScenarioGenerationResult,
     ) -> None:
         cfg = self._settings.generation.scenario
@@ -256,10 +176,7 @@ class ScenarioGenerator:
         typical_task = persona_task(persona, draft.typical_task)
         if draft.typical_task is not None and typical_task is None:
             reasons.append(f"{UNKNOWN_TYPICAL_TASK}: {draft.typical_task!r}")
-        if evaluation_profile is EvaluationProfile.AGENT:
-            if draft.reference_pack is not None:
-                reasons.append(UNEXPECTED_AGENT_PACK)
-        elif reference is None:
+        if reference is None:
             if draft.reference_pack is not None:
                 reasons.append(UNEXPECTED_PACK)
         elif draft.reference_pack is None:
@@ -278,16 +195,13 @@ class ScenarioGenerator:
             result.rejected.append(RejectedScenario(payload=raw, reasons=reasons))
             return
 
-        if pack is not None:
-            signature = scenario_signature(
-                draft.task_type, draft.business_goal, draft.capability, pack
-            )
-        else:
-            signature = ungrounded_signature(draft.task_type, draft.business_goal, draft.capability)
-        duplicate_of = state.find(signature)
+        signature = scenario_signature(draft.task_type, draft.business_goal, draft.capability, pack)
+        duplicate_of = seen.get(signature)
         if duplicate_of is not None:
             result.duplicates.append(
-                RejectedScenario(payload=raw, reasons=[f"duplicate of {duplicate_of}: {signature}"])
+                RejectedScenario(
+                    payload=raw, reasons=[f"exact duplicate of {duplicate_of}: {signature}"]
+                )
             )
             return
 
@@ -296,7 +210,6 @@ class ScenarioGenerator:
             persona_id=persona.id,
             product_id=product.product_id,
             mode=GenerationMode.GROUNDED if reference is not None else GenerationMode.UNGROUNDED,
-            evaluation_profile=evaluation_profile,
             reference_id=reference.reference_id if reference is not None else None,
             reference_pack_id=pack_id_for(scenario_id) if pack is not None else None,
             business_goal=draft.business_goal,
@@ -310,7 +223,7 @@ class ScenarioGenerator:
             signature=signature,
         )
         assert scenario.id == scenario_id
-        state.add(signature, scenario.id)
+        seen[signature] = scenario.id
         result.accepted.append(scenario)
         if pack is not None:
             result.packs.append(pack)
@@ -327,28 +240,3 @@ def persona_task(persona: Persona, text: str | None) -> str | None:
 
 def _task_key(text: str) -> str:
     return " ".join(text.casefold().split()).rstrip(".")
-
-
-class _DedupState:
-    """Signatures seen so far, plus grounded (task, tables, metrics, dimensions) shapes."""
-
-    def __init__(self, existing: Sequence[str]) -> None:
-        self._by_signature: dict[str, str] = {}
-        self._by_shape: dict[tuple[str, ...], str] = {}
-        for signature in existing:
-            self.add(signature, "existing scenario")
-
-    def add(self, signature: str, owner: str) -> None:
-        self._by_signature.setdefault(signature, owner)
-        shape = _shape(signature)
-        if shape is not None:
-            self._by_shape.setdefault(shape, owner)
-
-    def find(self, signature: str) -> str | None:
-        if signature in self._by_signature:
-            return self._by_signature[signature]
-        shape = _shape(signature)
-        return self._by_shape.get(shape) if shape is not None else None
-
-    def signatures(self) -> list[str]:
-        return list(self._by_signature)

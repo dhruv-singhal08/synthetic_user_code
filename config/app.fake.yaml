@@ -22,19 +22,16 @@ product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.
     path: ./data/fixtures/product_responses/sample_responses.json
 reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
+evaluation:
+  # The offline sample product generates SQL: its runs select the SQL metrics too.
+  default_metrics: [relevance, correctness_completeness, semantic_correctness, rules_adherence, schema_faithfulness]
 generation:
   scenario:
     scenario_count: 3
     include_unsupported_scenarios: true
     diversity_preference: balanced
-    max_topup_rounds: 0
-    agent_golden_examples: 12
   question:
     question_count: 1
-    agent_golden_max_questions_per_scenario: 2
-    agent_min_tool_calls: 1
-    agent_min_data_sources: 1
-    agent_golden_examples: 6
     ambiguity_level: low
     language: en
     allow_vague_questions: false

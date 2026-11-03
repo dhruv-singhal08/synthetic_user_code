@@ -56,7 +56,7 @@
       </a>
       <a class="nav-item" href="#evaluation" data-nav="evaluation">
         <span class="nav-ic"><svg class="ic"><use href="#i-gauge"/></svg></span>
-        <span class="nav-text"><b>Evaluation profile</b><small data-nav-status>Auto-select</small></span>
+        <span class="nav-text"><b>Evaluation</b><small data-nav-status>Metrics and counts</small></span>
       </a>
       <a class="nav-item" href="#connect" data-nav="connect">
         <span class="nav-ic"><svg class="ic"><use href="#i-plug"/></svg></span>
@@ -89,7 +89,7 @@
         <div>
           <p class="eyebrow">Step 1 of 4</p>
           <h1 id="h-setup">Test setup</h1>
-          <p class="lede">Define who is testing and the product. Reference data is authoritative; an optional golden set can be added to teach realistic intent and evaluation patterns.</p>
+          <p class="lede">Define who is testing and the product. Reference data is optional and authoritative when given. Choose the metrics, custom metrics and counts in the Evaluation tab before you start.</p>
         </div>
       </div>
 
@@ -114,11 +114,6 @@
                 <small>Role, expertise, style, typical tasks</small>
               </label>
               <div class="source"></div>
-              <div class="field-block">
-                <label class="label" for="question-complexity">Question complexity</label>
-                <select id="question-complexity"></select>
-                <p class="help">Sets the target for this run. Simple is strict; medium accepts simple fallback. For supported Agent scenarios, complex is strict and requires two data sources plus at least two expected tool calls; mixed allows all levels.</p>
-              </div>
               <div class="field-block">
                 <label class="label" for="persona-queries">Example questions <span class="opt">optional · one per line</span></label>
                 <textarea id="persona-queries" rows="3" placeholder="e.g. Which teams overspent on travel last quarter?"></textarea>
@@ -158,14 +153,14 @@
           <header class="setup-head">
             <span class="setup-num" data-num-for="reference">3</span>
             <span class="setup-ic"><svg class="ic"><use href="#i-db"/></svg></span>
-            <div class="setup-title"><h2>Reference data</h2><p class="card-sub">Authoritative schema, or tools, sources, workflow and rules for Agent runs</p></div>
+            <div class="setup-title"><h2>Reference data</h2><p class="card-sub">Authoritative schema, documents, rules and (optionally) tool definitions</p></div>
             <label class="toggle"><input type="checkbox" id="use-reference"><span id="reference-label">Off</span></label>
           </header>
           <div class="setup-body">
             <div class="setup-controls">
               <div id="reference-off" class="callout callout-info">
                 <svg class="ic"><use href="#i-info"/></svg>
-                <div><b>Ungrounded run.</b> Without reference data NL2SQL answers are judged on semantic correctness only (rules and schema become N/A). Agent and golden-set runs need reference data.</div>
+                <div><b>Ungrounded run.</b> Without reference data there is no cheat sheet: metrics that need reference assets (schema, rules, tool definitions) are reported as not applicable or cannot-generate, never guessed.</div>
               </div>
               <div id="reference-on" class="hidden">
                 <div class="input" data-kind="reference">
@@ -173,7 +168,7 @@
                     <input type="file" accept=".yaml,.yml,.json" hidden>
                     <svg class="ic drop-ic"><use href="#i-upload"/></svg>
                     <span><b>Upload reference</b> (YAML or JSON) or drop it here</span>
-                    <small>NL2SQL uses schema details. Agent uses agent_context to validate tools, sources, workflow and rules — never table/column cheat sheets.</small>
+                    <small>A data catalog or document collection; an optional agent_context lists the canonical tools and data sources.</small>
                   </label>
                   <p class="help">Templates: <a class="link" href="/api/reference-template/data_catalog" download><svg class="ic"><use href="#i-download"/></svg>Data catalog</a> · <a class="link" href="/api/reference-template/document_collection" download><svg class="ic"><use href="#i-download"/></svg>Document collection</a></p>
                   <div class="source"></div>
@@ -208,40 +203,14 @@
             <div class="setup-preview" data-preview-for="reference"><div class="preview-empty">Switch reference data on to use the default or an uploaded reference.</div></div>
           </div>
         </article>
-
-        <!-- 4. Golden set -->
-        <article class="card setup-card">
-          <header class="setup-head">
-            <span class="setup-num" data-num-for="golden_set">4</span>
-            <span class="setup-ic"><svg class="ic"><use href="#i-star"/></svg></span>
-            <div class="setup-title"><h2>Golden set</h2><p class="card-sub">Optional SME examples used with Reference data and the other setup inputs</p></div>
-            <span class="pill pill-neutral" data-status-for="golden_set">Optional</span>
-          </header>
-          <div class="setup-body">
-            <div class="setup-controls input" data-kind="golden_set">
-              <label class="drop" data-drop>
-                <input type="file" accept=".xlsx,.csv" hidden>
-                <svg class="ic drop-ic"><use href="#i-upload"/></svg>
-                <span><b>Upload golden set</b> (Excel or CSV) or drop it here</span>
-                <small>Exact questions plus expected behaviour, tools, sources, evidence and success criteria</small>
-              </label>
-              <div class="source"></div>
-              <button type="button" class="btn btn-sm hidden" id="golden-clear">Remove golden set</button>
-            </div>
-            <div class="setup-preview" data-preview-for="golden_set">
-              <p class="help golden-help">When uploaded, the golden set teaches realistic intent, expected-behaviour and success-criteria patterns for both NL2SQL and Agent runs. It is combined with Persona, Product and authoritative Reference data to generate new scenarios and questions; it never replaces Reference data and its questions are not replayed. Without a golden set, the pipeline generates normally from Persona, Product and Reference.</p>
-            </div>
-          </div>
-        </article>
       </div>
 
       <div class="actionbar">
         <ul class="checklist" aria-label="Readiness">
           <li id="chk-persona">Persona</li>
           <li id="chk-product">Product description</li>
-          <li id="chk-golden">Golden set (optional)</li>
-          <li id="chk-reference">Operational reference</li>
-          <li id="chk-profile">Evaluation profile</li>
+          <li id="chk-reference">Reference data</li>
+          <li id="chk-metrics">Evaluation metrics</li>
         </ul>
         <div class="spacer"></div>
         <span id="start-hint" class="hint"></span>
@@ -256,22 +225,52 @@
       </article>
     </section>
 
-    <!-- Evaluation profile ============================================================= -->
+    <!-- Evaluation ===================================================================== -->
     <section class="view" data-view="evaluation" aria-labelledby="h-evaluation">
       <div class="page-head">
         <div>
           <p class="eyebrow">Evaluation configuration</p>
-          <h1 id="h-evaluation">Evaluation profile</h1>
-          <p class="lede">Choose how this product should be judged. The selected profile determines which quality parameters apply; non-applicable parameters are shown as N/A and never averaged into the score.</p>
+          <h1 id="h-evaluation">Evaluation</h1>
+          <p class="lede">Choose the metrics for the whole run, add your own metrics, and set how many scenarios and questions to generate. The selection is frozen when the scenarios are generated; categories only group the list.</p>
         </div>
-        <span id="profile-pill" class="pill pill-ok"></span>
+        <span id="metrics-pill" class="pill pill-neutral"></span>
       </div>
+      <div id="evaluation-callout"></div>
       <article class="card">
-        <div class="card-head"><div><h2>Choose a profile</h2><p class="card-sub">This choice is saved with the run when you click Start run</p></div></div>
-        <div class="card-body"><div class="profile-options" id="profile-options" role="radiogroup" aria-label="Evaluation profile"></div></div>
+        <div class="card-head"><div><h2>Built-in metrics</h2><p class="card-sub">Any combination, across categories · a metric whose evidence or reference asset is missing is reported with its reason, never scored</p></div></div>
+        <div class="card-body"><div class="metric-groups" id="metric-groups"></div></div>
       </article>
-      <div id="profile-callout"></div>
-      <div class="param-grid" id="param-grid"></div>
+      <article class="card">
+        <div class="card-head"><div><h2>Custom metrics <span class="opt">optional</span></h2><p class="card-sub">Free text (one per paragraph or bullet) and/or an Excel / CSV workbook (first row = header, one metric per row) · compiled once per run</p></div></div>
+        <div class="card-body custom-grid">
+          <div>
+            <label class="label" for="custom-metrics-text">Describe metrics</label>
+            <textarea id="custom-metrics-text" rows="5" placeholder="e.g. Workflow adherence: the agent follows the documented approval workflow in order."></textarea>
+          </div>
+          <div class="input" data-kind="custom_metrics">
+            <label class="drop drop-compact" data-drop>
+              <input type="file" accept=".xlsx,.csv" hidden>
+              <span><b>Upload workbook</b> (.xlsx or .csv)</span>
+              <small>Every sheet is read; each row keeps its sheet and row number</small>
+            </label>
+            <div class="source"></div>
+            <button type="button" class="btn btn-sm hidden" id="custom-clear">Remove workbook</button>
+            <div class="preview" data-preview-for="custom_metrics"></div>
+          </div>
+        </div>
+      </article>
+      <article class="card">
+        <div class="card-head"><div><h2>Generation</h2><p class="card-sub">Applies to the whole run</p></div></div>
+        <div class="card-body gen-grid">
+          <div><label class="label" for="scenario-count">Scenarios</label><input id="scenario-count" type="number" min="1" max="50"></div>
+          <div><label class="label" for="question-count">Questions per scenario</label><input id="question-count" type="number" min="1" max="50"></div>
+          <div>
+            <label class="label" for="question-complexity">Question complexity</label>
+            <select id="question-complexity"></select>
+            <p class="help">Sets the target for this run. Simple is strict; medium accepts simple fallback; complex is strict; mixed allows all levels.</p>
+          </div>
+        </div>
+      </article>
     </section>
 
     <!-- 2. Connection =================================================================== -->
@@ -315,6 +314,17 @@
               </div>
             </div>
           </div>
+          <div id="context-block" class="sub-input hidden">
+            <div class="label-row">
+              <span class="label">Retrieved context source</span>
+              <div class="seg" id="context-source" role="group" aria-label="Retrieved context source">
+                <button type="button" data-source="response_field" class="on">In the product response</button>
+                <button type="button" data-source="context_api">Separate context API</button>
+                <button type="button" data-source="none">Not available</button>
+              </div>
+            </div>
+            <p id="context-help" class="help"></p>
+          </div>
           <div class="form-actions">
             <button id="connect" class="btn btn-primary" type="button" disabled>Connect</button>
             <button id="disconnect" class="btn" type="button" disabled>Disconnect</button>
@@ -343,7 +353,7 @@
           <div class="step-head"><span class="step-dot">1</span><span class="step-status">Pending</span></div>
           <h3>Generate scenarios</h3>
           <p id="scenarios-desc" class="step-desc">Business goals this persona would pursue with the product.</p>
-          <div class="step-count"><label for="scenario-count">Scenarios</label><input id="scenario-count" type="number" min="1" max="50"></div>
+          <div class="step-count"><span class="hint" id="scenario-count-note"></span></div>
           <div class="step-result"></div>
           <button class="btn step-btn" type="button" disabled>Run</button>
         </li>
@@ -351,7 +361,7 @@
           <div class="step-head"><span class="step-dot">2</span><span class="step-status">Pending</span></div>
           <h3>Generate questions</h3>
           <p class="step-desc">Natural questions in the persona's own words, each with its expected behaviour.</p>
-          <div class="step-count"><label for="question-count">Per scenario</label><input id="question-count" type="number" min="1" max="50"></div>
+          <div class="step-count"><span class="hint" id="question-count-note"></span></div>
           <div class="step-result"></div>
           <button class="btn step-btn" type="button" disabled>Run</button>
         </li>
@@ -366,7 +376,7 @@
         <li class="step" data-step="evaluate">
           <div class="step-head"><span class="step-dot">4</span><span class="step-status">Pending</span></div>
           <h3>Evaluate answers</h3>
-          <p class="step-desc">Scores the answer using the run's selected evaluation profile, then derives final Accuracy.</p>
+          <p class="step-desc">Scores each response on the run's selected metrics (general judge + retrieval/grounding judge as needed), then derives Accuracy.</p>
           <div class="step-result"></div>
           <button class="btn step-btn" type="button" disabled>Run</button>
         </li>
@@ -378,7 +388,7 @@
       </div>
 
       <article class="card hidden" id="contracts-card">
-        <div class="card-head"><div><h2>Generated evaluation contracts</h2><p class="card-sub">New question-specific criteria grounded in Reference data and, when uploaded, guided by the golden set · select a row for the complete metric mapping</p></div></div>
+        <div class="card-head"><div><h2>Generated evaluation contracts</h2><p class="card-sub">Expected behaviour, success criteria and the question-specific expectations of the selected metrics · select a row for details</p></div></div>
         <div class="table-wrap flat"><table class="table results" id="contracts-table"><thead></thead><tbody></tbody></table></div>
       </article>
 

@@ -34,3 +34,33 @@ response_mapping:
   denied_when: "data.status == unsupported"          # optional
   denied_message: data.answer
   product_version: meta.version                      # optional
+  # Optional: a typed "cannot answer" inside an answered payload (product_outcome stays
+  # answered; response_classification becomes unable_to_answer without an extra LLM call).
+  # unable_to_answer_when: "data.kind == cannot_answer"
+  # correlation_id: meta.request_id                  # the product's request / trace id
+
+  # --- metric telemetry (only needed for the metrics that use it) ---------------------------
+  # Tool Correctness: the ordered tool calls the product made (paths inside each item).
+  # tool_trace: {path: data.tool_calls, name: name, operation: op, arguments: input, result: output, error: error}
+  #
+  # Retrieval / grounding metrics: choose ONE context source.
+  # (a) Context IN the product response:
+  # context:
+  #   path: data.chunks                 # list of retrieved chunks
+  #   chunk_id: id                      # paths inside each chunk
+  #   text: text
+  #   source_id: document
+  #   rank: rank                        # explicit rank (MRR); or `order_is_rank: true` when
+  #                                     # the product documents that list order IS the rank
+  # citations: {path: data.citations, chunk_id: chunk, claim: text}   # Citation Correctness
+
+# (b) A SEPARATE context API, called for the SAME execution after the answer. {correlation_id}
+# is the product's request / trace id (correlation_id above), else this request's {uuid},
+# else the session id. Never configure both (a) and (b).
+# context_api:
+#   url: https://product.example.com/v1/context/{correlation_id}
+#   method: GET
+#   headers: {Authorization: "Bearer ${PRODUCT_API_TOKEN}"}
+#   timeout: 30
+#   context: {path: chunks, chunk_id: id, text: text, source_id: document, rank: rank}
+#   citations: {path: citations, chunk_id: chunk, claim: text}

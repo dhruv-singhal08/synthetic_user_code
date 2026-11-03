@@ -26,7 +26,6 @@ generation:
     scenario_count: 3
     include_unsupported_scenarios: true
     diversity_preference: balanced
-    max_topup_rounds: 1
   question:
     question_count: 1
     ambiguity_level: low

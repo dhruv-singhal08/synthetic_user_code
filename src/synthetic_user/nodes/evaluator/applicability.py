@@ -34,7 +34,7 @@ from synthetic_user.models.metrics import (
     ReferenceAsset,
 )
 from synthetic_user.models.question import MetricExpectationStatus, QuestionCase
-from synthetic_user.models.reference import Reference, ReferenceKind, ReferencePack
+from synthetic_user.models.reference import DataCatalog, Reference, ReferenceKind, ReferencePack
 
 # Report wording for a missing required evidence (kept stable: "No SQL generated." is a theme).
 MISSING_EVIDENCE_TEXT = {
@@ -48,8 +48,8 @@ MISSING_EVIDENCE_TEXT = {
 }
 ASSET_TEXT = {
     ReferenceAsset.CATALOG_SCHEMA: "no table/column cheat sheet for this question",
-    ReferenceAsset.CATALOG_RULES: "no applicable rules, table rules or documented joins in the "
-    "question's cheat sheet",
+    ReferenceAsset.CATALOG_RULES: "no rules, table rules or documented joins in the "
+    "question's cheat sheet or the catalog",
     ReferenceAsset.TOOL_DEFINITIONS: "the reference defines no tools (agent_context)",
 }
 # Boolean expectation field that turns "no citation in the answer" into a failure.
@@ -115,10 +115,16 @@ class EvaluationEvidence:
         if asset is ReferenceAsset.CATALOG_SCHEMA:
             return not (catalog and pack is not None and pack.tables)
         if asset is ReferenceAsset.CATALOG_RULES:
+            # The cheat sheet's rules / joins, or (D233) any rule of the catalog: rules of
+            # other tables the SQL reads and unselected catalog-wide rules are looked up.
+            content = self.reference.content if self.reference is not None else None
+            catalog_rules = isinstance(content, DataCatalog) and (
+                bool(content.rules) or any(t.rules for t in content.tables)
+            )
             return not (
                 catalog
                 and pack is not None
-                and (pack.rules or pack.joins or any(t.rules for t in pack.tables))
+                and (pack.rules or pack.joins or any(t.rules for t in pack.tables) or catalog_rules)
             )
         context = self.reference.agent_context if self.reference is not None else None
         return not (context is not None and context.tools)

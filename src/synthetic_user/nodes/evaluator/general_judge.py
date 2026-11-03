@@ -1,4 +1,5 @@
-"""The General Judge: ONE LLM call per evaluable terminal response that has general metrics.
+"""The General Judge: ONE LLM call per evaluable terminal response that has general metrics
+(at most TWO when it uses the one-batch evidence lookup, D231).
 
 Scores the run's applicable general metrics (relevance, correctness_completeness, the SQL
 metrics, tool_correctness and custom metrics routed to ``general``), rates each success
@@ -11,6 +12,12 @@ for every score below 1, a factual-verification state where the metric asks for 
 schema finding that names an SQL output alias, CTE or function (from the parser, not a regex).
 Invalid output is retried (bounded); exhausted retries or a provider failure produce
 ``evaluation_error`` results with the reason, never a guessed score.
+
+Bounded lookup (data-catalog runs with SQL, ``evaluation.reference_lookup``): code has already
+reconciled the SQL with the catalog and run the obvious exact lookups. The first call may then
+return ``evidence_requests`` (ALL needed lookups, at most ``max_requests``) instead of scores;
+code runs them through the read-only ``LookupSession`` and makes ONE more call, which must
+score (a second request is refused by validation). No loops, no further rounds.
 """
 
 from __future__ import annotations
@@ -18,12 +25,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from synthetic_user.core.exceptions import LLMOutputValidationError, LLMProviderError
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.evaluation import GeneralJudgeDraft
+from synthetic_user.models.lookup import LookupOrigin
 from synthetic_user.models.metrics import EvidenceKind, ReferenceAsset
 from synthetic_user.nodes.evaluator.general_prompt import GeneralJudgeInput, build_general_prompt
 from synthetic_user.nodes.evaluator.judge_common import (
@@ -33,6 +41,7 @@ from synthetic_user.nodes.evaluator.judge_common import (
     quoted,
     response_text,
 )
+from synthetic_user.references.catalog_index import LookupSession
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
@@ -42,6 +51,8 @@ class GeneralJudgement:
     draft: GeneralJudgeDraft | None = None
     error: str | None = None
     notes: list[str] = field(default_factory=list)
+    calls: int = 0  # structured calls made (1, or 2 after a lookup request)
+    lookup_requests: int = 0  # lookups the judge requested (0 when it scored at once)
 
 
 def quotable_text(data: GeneralJudgeInput) -> str:
@@ -52,6 +63,20 @@ def quotable_text(data: GeneralJudgeInput) -> str:
 
 
 def check_general(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: str) -> list[str]:
+    if draft.evidence_requests:
+        if data.max_lookup_requests <= 0:
+            return [
+                "evidence_requests are not available in this reply: score every listed metric "
+                "now and return evidence_requests []"
+            ]
+        if len(draft.evidence_requests) > data.max_lookup_requests:
+            return [
+                f"at most {data.max_lookup_requests} evidence_requests (got "
+                f"{len(draft.evidence_requests)}): keep only the lookups needed to score"
+            ]
+        return []  # a valid lookup request; the scoring reply is validated afterwards
+    if draft.overall_verdict is None:
+        return ["overall_verdict is required"]
     ids = [d.metric_id for d in data.definitions]
     errors = check_scores_and_findings(draft.metrics, draft.findings, ids, quotable)
     if data.needs_classification and draft.response_classification is None:
@@ -127,12 +152,36 @@ class GeneralJudge:
         self._log = logger
         self._max_retries = max_retries
 
-    async def judge(self, data: GeneralJudgeInput) -> GeneralJudgement:
+    async def judge(
+        self, data: GeneralJudgeInput, lookups: LookupSession | None = None
+    ) -> GeneralJudgement:
+        judgement = GeneralJudgement()
+        if lookups is None and data.max_lookup_requests:
+            data = replace(data, max_lookup_requests=0)
+        draft = await self._call(data, judgement)
+        if draft is not None and draft.evidence_requests and lookups is not None:
+            judgement.lookup_requests = len(draft.evidence_requests)
+            results = lookups.run_all(draft.evidence_requests, LookupOrigin.JUDGE_REQUEST)
+            self._log.info(
+                "%s: general judge requested %d lookup(s): %s",
+                data.question.question_id,
+                len(draft.evidence_requests),
+                ", ".join(r.tool.value for r in draft.evidence_requests),
+            )
+            draft = await self._call(
+                replace(data, max_lookup_requests=0, requested_lookups=results), judgement
+            )
+        judgement.draft = draft
+        return judgement
+
+    async def _call(
+        self, data: GeneralJudgeInput, judgement: GeneralJudgement
+    ) -> GeneralJudgeDraft | None:
         system, user = build_general_prompt(data)
         quotable = quotable_text(data)
-        judgement = GeneralJudgement()
+        judgement.calls += 1
         try:
-            judgement.draft = await generate_structured(
+            return await generate_structured(
                 self._llm,
                 system,
                 user,
@@ -152,4 +201,4 @@ class GeneralJudge:
                 "%s: general judge provider call failed: %s", data.question.question_id, exc
             )
             judgement.error = f"general judge provider call failed: {exc}"
-        return judgement
+        return None

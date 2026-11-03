@@ -66,10 +66,6 @@ def missing_finding_message(metric: str, score: float) -> str:
     )
 
 
-def ignored_predicates_note(predicates: Sequence[str]) -> str:
-    return PROMPTS.text("ignored_predicates_note", predicates="; ".join(predicates))
-
-
 def metric_blocks(definitions: Iterable[MetricDefinition]) -> str:
     return "\n".join(
         PROMPTS.text(

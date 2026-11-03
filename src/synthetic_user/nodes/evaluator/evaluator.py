@@ -14,13 +14,21 @@ Judge (retrieval metrics + chunk labels for MRR). A group without applicable met
 call; zero LLM metrics -> zero calls. MRR is computed by code. The final verdict comes from the
 provisional ``VerdictPolicy`` (verdict.py); the judge's own opinion is stored as llm_verdict.
 Bug candidates: one per failed evaluation, from findings with severity >= medium and supported
-evidence. LLM calls run under ``llm.max_concurrency``; ids are assigned afterwards in order.
+evidence (never an ``unresolved`` finding). LLM calls run under ``llm.max_concurrency``; ids are
+assigned afterwards in order.
+
+SQL against a data catalog (D230/D231): each SQL artifact is parsed once, reconciled with the
+cheat sheet AND the full catalog (exact lookups through one ``CatalogIndex`` per catalog
+version), the obvious gaps are looked up before the call, and the General Judge may request
+one batch of further lookups. The SQL is judged exactly as generated (no predicate is hidden).
+The reconciliation and the lookup trace are stored on the evaluation (``reference_checks``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -55,19 +63,25 @@ from synthetic_user.models.execution import (
     DeniedResponse,
     ExecutionRecord,
     ProductOutcome,
-    ResponseArtifact,
     ResponseClassification,
+)
+from synthetic_user.models.lookup import (
+    IdentifierStatus,
+    LookupOrigin,
+    LookupResult,
+    ReferenceCheckRecord,
 )
 from synthetic_user.models.metrics import (
     EvidenceKind,
     JudgeGroup,
     MetricDefinition,
+    MetricOrigin,
     ReferenceAsset,
     ResolvedMetricConfig,
 )
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import Reference, ReferenceKind, ReferencePack
+from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator.applicability import (
@@ -79,10 +93,7 @@ from synthetic_user.nodes.evaluator.applicability import (
 )
 from synthetic_user.nodes.evaluator.general_judge import GeneralJudge, GeneralJudgement
 from synthetic_user.nodes.evaluator.general_prompt import GeneralJudgeInput, SqlEvidence
-from synthetic_user.nodes.evaluator.judge_common import (
-    ignored_predicates_note,
-    matches_known_gap,
-)
+from synthetic_user.nodes.evaluator.judge_common import matches_known_gap
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 from synthetic_user.nodes.evaluator.retrieval_judge import (
     RetrievalJudge,
@@ -99,7 +110,9 @@ from synthetic_user.nodes.evaluator.trace_tags import (
     merge_finding_tags,
 )
 from synthetic_user.nodes.evaluator.verdict import DEFAULT_VERDICT_POLICY, VerdictPolicy
-from synthetic_user.sql.parser import SqlglotParser, SqlParser, compare_with_schema
+from synthetic_user.references.catalog_index import CatalogIndex, LookupSession
+from synthetic_user.sql.parser import SqlglotParser, SqlParser
+from synthetic_user.sql.reconcile import evidence_requests, reconcile
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
@@ -133,6 +146,7 @@ class _Judgements:
     general: GeneralJudgement | None = None
     retrieval: RetrievalJudgement | None = None
     notes: list[str] = field(default_factory=list)
+    reference_checks: ReferenceCheckRecord | None = None
 
 
 class Evaluator:
@@ -159,6 +173,20 @@ class Evaluator:
         self._retrieval = RetrievalJudge(llm, logger, max_retries=retries)
         self._parser: SqlParser = sql_parser or SqlglotParser()
         self._policy = verdict_policy
+        # Built once per catalog version (the reference is fixed for the run); None for
+        # document collections and ungrounded runs.
+        self._catalog = CatalogIndex.for_reference(
+            reference, namespaces=settings.evaluation.catalog_namespaces
+        )
+        custom = [d for d in metric_config.definitions if d.origin is MetricOrigin.CUSTOM]
+        if custom:
+            logger.info(
+                "Custom metric routing: %s",
+                ", ".join(
+                    f"{d.metric_id}={d.judge_group.value}/{d.evaluation_target.value}"
+                    for d in custom
+                ),
+            )
 
     async def evaluate(self, case: EvaluationCase, product: ProductDescription) -> EvaluationResult:
         return (await self.evaluate_many([case], product))[0]
@@ -206,11 +234,18 @@ class Evaluator:
         artifact_max_chars = self._settings.evaluation.artifact_max_chars
         calls: list[Any] = []
         if plan.general:
-            judged_response, sql = self._sql_evidence(response, plan, case.pack, result.notes)
+            sql = self._sql_evidence(response, plan, case.pack)
+            session = (
+                LookupSession(self._catalog)
+                if self._catalog is not None and any(i.reconciliation for i in sql)
+                else None
+            )
+            catalog_lookups = self._catalog_lookups(case, sql, session)
+            lookup_settings = self._settings.evaluation.reference_lookup
             general_input = GeneralJudgeInput(
                 product=product,
                 question=case.question,
-                response=judged_response,
+                response=response,
                 definitions=plan.general,
                 conversation=conversation,
                 pack=case.pack,
@@ -225,8 +260,12 @@ class Evaluator:
                 and response.response_classification is None,
                 sql_dialect=self._settings.evaluation.sql_dialect,
                 artifact_max_chars=artifact_max_chars,
+                catalog_lookups=catalog_lookups,
+                max_lookup_requests=lookup_settings.max_requests
+                if session is not None and lookup_settings.enabled
+                else 0,
             )
-            calls.append(self._run_general(case, general_input, semaphore, result))
+            calls.append(self._run_general(case, general_input, semaphore, result, session))
         if plan.retrieval_call:
             retrieval_input = RetrievalJudgeInput(
                 product=product,
@@ -239,9 +278,17 @@ class Evaluator:
                 artifact_max_chars=artifact_max_chars,
             )
             calls.append(self._run_retrieval(case, retrieval_input, semaphore, result))
+        started = time.perf_counter()
         if calls:
             # The two judge groups are independent calls; they may run concurrently.
             await asyncio.gather(*calls)
+        self._log.info(
+            "%s: judged in %.0f ms (general calls %d, lookup requests %d)",
+            case.question.question_id,
+            (time.perf_counter() - started) * 1000,
+            result.general.calls if result.general else 0,
+            result.general.lookup_requests if result.general else 0,
+        )
         return result
 
     async def _run_general(
@@ -250,10 +297,19 @@ class Evaluator:
         data: GeneralJudgeInput,
         semaphore: asyncio.Semaphore,
         result: _Judgements,
+        session: LookupSession | None,
     ) -> None:
         async with semaphore:
             with trace_subject(f"{case.question.question_id} general"):
-                result.general = await self._general.judge(data)
+                result.general = await self._general.judge(data, session)
+        if session is not None:
+            result.reference_checks = ReferenceCheckRecord(
+                catalog_version=session.index.catalog_version,
+                artifacts=[i.reconciliation for i in data.sql if i.reconciliation is not None],
+                lookup_trace=session.trace,
+                judge_lookup_requests=result.general.lookup_requests,
+                general_judge_calls=result.general.calls,
+            )
 
     async def _run_retrieval(
         self,
@@ -271,42 +327,51 @@ class Evaluator:
         response: AnsweredResponse | DeniedResponse,
         plan: MetricPlan,
         pack: ReferencePack | None,
-        notes: list[str],
-    ) -> tuple[AnsweredResponse | DeniedResponse, list[SqlEvidence]]:
-        """Parser output for each SQL artifact (only when a general metric needs SQL), on the
-        judge's copy of the SQL with configured predicates removed."""
+    ) -> list[SqlEvidence]:
+        """Parser output (+ catalog reconciliation when the run has a data catalog) for each
+        SQL artifact, only when a general metric needs SQL. Each artifact is parsed once and
+        judged exactly as generated."""
         needs_sql = any(EvidenceKind.SQL in d.required_execution_evidence for d in plan.general)
         if not needs_sql or not isinstance(response, AnsweredResponse):
-            return response, []
+            return []
         dialect = self._settings.evaluation.sql_dialect
-        predicates = self._settings.evaluation.ignored_sql_predicates
-        allowed = (
-            {t.name: [c.name for c in t.columns] for t in pack.tables}
-            if pack is not None and pack.kind is ReferenceKind.DATA_CATALOG
-            else None
-        )
-        artifacts: list[ResponseArtifact] = []
         evidence: list[SqlEvidence] = []
-        removed_any = False
         for artifact in response.artifacts:
             if artifact.kind.casefold() != "sql" or not isinstance(artifact.content, str):
-                artifacts.append(artifact)
                 continue
-            sql, removed = self._parser.remove_predicates(
-                artifact.content, predicates, dialect=dialect
+            structure = self._parser.parse(artifact.content, dialect=dialect)
+            reconciliation = (
+                reconcile(structure, artifact=len(evidence) + 1, index=self._catalog, pack=pack)
+                if self._catalog is not None
+                else None
             )
-            removed_any = removed_any or removed
-            artifacts.append(artifact.model_copy(update={"content": sql}))
-            structure = self._parser.parse(sql, dialect=dialect)
-            evidence.append(
-                SqlEvidence(
-                    structure,
-                    compare_with_schema(structure, allowed) if allowed is not None else None,
-                )
+            evidence.append(SqlEvidence(structure, reconciliation))
+        return evidence
+
+    def _catalog_lookups(
+        self,
+        case: EvaluationCase,
+        sql: Sequence[SqlEvidence],
+        session: LookupSession | None,
+    ) -> list[LookupResult]:
+        """Run the lookups code can already see are needed (one batch), and log the
+        reconciliation (parse outcome, extra / invalid / unresolved identifiers)."""
+        reconciliations = [i.reconciliation for i in sql if i.reconciliation is not None]
+        if session is None or not reconciliations:
+            return []
+        for rec in reconciliations:
+            counts = {status.value: len(rec.with_status(status)) for status in IdentifierStatus}
+            self._log.info(
+                "%s: SQL artifact %d parsed=%s identifiers %s extra_tables=%s",
+                case.question.question_id,
+                rec.artifact,
+                rec.parsed,
+                counts,
+                rec.extra_tables,
             )
-        if removed_any:
-            notes.append(ignored_predicates_note(predicates))
-        return response.model_copy(update={"artifacts": artifacts}), evidence
+        return session.run_all(
+            evidence_requests(reconciliations, session.index), LookupOrigin.DETERMINISTIC
+        )
 
     # --- phase 2: assembly (sequential, assigns ids) --------------------------------------
 
@@ -461,6 +526,7 @@ class Evaluator:
             bug_candidates=self._bug_candidates(verdict, findings, case, product),
             llm_verdict=general.draft.overall_verdict if general and general.draft else None,
             notes=list(dict.fromkeys(notes)),
+            reference_checks=judgements.reference_checks,
         )
 
     def _classification(
@@ -638,6 +704,7 @@ class Evaluator:
                 for f in findings
                 if _SEVERITY_RANK[f.severity] >= _SEVERITY_RANK[Severity.MEDIUM]
                 and f.evidence_status is EvidenceStatus.SUPPORTED
+                and not f.unresolved
             ),
             key=lambda f: -_SEVERITY_RANK[f.severity],
         )

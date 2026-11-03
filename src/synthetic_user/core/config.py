@@ -137,6 +137,18 @@ class ReferenceSettings(_Section):
     max_chars: int = Field(default=200_000, ge=1_000)
 
 
+class ReferenceLookupSettings(_Section):
+    """Bounded lookups of the General Judge (data_catalog runs with an SQL artifact, D231).
+
+    Code always reconciles the SQL with the catalog first. When enabled, the judge's first call
+    may instead return ALL the extra lookups it needs in one batch (at most ``max_requests``);
+    code runs them and makes ONE more call that must score. Disabled: one call, no requests.
+    """
+
+    enabled: bool = True
+    max_requests: int = Field(default=10, ge=1, le=50)
+
+
 class EvaluationSettings(_Section):
     # Built-in metric ids used when a run does not choose its own (CLI runs, UI default ticks).
     # The run's choice always wins; it is frozen in metric_config.json before scenarios.
@@ -145,9 +157,10 @@ class EvaluationSettings(_Section):
     )
     # Explicit SQL dialect for the SQL parser (sqlglot name, e.g. "bigquery"); never guessed.
     sql_dialect: str | None = None
-    # Predicates removed from the JUDGE's copy of generated SQL only (exact AST match), e.g. a
-    # temporary product workaround filter. Stored responses and SQL are never changed.
-    ignored_sql_predicates: list[str] = Field(default_factory=list)
+    # Namespace policy for qualified names (``ns.table``) in generated SQL: null = any
+    # qualifier is dropped before the exact catalog lookup; a list = only these qualifiers.
+    catalog_namespaces: list[str] | None = None
+    reference_lookup: ReferenceLookupSettings = Field(default_factory=ReferenceLookupSettings)
     # Per response artifact / tool trace / retrieved chunk included in a judge prompt.
     artifact_max_chars: int = Field(default=DEFAULT_ARTIFACT_MAX_CHARS, ge=1_000)
     # Custom metric input bounds (free text + workbook), checked before the compiler call.
@@ -174,8 +187,11 @@ class EvaluationSettings(_Section):
             {
                 "agent_metrics": "metrics are chosen per run (default_metrics / the Evaluation "
                 "tab); there are no evaluation profiles",
-                "ignore_dummy_cg_id_filter": "use ignored_sql_predicates, e.g. "
-                "[\"cg_id IN ('DUMMY')\"]",
+                "ignore_dummy_cg_id_filter": "removed; an unrequested filter that no contract, "
+                "expectation or rule establishes is reported as an unresolved finding (D232)",
+                "ignored_sql_predicates": "removed; the judge sees the SQL as generated and "
+                "reports an unrequested filter that no contract, expectation or rule "
+                "establishes as an unresolved finding (D232)",
             },
             "evaluation",
         )

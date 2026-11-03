@@ -4,7 +4,7 @@
 # grouping only; they never decide which judge runs or which product can be tested.
 # Every metric is scored 0 / 0.5 / 1 (higher is better) or reported with a non-scored status.
 
-catalog_version: "2026.11-1"
+catalog_version: "2026.11-2"
 
 category_labels:
   answer_quality: Answer Quality / Task Fulfilment
@@ -202,16 +202,25 @@ metrics:
     category: sql_quality
     judge_group: general
     description: >-
-      Does the generated SQL implement the requested result semantics? Static review only;
-      no executed values are verified.
+      Would the SQL's logic produce the result the user's exact question asks for? Static
+      review only; no executed values are verified.
     rubric: >-
-      Compare the clarified request, expected_behavior and the result-behaviour success criteria
-      with the final SQL (use the parser output as supporting evidence). Check projections,
-      calculations, aggregations, filters, grouping, ordering and limits needed for the
-      requested result. Judge the result produced, not a preferred SQL shape; a reasonable
-      equivalent implementation is correct. Do not use table/column allow-list compliance or
-      business rules and documented joins here: they have their own metrics. Never execute the
-      query or claim to verify returned values.
+      Compare the exact question (with any clarification), expected_behavior and the
+      result-behaviour success criteria with the final SQL; the parser output, the catalog
+      reconciliation and lookups are supporting evidence. Check requested metrics and
+      dimensions, calculations, aggregations, filters, grouping and grain, sorting and ranking,
+      top-N / limits, date interpretation, comparison logic, joins that change the result, extra
+      filters that change the requested population, and the completeness of the result set the
+      SQL implies. Judge the result the SQL would produce, not a preferred SQL shape: valid
+      aliases, formatting, CTEs instead of subqueries, equivalent implementations and extra
+      valid columns that do not change the answer are correct. The cheat sheet is expected
+      evidence, not a required implementation; using a column or table whose meaning differs
+      from what was asked (e.g. a gross amount where a net amount was asked) is wrong even when
+      the identifier exists. A filter the question did not request that neither the product
+      contract, the expectations nor an applicable rule establishes is an unresolved finding,
+      never assumed authorised or wrong. Do not judge identifier existence (schema_faithfulness)
+      or rule compliance (rules_adherence) here, unless a rule violation also changes the
+      answer's meaning. Never execute the query or claim to verify returned values.
     score_anchors:
       "1": all requested result behaviour is implemented
       "0.5": only part of the requested result behaviour is implemented
@@ -228,13 +237,22 @@ metrics:
     category: sql_quality
     judge_group: general
     description: >-
-      Does the SQL comply with the applicable reference business/table rules and documented
-      joins?
+      Does the SQL comply with the applicable authoritative business rules (table rules,
+      catalog rules, documented join restrictions)?
     rubric: >-
-      Check direct, material compliance of the SQL with the applicable table rules, selected
-      rules and documented joins of the question's cheat sheet. Apply a rule only when the
-      question or the SQL concerns it; irrelevant or theoretical rules must not lower the score.
-      Do not use unknown table/column names or missing requested behaviour here.
+      Start with the cheat sheet's table rules and selected rules, then the rules of other
+      tables the SQL reads and the catalog rules supplied by the lookups; cite each rule by its
+      rule id and original wording. A retrieved rule applies only when the question or the SQL
+      concerns it (default metrics, date conventions, currency, privacy and sensitive fields,
+      aggregation restrictions, grain, documented join restrictions, methodology, output
+      conventions, source limitations); irrelevant or theoretical rules must not lower the
+      score. Penalise only a demonstrated violation, with the SQL evidence: e.g. combining into
+      one value items a rule says must not be combined is a violation, returning them as
+      separate values is not. When applicable rules contradict each other, do not choose one:
+      record an unresolved finding quoting both. A documented relationship is not a mandatory
+      join when a valid single-table solution exists. Do not use unknown identifiers
+      (schema_faithfulness) or missing requested behaviour (semantic_correctness /
+      correctness_completeness) here.
     score_anchors:
       "1": all applicable rules and documented joins are followed
       "0.5": a mix of compliance and supported conflicts
@@ -242,9 +260,11 @@ metrics:
     required_reference_assets: [catalog_rules]
     required_execution_evidence: [sql]
     applicability_policy: >-
-      Applies to SQL responses whose cheat sheet lists rules, table rules or joins; not
-      applicable otherwise.
-    evidence_requirements: The SQL artifact, its parse, the cheat sheet's rules and joins.
+      Applies to SQL responses of grounded questions whose cheat sheet lists rules, table rules
+      or joins, or whose catalog has any rule; not applicable otherwise.
+    evidence_requirements: >-
+      The SQL artifact, its parse, the cheat sheet's rules and joins, and the rules of the
+      tables the SQL reads from exact catalog lookups.
 
   schema_faithfulness:
     when_evidence_missing: not_applicable
@@ -252,24 +272,32 @@ metrics:
     category: sql_quality
     judge_group: general
     description: >-
-      Do the SQL's explicit base table and column identifiers conform to the allowed reference
-      schema?
+      Does the SQL use valid physical identifiers of the authoritative catalog and documented
+      schema relationships?
     rubric: >-
-      Compare only the explicit base database table and column identifiers with the allowed
-      tables and columns of the cheat sheet (case-insensitive, quoting and qualification
-      removed). The parser output lists the base identifiers; output aliases, CTE names and
-      functions are not database identifiers and must never be compared. Do not use rules,
-      joins or requested behaviour here.
+      The complete catalog, not the cheat sheet, decides whether an identifier exists. Use the
+      catalog reconciliation: valid_in_pack and valid_extra identifiers are valid (never
+      penalise an identifier only because the cheat sheet did not select it, and never require
+      every cheat-sheet column to appear); invalid ones do not exist in the catalog (table, or
+      column in its resolved table); unresolved ones (ambiguous scope, unknown qualifier) are
+      not proof of an error: request a lookup or record an unresolved finding. Check alias and
+      qualifier resolution, column scope and the join keys against documented relationships
+      (an undocumented join is not established by the reference: unresolved, not invalid; a
+      documented relationship is never mandatory). Output aliases, CTE names, functions and
+      derived-expression aliases are not database identifiers and must never be compared. Do
+      not judge calculations, whether a valid filter was requested, or business rules here.
     score_anchors:
-      "1": every explicit base table and column identifier is allowed
-      "0.5": a mix of allowed and unallowed identifiers
-      "0": none of the explicit identifiers is allowed
+      "1": every explicit base table and column identifier exists in the catalog and resolves correctly
+      "0.5": some base identifiers do not exist in the catalog or resolve incorrectly
+      "0": the central base identifiers do not exist in the catalog
     required_reference_assets: [catalog_schema]
     required_execution_evidence: [sql]
     applicability_policy: >-
       Applies to SQL responses of grounded questions whose cheat sheet lists tables; not
       applicable otherwise.
-    evidence_requirements: The SQL artifact, the parser's base identifiers, the cheat sheet schema.
+    evidence_requirements: >-
+      The SQL artifact, the parser's base identifiers, the catalog reconciliation and exact
+      catalog lookups.
 
   tool_correctness:
     display_name: Tool Correctness

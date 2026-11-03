@@ -26,9 +26,12 @@ reference:
 evaluation:
   default_metrics: [relevance, correctness_completeness]  # CLI default; the UI selects per run
   sql_dialect: null          # explicit sqlglot dialect for the SQL parser; never guessed
-  # Temporary product workaround approved by the product team. Remove after their fix ships.
-  # Only this exact predicate is removed from the JUDGE's copy of the SQL (AST match).
-  ignored_sql_predicates: ["cg_id IN ('DUMMY')"]
+  # Qualified table names in generated SQL (ns.table): null = any qualifier is dropped before
+  # the exact catalog lookup; a list (e.g. [my_schema]) = only these qualifiers are accepted.
+  catalog_namespaces: null
+  reference_lookup:          # bounded evidence lookups of the General Judge (SQL + data_catalog)
+    enabled: true            # false = one judge call, deterministic reconciliation only
+    max_requests: 10         # lookups the judge may request, all in ONE batch (one extra call)
 generation:
   scenario:
     scenario_count: 3

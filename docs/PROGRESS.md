@@ -490,3 +490,36 @@
   shows the option sent as input, but with a different session id).
 - Follow-up (same day): Insight contract SSL off + token written in the file (D228); credential
   masking widened to literal tokens. Gate: 685 passed.
+
+## Bounded agentic SQL evaluation with exact reference lookup (2026-11-03) - sql_eval_inst.md
+
+- User decisions (asked before changing code): targeted catalog lookups as an exception to hard
+  rule 2 (D230); the judge decides once and requests all lookups in one batch (D231); the
+  `cg_id IN ('DUMMY')` stripping is removed and unrequested filters are reported as unresolved
+  (D232); the user's `reference_data` YAML shape is accepted (D229).
+- Files created: models/lookup.py, references/catalog_index.py, references/reference_data.py,
+  sql/reconcile.py, data/references/insight_referance(1).yaml (bootstrap template only),
+  tests/fixtures/references/sql_eval_catalog.yaml (SYNTHETIC), tests/references/
+  test_catalog_index.py, tests/sql/test_reconcile.py, tests/nodes/test_sql_evaluation.py.
+- Files modified: sql/parser.py (join keys, qualified base columns; removed remove_predicates /
+  compare_with_schema), nodes/evaluator/{evaluator, general_judge, general_prompt(.yaml),
+  applicability, verdict, judge_common(_prompt.yaml)}.py, models/{evaluation, metrics,
+  reference}.py, metrics/{catalog.yaml, compiler.py, compiler_prompt.yaml},
+  references/loader.py, core/config.py, config/app.yaml, config/app.safechain.yaml, tests
+  (parser, config, contracts, CLI evaluate, evaluator), README, CLAUDE.md, DECISIONS.
+- Commands + results: ruff OK, format OK, mypy (101 files) OK, `pytest -q -W error`
+  734 passed (baseline 685; section 18 cases 1-44 covered by the three new test files).
+- Verified (offline): exact lookups / namespace policy / cache; reconciliation for aliases,
+  CTEs, subqueries, joins, qualified names, parse and dialect failures; the evidence each
+  judge call receives; one-batch lookup bounded to one extra call; unresolved findings ->
+  INCONCLUSIVE with no bug; SQL custom metrics share the call; CSV columns unchanged; old
+  evaluation JSON still loads.
+- NOT verified: judgement quality of a real model on the new rubrics (FakeLLM only; needs a
+  live Gemini / SafeChain run); the authoritative insight_referance(1).yaml (unavailable: its
+  relationship and global-rule entry shapes are assumed to match data_catalog); sqlglot on Amex
+  Artifactory; the configured SQL dialect for the Insight product (`evaluation.sql_dialect`
+  is still null).
+- Next prerequisites: drop the original reference YAML into data/references (unchanged) and
+  run one live evaluation; set `evaluation.sql_dialect` and, if wanted,
+  `evaluation.catalog_namespaces` for the Insight product; business review of contradictory
+  rules (reported as unresolved findings, never resolved by the tool).

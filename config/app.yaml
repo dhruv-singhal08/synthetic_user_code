@@ -42,9 +42,12 @@ evaluation:
   # selects metrics (and custom metrics) per run; the choice is frozen in metric_config.json.
   default_metrics: [relevance, correctness_completeness]
   sql_dialect: null          # explicit sqlglot dialect for the SQL parser (e.g. bigquery); never guessed
-  # Predicates removed from the JUDGE's copy of generated SQL only (exact AST match; temporary
-  # product workaround). Original responses remain unchanged in artifacts and reports.
-  ignored_sql_predicates: ["cg_id IN ('DUMMY')"]
+  # Qualified table names in generated SQL (ns.table): null = any qualifier is dropped before
+  # the exact catalog lookup; a list (e.g. [my_schema]) = only these qualifiers are accepted.
+  catalog_namespaces: null
+  reference_lookup:          # bounded evidence lookups of the General Judge (SQL + data_catalog)
+    enabled: true            # false = one judge call, deterministic reconciliation only
+    max_requests: 10         # lookups the judge may request, all in ONE batch (one extra call)
   artifact_max_chars: 8000   # max characters per artifact / chunk / tool trace sent to a judge
   max_custom_metrics: 20     # custom metrics per run (free text + workbook rows)
   max_custom_metric_chars: 2000

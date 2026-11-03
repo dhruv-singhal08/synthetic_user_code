@@ -164,7 +164,9 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `generation.question.max_parallel_scenarios` | `5` | Internal: concurrent per-scenario question calls (not a UI control) |
 | `evaluation.default_metrics` | `[relevance, correctness_completeness]` | Built-in metrics when a run does not choose its own (CLI) |
 | `evaluation.sql_dialect` | `null` | Explicit SQL dialect for the parser (never guessed) |
-| `evaluation.ignored_sql_predicates` | `[]` | Predicates removed from the judge's copy of SQL only (e.g. a temporary product workaround) |
+| `evaluation.catalog_namespaces` | `null` | Qualifiers accepted on table names in generated SQL (`ns.table`): `null` = any qualifier is dropped before the exact catalog lookup; a list = only these (D230) |
+| `evaluation.reference_lookup.enabled` | `true` | The General Judge may request ONE batch of exact catalog lookups (one extra call) on SQL + data-catalog runs; `false` = one call, deterministic reconciliation only (D231) |
+| `evaluation.reference_lookup.max_requests` | `10` | Lookups allowed in that batch (1-50) |
 | `evaluation.max_custom_metrics` | `20` | Custom metrics per run (text + workbook rows) |
 | `product.context_max_chunks` / `context_max_chunk_chars` | `50` / `4000` | Bounds of the stored retrieved context |
 | `generation.question.ambiguity_level` | `low` | `low` \| `medium` \| `high` mix of precise/vague/investigative |
@@ -427,7 +429,9 @@ linked in the UI). Loader: `references/loader.py`.
   and rejects (records) unknown picks; no valid table / document rejects the scenario. Packs
   are in `reference_packs.json` and editable in the UI (the same picks as JSON; all-or-nothing).
 - **Only the cheat sheet** goes to question generation and evaluation, never the whole
-  reference. The scenario step sees the whole reference (rendered compactly by code).
+  reference. The scenario step sees the whole reference (rendered compactly by code). For SQL
+  evaluation the judge additionally gets exact lookups of the identifiers / rules the SQL
+  actually touches (D230) - targeted entries, never the whole catalog.
 - **Usage instructions** (optional): `inputs.reference_guide_file` / `--reference-guide`
   (.md/.txt), or uploaded / typed in the UI. Without them a default per format is used (shown
   as the placeholder in the UI). Samples: `data/references/sample_card_spend_instructions.md`,
@@ -439,6 +443,40 @@ linked in the UI). Loader: `references/loader.py`.
   `synthetic-user convert-reference --input index.json --out catalog.yaml`.
 - Samples: `data/references/sample_card_spend_catalog.yaml` (data catalog),
   `data/references/sample_travel_policy_docs.yaml` (document collection).
+- **`kind: reference_data`** (D229): the same data catalog written with mappings -
+  `tables: {<table>: {description, rules, columns: {<column>: {type, description,
+  categorical_values}}}}`, `relationships` (as above) and `global_rules` (R1, R2, ...). It is
+  mapped one-to-one onto `data_catalog` (`references/reference_data.py`); unknown fields are
+  refused; unquoted `yes` / `no` / `on` / `off` in a value list are refused (YAML booleans).
+  `data/references/insight_referance(1).yaml` is a **bootstrap template only** (structure, no
+  invented types / rules), not the authoritative catalog.
+
+### SQL evaluation against a data catalog (D230-D234)
+
+When a selected metric needs an SQL artifact and the run has a data catalog:
+
+1. **Parse once** (`sql/parser.py`, sqlglot, dialect only from `evaluation.sql_dialect`): base
+   tables / columns (aliases, CTEs, subqueries resolved), equality join keys, clauses.
+2. **Reconcile** (`sql/reconcile.py`) every base identifier against the cheat sheet AND the
+   full catalog through an exact, case-insensitive index (`references/catalog_index.py`, built
+   once per catalog version): `valid_in_pack`, `valid_extra` (exists, just not selected: never
+   a schema error), `invalid`, `unresolved`; unused cheat-sheet items; joins documented
+   (verified / not) or undocumented; rules the cheat sheet did not carry.
+3. **Look up the obvious gaps** before the judge (extra columns, rules of extra tables,
+   unselected catalog rules, exact-name alternatives for invalid columns, relationships
+   between joined tables). Four read-only tools: `lookup_schema`, `lookup_rules`,
+   `lookup_relationships`, `lookup_column_alternatives` - exact matches with provenance; no
+   fuzzy / semantic search.
+4. **Judge** (General Judge, same call budget): either scores at once, or returns ALL the extra
+   lookups it needs in one batch; code runs them and makes ONE more call that must score.
+   SQL-related custom metrics (compiled evidence includes `sql`) are scored in the same call
+   with the same evidence; non-SQL custom metrics keep their path.
+5. **Record** `reference_checks` on each evaluation (catalog version, reconciliation, lookup
+   trace, judge calls). No new CSV columns.
+
+The SQL is judged exactly as generated. An unrequested filter that no contract, expectation or
+rule establishes (e.g. a tenant filter), and contradictory rules, are reported as findings with
+`unresolved: true`: they never create a bug and turn a would-be PASS into INCONCLUSIVE (D232).
 
 ## Switching providers
 
@@ -481,7 +519,7 @@ SafeChain YAML `model_kwargs`, not `llm.temperature`.
 | `Invalid config ...: llm.modle: Extra inputs are not permitted` | Typo or unknown key - every config key is listed above |
 | `... output invalid after N attempt(s)` | The LLM kept returning invalid output. Retry or raise `llm.max_validation_retries`; the reasons are in the notes / rejection files |
 | Scenarios rejected with `reference pack names no table / document that is in the reference` | The LLM picked names the reference does not have. Retry; check the names in the reference are the ones users and the product use |
-| `Reference ...: 'kind' must be one of data_catalog, document_collection` | The file is not in one of the two formats; download a template from the UI, or convert a REFIDX index with `convert-reference` |
+| `Reference ...: 'kind' must be one of data_catalog, document_collection, reference_data` | The file is not in one of the two formats; download a template from the UI, or convert a REFIDX index with `convert-reference` |
 | `Reference ... has N characters; the limit is ...` | Trim the file (or split it per product area) or raise `reference.max_chars` if your LLM's context allows |
 | Gemini `503 UNAVAILABLE` / `504 DEADLINE_EXCEEDED` | Provider overload; re-run (completed steps are reused) or raise `llm.timeout_seconds` |
 | `Run artifacts are inconsistent` | Files in `runs/<run_id>/` were edited or mixed; re-run with `--from-step` at the first broken step |
@@ -503,9 +541,9 @@ Tests run fully offline (scripted fake LLM + fixture product). Rules for contrib
 - **Product connection untested against a real product:** `http_json` is verified only against a local test server; the UI's contract flow is still a mock.
 - **Web UI is local-only:** no authentication; one user at a time.
 - **SafeChain** adapter is tested offline against a fake SDK only; first real call is on the Amex laptop.
-- **No code-level SQL checks** (design v3): SQL and other artifacts are judged only by the LLM
-  against the Reference Pack; a broken query or a made-up column is caught only if the judge
-  notices it. The artifact plugin hook is kept but disconnected.
+- **SQL checks are evidence, not verdicts:** code parses SQL and reconciles its identifiers
+  with the catalog (D230), but scores still come from the judge; SQL is never executed, so
+  runtime efficiency is never claimed. The artifact plugin hook is kept but disconnected.
 - **Only answers are judged:** clarifications and denials are recorded, not scored (a wrongly
   declined supported request is not flagged).
 - **LLM judgements are not calibrated:** confidence values are uncalibrated, and the

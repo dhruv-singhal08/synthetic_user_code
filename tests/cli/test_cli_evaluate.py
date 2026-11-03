@@ -195,7 +195,9 @@ def test_evaluate_file_mode(
     # and the cheat sheet are evidence in that same call
     assert len(llm.calls) == 2
     assert all("General Judge" in c.system for c in llm.calls)
-    assert all('"allowed_table": "card_transactions"' in c.user for c in llm.calls)
+    # the cheat sheet is expected evidence next to the catalog reconciliation (D230)
+    assert all('"table": "card_transactions"' in c.user for c in llm.calls)
+    assert all("Catalog reconciliation of the SQL" in c.user for c in llm.calls)
     assert all("SQL analysis (parser output" in c.user for c in llm.calls)
     assert "parse failed" in llm.calls[1].user  # "SELEC broken": explicit, not a fail by itself
     config = json.loads((out / "metric_config.json").read_text(encoding="utf-8"))

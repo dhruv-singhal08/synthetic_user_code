@@ -110,8 +110,18 @@ def test_general_judge_example_matches_the_model(classify: bool) -> None:
         if metric_id != "correctness_completeness":
             keys -= {"factual_verification"}
         assert set(score) == keys, metric_id
+    # "unresolved" and "evidence_requests" are offered only with a catalog reconciliation
+    assert set(example["findings"][0]) == set(FindingDraft.model_fields) - {"unresolved"}
+    assert set(GeneralJudgeDraft.model_fields) - {"evidence_requests"} >= set(example)
+
+
+def test_reconciled_general_judge_example_shows_every_field() -> None:
+    example = judge_example(
+        GENERAL, needs_classification=True, unresolved_findings=True, lookup_offer=True
+    )
+    assert set(example) == set(GeneralJudgeDraft.model_fields)
+    assert example["evidence_requests"] == []
     _assert_matches(example["findings"][0], FindingDraft, "finding")
-    assert set(GeneralJudgeDraft.model_fields) >= set(example)
 
 
 def _question() -> QuestionCase:

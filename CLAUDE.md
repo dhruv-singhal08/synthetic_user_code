@@ -18,14 +18,17 @@ Persona + Product [+ Reference (data_catalog | document_collection) + optional i
   -> [1] Scenarios (one call; + Reference Pack only when grounded)
   -> [2] Questions (one call per scenario; metric expectations only where needed)
   -> [3] Product Executor (ProductAdapter; + tool trace / retrieved context)
-  -> [4] Evaluator (deterministic applicability; General Judge + Retrieval/Grounding Judge,
-     at most one call each; provisional verdict policy) -> Bug Candidates
+  -> [4] Evaluator (deterministic applicability; SQL: parse + catalog reconciliation + exact
+     lookups; General Judge + Retrieval/Grounding Judge, at most one call each - the General
+     Judge at most two when it requests one batch of lookups, D231; provisional verdict
+     policy) -> Bug Candidates
 ```
 
 One orchestrator. Nodes are classes, not agents. One package per node
 (`nodes/{scenario,question,executor,evaluator}/`): its code, the code that assembles its
 prompts (`*prompt.py`) and the prompt text (`*prompt.yaml`). Metric definitions (rubrics)
-are data in `metrics/catalog.yaml`. Layout: README "Code layout". Decisions D211-D224.
+are data in `metrics/catalog.yaml`. Layout: README "Code layout". Decisions D211-D224;
+SQL evaluation with exact catalog lookups D229-D234.
 
 ## HARD RULES (v2.1)
 
@@ -39,13 +42,17 @@ are data in `metrics/catalog.yaml`. Layout: README "Code layout". Decisions D211
    - The reference has ONE of two fixed formats (design v4, D203), YAML or JSON:
      `data_catalog` (tables with description / rules / columns, relationships with a
      user-set `verified`, catalog rules R1..) or `document_collection` (documents: name +
-     free-text summary). Anything else is refused. Optional usage instructions (.md/.txt
+     free-text summary). `reference_data` (the user's mapping-style catalog, D229) is mapped
+     one-to-one onto `data_catalog`. Anything else is refused. Optional usage instructions (.md/.txt
      upload or typed in the UI); without them a default per format is used. The tool never
      generates or rewrites a reference (`convert-reference` only maps a REFIDX index).
    - `grounded`: scenarios WITH a cheat sheet (Reference Pack): the LLM PICKS tables /
      columns / joins / rule ids, or documents, by exact name; code checks every pick exists
      (unknown picks rejected AND recorded) and copies the user's own text into the pack.
    - Question generation and evaluation see the cheat sheet, never the whole reference.
+     Exception (D230, user-approved): SQL evaluation also gets EXACT catalog lookups of the
+     identifiers / rules the SQL actually uses (`references/catalog_index.py`); the cheat
+     sheet is expected evidence, not an allow-list.
    - `ungrounded`: persona + product only -> no pack -> generic criteria only.
    - The mode is recorded in every scenario, question, evaluation and the run
      manifest.

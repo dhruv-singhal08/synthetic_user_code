@@ -1,0 +1,85 @@
+# SYNTHETIC TEST FIXTURE - not authoritative reference data (D229).
+# Written in the user's reference_data format to exercise the catalog index, the lookups and
+# the SQL reconciliation: several tables, a column name shared by tables, documented verified /
+# unverified relationships, table rules, catalog-wide rules and two deliberately contradictory
+# disclosure rules. Names echo the implementation requirements; meanings are invented for tests.
+kind: reference_data
+name: synthetic_sql_eval_catalog
+description: Synthetic catalog for SQL evaluation tests.
+
+tables:
+  v_lpc_details:
+    description: Late payment charges, one row per account and billing cycle.
+    rules:
+      - Late payment charge questions use the net amount (net_lpc_charge_usd_am) unless gross is explicitly requested.
+    columns:
+      bill_cycle_yr_mo_no:
+        type: INTEGER
+        description: Billing cycle year and month (YYYYMM).
+        categorical_values: []
+      net_lpc_charge_usd_am:
+        type: NUMERIC
+        description: Net late payment charge in USD.
+        categorical_values: []
+      lpc_charge_usd_am:
+        type: NUMERIC
+        description: Gross late payment charge in USD.
+        categorical_values: []
+      cg_id:
+        type: STRING
+        description: Client group identifier.
+        categorical_values: []
+      acct_id:
+        type: STRING
+        description: Account identifier.
+      mkt_cd:
+        type: STRING
+        description: Market code.
+        categorical_values: [US, UK, IN]
+  v_acct_delinquency:
+    description: Account delinquency status per billing cycle.
+    columns:
+      acct_id:
+        type: STRING
+        description: Account identifier.
+      bill_cycle_yr_mo_no:
+        type: INTEGER
+        description: Billing cycle year and month (YYYYMM).
+      dlq_bucket_cd:
+        type: STRING
+        description: Days-past-due bucket.
+        categorical_values: ["0", "30", "60", "90"]
+  v_emissions:
+    description: Card spend emissions per account and month, one column per methodology.
+    columns:
+      acct_id:
+        type: STRING
+      defra_emissions_kg:
+        type: NUMERIC
+        description: Emissions estimated with the DEFRA methodology.
+      epa_emissions_kg:
+        type: NUMERIC
+        description: Emissions estimated with the EPA methodology.
+  v_cardmember:
+    description: Cardmember profile.
+    rules:
+      - Do not output cardmember names together with account identifiers.
+    columns:
+      acct_id:
+        type: STRING
+      cm_name:
+        type: STRING
+        description: Cardmember full name.
+
+relationships:
+  - from: v_lpc_details.acct_id
+    to: v_acct_delinquency.acct_id
+    verified: true
+  - from: v_lpc_details.acct_id
+    to: v_emissions.acct_id
+    verified: false
+
+global_rules:
+  - DEFRA and EPA emissions must never be added together into one total.
+  - Cardmember names may be shown in outputs for servicing questions.
+  - Cardmember names must never be shown in outputs.

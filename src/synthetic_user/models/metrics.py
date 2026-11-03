@@ -70,6 +70,20 @@ class ReferenceAsset(StrEnum):
     TOOL_DEFINITIONS = "tool_definitions"  # reference agent_context tools
 
 
+class EvaluationTarget(StrEnum):
+    """What a metric judges, derived from its required execution evidence (D234).
+
+    ``sql``: only the SQL artifact; ``both``: the SQL artifact and other evidence (e.g. the
+    answer text); ``non_sql``: no SQL artifact; ``unknown``: the definition names no evidence
+    (routing then stays as before: the judge group alone decides). Never from the metric name.
+    """
+
+    SQL = "sql"
+    NON_SQL = "non_sql"
+    BOTH = "both"
+    UNKNOWN = "unknown"
+
+
 class ExpectationFieldType(StrEnum):
     STRING = "string"
     STRING_LIST = "string_list"
@@ -174,6 +188,15 @@ class MetricDefinition(StrictModel):
     @property
     def needs_expectations(self) -> bool:
         return bool(self.question_expectation_schema)
+
+    @property
+    def evaluation_target(self) -> EvaluationTarget:
+        evidence = set(self.required_execution_evidence)
+        if not evidence:
+            return EvaluationTarget.UNKNOWN
+        if EvidenceKind.SQL not in evidence:
+            return EvaluationTarget.NON_SQL
+        return EvaluationTarget.BOTH if evidence - {EvidenceKind.SQL} else EvaluationTarget.SQL
 
 
 class CustomMetricInput(StrictModel):

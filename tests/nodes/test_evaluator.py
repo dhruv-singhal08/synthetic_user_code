@@ -467,26 +467,35 @@ async def test_judge_failure_is_evaluation_error_never_a_score(
     assert any("the General Judge call failed" in n for n in outage.notes)
 
 
-async def test_ignored_sql_predicate_hidden_from_the_judge_only(
+async def test_unrequested_filter_is_judged_as_written_and_unresolved_never_passes(
     app_config: AppConfig,
     sample_product: ProductDescription,
     case: Any,
     sample_reference: Reference,
 ) -> None:
-    sql = f"{SQL.split(' GROUP BY')[0]} WHERE cg_id IN ('DUMMY') GROUP BY e.full_name"
+    """D232: no predicate is hidden; an unrequested filter nothing establishes is reported as
+    an unresolved finding: the verdict is inconclusive (never pass, never a bug)."""
+    sql = f"{SQL.split(' GROUP BY')[0]} WHERE c.cg_id IN ('DUMMY') GROUP BY e.full_name"
     response = {"outcome": "answered", "artifacts": [{"kind": "sql", "content": sql}]}
-    settings = app_config.model_copy(
-        update={
-            "evaluation": app_config.evaluation.model_copy(
-                update={"ignored_sql_predicates": ["cg_id IN ('DUMMY')"]}
-            )
-        }
-    )
+    reply = all_pass(*SQL_METRICS)
+    reply["findings"] = [
+        finding(
+            "semantic_correctness",
+            "c.cg_id IN ('DUMMY')",
+            severity="medium",
+            evidence_status="weak",
+            unresolved=True,
+        )
+    ]
     result, llm = await evaluate(
-        settings, sample_product, case, sample_reference, response, [all_pass(*SQL_METRICS)]
+        app_config, sample_product, case, sample_reference, response, [reply]
     )
-    assert "DUMMY" not in llm.calls[0].user.split("Product response", 1)[1]
-    assert any("Ignored configured SQL predicate(s)" in n for n in result.notes)
+    judged_sql = llm.calls[0].user.split("Product response", 1)[1]
+    assert "DUMMY" in judged_sql  # the SQL is judged exactly as generated
+    assert '"unresolved": true' in llm.calls[0].user  # the option is explained to the judge
+    assert result.findings[0].unresolved
+    assert result.verdict is Verdict.INCONCLUSIVE and result.bug_candidates == []
+    assert not any("Ignored configured SQL predicate" in n for n in result.notes)
 
 
 # --- retrieval / grounding judge ---------------------------------------------------------------

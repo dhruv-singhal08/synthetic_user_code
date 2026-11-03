@@ -1,8 +1,10 @@
 """Load the user's reference (design v4, D203): a ``data_catalog`` or ``document_collection``
 in YAML or JSON, plus optional usage instructions (.md / .txt, or typed in the UI).
 
-The file must match one of the two formats exactly (``kind`` says which); anything else is
-refused with the field that is wrong. The tool never builds or rewrites a reference.
+The file must match one of the formats exactly (``kind`` says which); anything else is refused
+with the field that is wrong. ``reference_data`` (tables / columns written as mappings, see
+``reference_data.py``) is the same data catalog in the user's own shape: it is mapped one-to-one
+onto ``data_catalog`` (D229). The tool never builds or rewrites a reference.
 
 Mode: a reference given (``--reference`` or ``inputs.reference_file``) -> grounded; none ->
 ungrounded (logged).
@@ -22,12 +24,13 @@ from pydantic import TypeAdapter, ValidationError
 from synthetic_user.core.exceptions import InputAssetError, format_validation_error
 from synthetic_user.models.reference import Reference, ReferenceContent, ReferenceKind
 from synthetic_user.models.run import GenerationMode
+from synthetic_user.references.reference_data import REFERENCE_DATA_KIND, ReferenceData
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
 REFERENCE_SUFFIXES = frozenset({".yaml", ".yml", ".json"})
 GUIDE_SUFFIXES = frozenset({".txt", ".md", ".markdown"})
-KINDS = ", ".join(k.value for k in ReferenceKind)
+KINDS = ", ".join([*(k.value for k in ReferenceKind), REFERENCE_DATA_KIND])
 _CONTENT: TypeAdapter[Any] = TypeAdapter(ReferenceContent)
 
 
@@ -53,6 +56,15 @@ def parse_reference(
         raise InputAssetError(f"Reference {source_name} is not valid {suffix[1:]}: {exc}") from exc
     if not isinstance(data, dict):
         raise InputAssetError(f"Reference {source_name}: expected a mapping with 'kind' ({KINDS})")
+    source_format: str | None = None
+    if data.get("kind") == REFERENCE_DATA_KIND:
+        source_format = REFERENCE_DATA_KIND
+        try:
+            data = ReferenceData.model_validate(data).to_data_catalog()
+        except ValidationError as exc:
+            raise InputAssetError(
+                f"Reference {source_name} ({REFERENCE_DATA_KIND}): {format_validation_error(exc)}"
+            ) from exc
     if data.get("kind") not in {k.value for k in ReferenceKind}:
         raise InputAssetError(
             f"Reference {source_name}: 'kind' must be one of {KINDS} "
@@ -62,7 +74,8 @@ def parse_reference(
         parsed = _CONTENT.validate_python(data)
     except ValidationError as exc:
         raise InputAssetError(
-            f"Reference {source_name} ({data['kind']}): {format_validation_error(exc)}"
+            f"Reference {source_name} ({source_format or data['kind']}): "
+            f"{format_validation_error(exc)}"
         ) from exc
     instructions: str | None = None
     if guide is not None:
@@ -82,6 +95,7 @@ def parse_reference(
         content=parsed,
         instructions=instructions,
         instructions_name=Path(guide_name).name if guide_name and instructions else None,
+        source_format=source_format,
     )
     size = reference.rendered_chars()
     if size > max_chars:

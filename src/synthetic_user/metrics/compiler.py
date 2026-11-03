@@ -207,14 +207,21 @@ def _definition(
         ],
         generation_instructions=draft.generation_instructions,
         required_reference_assets=list(dict.fromkeys(draft.required_reference_assets)),
-        required_execution_evidence=list(
-            dict.fromkeys([EvidenceKind.ANSWER, *draft.required_execution_evidence])
-        ),
+        required_execution_evidence=_evidence(draft.required_execution_evidence),
         applicability_policy=draft.applicability,
         evidence_requirements=draft.evidence_requirements,
         source_text=item.text,
         source_provenance=item.provenance,
     )
+
+
+def _evidence(listed: Sequence[EvidenceKind]) -> list[EvidenceKind]:
+    """The compiled evidence, with ``answer`` added unless the metric judges an SQL artifact
+    only: an SQL artifact already implies an answered response, and keeping ``sql`` alone is
+    what routes the metric as SQL-only (D234). Listed ``answer`` is always kept."""
+    if EvidenceKind.SQL in listed:
+        return list(dict.fromkeys(listed))
+    return list(dict.fromkeys([EvidenceKind.ANSWER, *listed]))
 
 
 def _unavailable(index: int, item: CustomMetricInput, reason: str) -> MetricDefinition:

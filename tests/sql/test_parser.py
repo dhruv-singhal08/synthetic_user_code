@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from synthetic_user.sql.parser import SqlglotParser, compare_with_schema
+from synthetic_user.sql.parser import SqlglotParser
 
 PARSER = SqlglotParser()
 SQL = """WITH monthly AS (
@@ -39,46 +39,35 @@ def test_extracts_tables_ctes_aliases_joins_and_clauses() -> None:
     assert not any(c.column == "total" for c in s.base_columns)
 
 
-def test_schema_comparison_flags_only_base_identifiers() -> None:
+def test_join_keys_resolve_aliases_to_base_tables_and_skip_cte_sides() -> None:
     s = PARSER.parse(SQL, dialect=None)
-    allowed = {
-        "card_transactions": ["amount", "emp_id", "yr", "card_id", "dept"],
-        "employees": ["id", "dept_id"],
-        "departments": ["id"],
-    }
-    comparison = compare_with_schema(s, allowed)
-    assert comparison is not None
-    assert comparison.unknown_columns == ["departments.name"]
-    assert comparison.unknown_tables == []
+    keys = {((k.left.table, k.left.column), (k.right.table, k.right.column)) for k in s.join_keys}
+    assert (("card_transactions", "emp_id"), ("employees", "id")) in keys
+    assert (("card_transactions", "dept"), ("departments", "id")) in keys
+    # d.id = m.dept_id joins a CTE: not a base-table join key
+    assert not any("dept_id" in (k.left.column, k.right.column) for k in s.join_keys)
+
+
+def test_qualified_tables_keep_their_qualifier_on_tables_and_columns() -> None:
+    s = PARSER.parse(
+        "SELECT d.cg_id, x.amt FROM ns.tbl_a d JOIN tbl_b x ON x.k = d.k "
+        "WHERE d.yr IN (SELECT yr FROM tbl_c)",
+        dialect=None,
+    )
+    assert set(s.base_tables) == {"ns.tbl_a", "tbl_b", "tbl_c"}
+    resolved = {(c.table, c.column) for c in s.base_columns}
+    assert ("ns.tbl_a", "cg_id") in resolved and ("tbl_c", "yr") in resolved
+    assert s.join_keys[0].right.table == "ns.tbl_a"
 
 
 def test_parse_failure_is_explicit_and_never_raises() -> None:
     for sql in ("SELEC broken", "SELECT FROM WHERE (", ""):
         s = PARSER.parse(sql, dialect=None)
         assert not s.parsed and s.diagnostics, sql
-        assert s.raw_sql == sql
-        assert compare_with_schema(s, {}) is None  # parser-dependent checks inconclusive
+        assert s.raw_sql == sql and not s.base_tables and not s.base_columns  # nothing invented
     assert "\x1b" not in PARSER.parse("SELECT FROM WHERE (", dialect=None).diagnostics[0]
 
 
 def test_dialect_is_only_what_is_configured() -> None:
     s = PARSER.parse("SELECT `a` FROM `t`", dialect="bigquery")
     assert s.parsed and s.dialect == "bigquery" and s.base_tables == ["t"]
-
-
-def test_configured_predicates_are_removed_from_the_judge_copy_only() -> None:
-    sql = "SELECT a FROM t WHERE x = 1 AND cg_id IN ('DUMMY')"
-    cleaned, removed = PARSER.remove_predicates(sql, ["cg_id IN ('DUMMY')"], dialect=None)
-    assert removed and "DUMMY" not in cleaned and "x = 1" in cleaned
-    only, _ = PARSER.remove_predicates(
-        "SELECT a FROM t WHERE cg_id IN ('DUMMY')", ["cg_id IN ('DUMMY')"], dialect=None
-    )
-    assert "WHERE" not in only
-    other, removed = PARSER.remove_predicates(
-        "SELECT a FROM t WHERE cg_id IN ('REAL')", ["cg_id IN ('DUMMY')"], dialect=None
-    )
-    assert not removed and other == "SELECT a FROM t WHERE cg_id IN ('REAL')"
-    assert PARSER.remove_predicates("SELEC broken", ["x = 1"], dialect=None) == (
-        "SELEC broken",
-        False,
-    )

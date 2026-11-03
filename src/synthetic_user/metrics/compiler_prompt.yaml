@@ -56,6 +56,9 @@ user: |
     Otherwise needs_question_expectations is false and expectation_fields is [].
   - required_execution_evidence / required_reference_assets: only the values listed above, only
     what the metric really needs.
+  - The evidence decides what a metric is routed to: list sql when the metric judges a
+    generated SQL artifact (whatever its name), add answer as well when it also judges the
+    response text, and never list sql for a metric that does not judge SQL.
   - Mark a metric uncompilable (compilable false, uncompilable_reason specific) when it needs
     something this run cannot provide (e.g. an SQL dialect that is not configured, a reference
     asset that is absent, execution of queries, external ground truth), or when it is not an

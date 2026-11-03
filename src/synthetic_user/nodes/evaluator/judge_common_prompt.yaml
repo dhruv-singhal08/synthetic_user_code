@@ -13,10 +13,6 @@ missing_finding: >-
   response really falls short on ${metric}, add that finding; if nothing is wrong, score
   ${metric} 1. Never change a score only to satisfy this check
 
-ignored_predicates_note: >-
-  Ignored configured SQL predicate(s) during scoring: ${predicates}. The original SQL is
-  preserved in the product response.
-
 metric_block: |-
   - ${metric_id} (${display_name}): ${rubric}
     Score anchors: 1 = ${anchor_1}; 0.5 = ${anchor_half}; 0 = ${anchor_0}.

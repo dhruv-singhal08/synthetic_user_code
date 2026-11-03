@@ -2,7 +2,11 @@
 
 Sections are included only when one of the call's metrics (or the correctness evidence) needs
 them: question-specific metric expectations, the cheat sheet, authoritative tool definitions,
-the SQL parser output and the exposed tool trace.
+the SQL parser output and the exposed tool trace. When SQL is reconciled with a data catalog
+(D230/D231) the cheat sheet is presented as expected evidence (not an allow-list), followed by
+the catalog reconciliation, the lookups code made, and either the optional one-batch lookup
+offer (first call) or the results of the judge's requested lookups (second call). Prompts of
+runs without that reconciliation are unchanged.
 """
 
 from __future__ import annotations
@@ -14,6 +18,12 @@ from typing import Any
 
 from synthetic_user.models.evaluation import CriterionStatus, FactualVerification, Verdict
 from synthetic_user.models.execution import ConversationTurn, DeniedResponse, ToolCall
+from synthetic_user.models.lookup import (
+    ArtifactReconciliation,
+    IdentifierStatus,
+    LookupResult,
+    LookupTool,
+)
 from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import MetricExpectationStatus, QuestionCase
@@ -29,7 +39,7 @@ from synthetic_user.nodes.evaluator.judge_common import (
 from synthetic_user.nodes.evaluator.trace_tags import trace_catalog
 from synthetic_user.prompts.contracts import choices, render_contract
 from synthetic_user.prompts.templates import prompts_beside
-from synthetic_user.sql.parser import SchemaComparison, SqlStructure
+from synthetic_user.sql.parser import SqlStructure
 
 PROMPTS = prompts_beside(__file__, "general_prompt.yaml")
 SYSTEM = PROMPTS.text("system")
@@ -48,7 +58,8 @@ PRODUCT_CONTRACT_FIELDS = {
 @dataclass(frozen=True)
 class SqlEvidence:
     structure: SqlStructure
-    schema: SchemaComparison | None
+    # Catalog reconciliation; None when the run has no data catalog (no pack / documents).
+    reconciliation: ArtifactReconciliation | None
 
 
 @dataclass(frozen=True)
@@ -66,17 +77,38 @@ class GeneralJudgeInput:
     needs_classification: bool
     sql_dialect: str | None
     artifact_max_chars: int
+    # Exact lookups code made before the call (reconciled runs only).
+    catalog_lookups: Sequence[LookupResult] = ()
+    # > 0: the judge may return up to this many lookups instead of scoring (first call only).
+    max_lookup_requests: int = 0
+    # Second call: the results of the judge's requested lookups.
+    requested_lookups: Sequence[LookupResult] | None = None
+
+    @property
+    def reconciled(self) -> bool:
+        return any(item.reconciliation is not None for item in self.sql)
 
 
-def cheat_sheet_view(pack: ReferencePack, reference: Reference | None) -> dict[str, Any]:
-    """The pack as the judge sees it, with the stable trace tags of trace_tags.py."""
+def cheat_sheet_view(
+    pack: ReferencePack, reference: Reference | None, *, expected: bool = False
+) -> dict[str, Any]:
+    """The pack as the judge sees it, with the stable trace tags of trace_tags.py.
+
+    ``expected``: the pack is expected evidence next to a catalog reconciliation, so its items
+    are not labelled "allowed" (an allow-list wording made valid extra identifiers look wrong).
+    """
+    table_key, columns_key, joins_key = (
+        ("table", "columns", "joins")
+        if expected
+        else ("allowed_table", "allowed_columns", "allowed_joins")
+    )
     return {
         "kind": pack.kind.value,
         "tables": [
             {
                 "tag": f"TABLE-{ti:02d}",
-                "allowed_table": table.name,
-                "allowed_columns": [
+                table_key: table.name,
+                columns_key: [
                     {"tag": f"COLUMN-{ti:02d}.{ci:02d}", "name": column.name}
                     for ci, column in enumerate(table.columns, start=1)
                 ],
@@ -87,7 +119,7 @@ def cheat_sheet_view(pack: ReferencePack, reference: Reference | None) -> dict[s
             }
             for ti, table in enumerate(pack.tables, start=1)
         ],
-        "allowed_joins": [
+        joins_key: [
             {"tag": f"JOIN-{ji:02d}", "from": j.from_, "to": j.to, "verified": j.verified}
             for ji, j in enumerate(pack.joins, start=1)
         ],
@@ -103,7 +135,11 @@ def cheat_sheet_view(pack: ReferencePack, reference: Reference | None) -> dict[s
 
 
 def judge_example(
-    definitions: Sequence[MetricDefinition], *, needs_classification: bool
+    definitions: Sequence[MetricDefinition],
+    *,
+    needs_classification: bool,
+    unresolved_findings: bool = False,
+    lookup_offer: bool = False,
 ) -> dict[str, Any]:
     ids = [d.metric_id for d in definitions]
     metrics: dict[str, Any] = {}
@@ -125,11 +161,20 @@ def judge_example(
                     metric_ids=choices([*ids, "null"]),
                 )
             ],
-            "findings": [finding_example(ids)],
+            "findings": [_finding_example(ids, unresolved=unresolved_findings)],
             "overall_verdict": PROMPTS.text("verdict_example", verdicts=choices(Verdict)),
         }
     )
+    if lookup_offer:
+        out["evidence_requests"] = []
     return out
+
+
+def _finding_example(ids: Sequence[str], *, unresolved: bool) -> dict[str, Any]:
+    example = finding_example(ids)
+    if unresolved:
+        example["unresolved"] = PROMPTS.text("unresolved_example")
+    return example
 
 
 def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
@@ -166,8 +211,11 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
     if data.pack is not None:
         sections.append(
             PROMPTS.text(
-                "section_cheat_sheet",
-                cheat_sheet=json.dumps(cheat_sheet_view(data.pack, data.reference), indent=2),
+                "section_cheat_sheet_expected" if data.reconciled else "section_cheat_sheet",
+                cheat_sheet=json.dumps(
+                    cheat_sheet_view(data.pack, data.reference, expected=data.reconciled),
+                    indent=2,
+                ),
             )
         )
     agent = data.reference.agent_context if data.reference is not None else None
@@ -189,6 +237,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
                 sql=bounded(json.dumps(sql_view, indent=2), data.artifact_max_chars),
             )
         )
+        sections.extend(_catalog_sections(data))
     if data.tool_trace is not None:
         trace = [call.model_dump(mode="json") for call in data.tool_trace]
         sections.append(
@@ -227,7 +276,12 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
         metric_rules=metric_blocks(marked),
         factual_rule=PROMPTS.text("factual_rule_on" if factual else "factual_rule_off"),
         contract=render_contract(
-            judge_example(definitions, needs_classification=data.needs_classification)
+            judge_example(
+                definitions,
+                needs_classification=data.needs_classification,
+                unresolved_findings=data.reconciled,
+                lookup_offer=data.max_lookup_requests > 0,
+            )
         ),
     )
     return SYSTEM, user
@@ -260,6 +314,83 @@ def _sql_view(index: int, item: SqlEvidence) -> dict[str, Any]:
             "limits": s.limits,
         }
     )
-    if item.schema is not None:
-        view["identifiers_not_in_cheat_sheet"] = item.schema.model_dump(mode="json")
+    return view
+
+
+def _catalog_sections(data: GeneralJudgeInput) -> list[str]:
+    """Reconciliation, code lookups, then the lookup offer or the requested results."""
+    if not data.reconciled:
+        return []
+    limit = data.artifact_max_chars
+    views = [_reconciliation_view(i.reconciliation) for i in data.sql if i.reconciliation]
+    sections = [
+        PROMPTS.text(
+            "section_reconciliation", reconciliation=bounded(json.dumps(views, indent=2), limit)
+        )
+    ]
+    if data.catalog_lookups:
+        sections.append(
+            PROMPTS.text(
+                "section_catalog_evidence", lookups=bounded(_lookups(data.catalog_lookups), limit)
+            )
+        )
+    if data.requested_lookups is not None:
+        sections.append(
+            PROMPTS.text(
+                "section_requested_evidence",
+                results=bounded(_lookups(data.requested_lookups), limit),
+            )
+        )
+    elif data.max_lookup_requests > 0:
+        sections.append(
+            PROMPTS.text(
+                "section_lookup_tools",
+                max_requests=data.max_lookup_requests,
+                request_example=json.dumps(
+                    PROMPTS.data("request_example", tools=choices(LookupTool)), indent=2
+                ),
+            )
+        )
+    return sections
+
+
+def _lookups(results: Sequence[LookupResult]) -> str:
+    """Lookup results as the judge sees them: nulls and empty lists dropped, and a found
+    column's table-level duplicates (table, description, provenance) shown once, in the column.
+    The stored lookup trace keeps the full results."""
+    views: list[dict[str, Any]] = []
+    for result in results:
+        view = _prune(result.model_dump(mode="json", exclude_none=True))
+        if isinstance(view.get("column"), dict):
+            for key in ("table", "table_description", "provenance"):
+                view.pop(key, None)
+        views.append(view)
+    return json.dumps(views, indent=2)
+
+
+def _prune(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _prune(v) for k, v in value.items() if v != []}
+    if isinstance(value, list):
+        return [_prune(v) for v in value]
+    return value
+
+
+def _reconciliation_view(rec: ArtifactReconciliation) -> dict[str, Any]:
+    view: dict[str, Any] = {"sql_artifact": rec.artifact, "parsed": rec.parsed}
+    if not rec.parsed:
+        view["note"] = (
+            "parse failed: identifiers were not reconciled; judge the original SQL and treat "
+            "identifier existence as inconclusive unless the SQL text itself settles it"
+        )
+        return view
+    for status in (IdentifierStatus.VALID_IN_PACK, IdentifierStatus.VALID_EXTRA):
+        view[status.value] = [i.canonical or i.identifier for i in rec.with_status(status)]
+    for status in (IdentifierStatus.INVALID, IdentifierStatus.UNRESOLVED):
+        view[status.value] = [
+            {"identifier": i.identifier, "reason": i.reason} for i in rec.with_status(status)
+        ]
+    view["cheat_sheet_items_not_used"] = rec.pack_items_not_used
+    view["joins"] = [j.model_dump(mode="json", exclude_none=True) for j in rec.joins]
+    view["rules_not_in_cheat_sheet"] = rec.rules_not_in_pack
     return view

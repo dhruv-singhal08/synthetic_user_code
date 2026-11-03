@@ -268,15 +268,18 @@ def test_every_shipped_config_loads(name: str, env: dict[str, str]) -> None:
 def test_safechain_config_keeps_its_run_policy() -> None:
     cfg = load_config(REPO_CONFIG.parent / "app.safechain.yaml", env={})
     assert cfg.product.clarification_policy == "ask"
-    # The product workaround is configuration now, not code (a generic predicate list).
-    assert cfg.evaluation.ignored_sql_predicates == ["cg_id IN ('DUMMY')"]
+    # No predicate is hidden from the judge any more (D232); lookups are bounded (D231).
+    assert cfg.evaluation.catalog_namespaces is None
+    assert cfg.evaluation.reference_lookup.enabled
+    assert cfg.evaluation.reference_lookup.max_requests == 10
 
 
 @pytest.mark.parametrize(
     ("section", "key", "message"),
     [
         ("evaluation", "agent_metrics", "there are no evaluation profiles"),
-        ("evaluation", "ignore_dummy_cg_id_filter", "ignored_sql_predicates"),
+        ("evaluation", "ignore_dummy_cg_id_filter", "unresolved finding"),
+        ("evaluation", "ignored_sql_predicates", "unresolved finding"),
     ],
 )
 def test_removed_evaluation_keys_are_refused_with_their_replacement(

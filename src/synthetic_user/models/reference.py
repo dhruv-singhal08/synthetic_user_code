@@ -324,6 +324,8 @@ class Reference(StrictModel):
     content: ReferenceContent
     instructions: NonEmptyStr | None = None  # uploaded or typed; None -> the default
     instructions_name: NonEmptyStr | None = None
+    # The file's own shape when it was not written as ``kind`` (``reference_data``, D229).
+    source_format: NonEmptyStr | None = None
 
     @property
     def kind(self) -> ReferenceKind:

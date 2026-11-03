@@ -1,0 +1,36 @@
+# BOOTSTRAP TEMPLATE - NOT THE AUTHORITATIVE CATALOG.
+# The original insight_referance(1).yaml was not available when the SQL evaluator was built
+# (D229). This file only reproduces the STRUCTURE of the user's reference_data format with the
+# one table and four columns named in the implementation requirements. Types, descriptions,
+# categorical values, relationships and rules are deliberately empty: they are unknown and are
+# never invented. Replace this file with the original reference (unchanged) when available;
+# until then any catalog-dependent evaluation against it is not production validation.
+kind: reference_data
+name: insight_reference
+description: "Reference catalog for SQL evaluation"
+
+tables:
+  v_lpc_details:
+    description: null
+    rules: []
+    columns:
+      bill_cycle_yr_mo_no:
+        type: null
+        description: null
+        categorical_values: []
+      net_lpc_charge_usd_am:
+        type: null
+        description: null
+        categorical_values: []
+      lpc_charge_usd_am:
+        type: null
+        description: null
+        categorical_values: []
+      cg_id:
+        type: null
+        description: null
+        categorical_values: []
+
+relationships: []
+
+global_rules: []

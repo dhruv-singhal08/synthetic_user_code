@@ -19,6 +19,7 @@ from pydantic import Field, JsonValue, model_validator
 
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.execution import ProductOutcome, ResponseClassification
+from synthetic_user.models.lookup import LookupRequest, ReferenceCheckRecord
 from synthetic_user.models.metrics import JUDGED_SCALE, JudgeGroup
 from synthetic_user.models.run import GenerationMode
 
@@ -135,6 +136,9 @@ class Finding(StrictModel):
     matches_known_gap: bool = False
     # Stable links into the tagged success criteria and question-specific cheat sheet.
     related_tags: list[NonEmptyStr] = Field(default_factory=list)
+    # The evidence cannot establish whether this is a defect (e.g. an unrequested filter no
+    # contract or rule establishes, contradictory rules): reported, never a pass or a fail.
+    unresolved: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -213,6 +217,9 @@ class EvaluationResult(StrictModel):
     bug_candidates: list[BugCandidate] = Field(default_factory=list)
     llm_verdict: Verdict | None = None  # the general judge's own opinion; never decisive
     notes: list[NonEmptyStr] = Field(default_factory=list)
+    # Catalog reconciliation + exact lookups behind the judgement (data_catalog runs whose
+    # selected metrics need an SQL artifact); None otherwise and in earlier artifacts.
+    reference_checks: ReferenceCheckRecord | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -348,6 +355,7 @@ class FindingDraft(StrictModel):
     evidence_status: EvidenceStatus
     matches_known_gap: bool = False
     related_tags: list[NonEmptyStr] = Field(default_factory=list)
+    unresolved: bool = False
 
 
 class CriterionDraft(StrictModel):
@@ -364,10 +372,14 @@ class GeneralJudgeDraft(StrictModel):
     # Required when code asks for it (answered payload without a typed response kind).
     response_classification: Literal["answered", "unable_to_answer"] | None = None
     classification_note: NonEmptyStr | None = None
-    metrics: dict[NonEmptyStr, JudgedScore]
+    metrics: dict[NonEmptyStr, JudgedScore] = Field(default_factory=dict)
     criteria: list[CriterionDraft] = Field(default_factory=list)
     findings: list[FindingDraft] = Field(default_factory=list)
-    overall_verdict: Verdict
+    # Required on a scoring reply; checked by the General Judge (absent on a lookup request).
+    overall_verdict: Verdict | None = None
+    # Only when the prompt offers the lookups: ALL extra evidence needed, in one batch, instead
+    # of scoring. Code runs them and asks once more (no further requests).
+    evidence_requests: list[LookupRequest] = Field(default_factory=list)
 
 
 class ChunkRelevanceDraft(StrictModel):

@@ -2,9 +2,11 @@
 
 ``SqlParser`` is the interface; ``SqlglotParser`` is the default implementation. The parser
 extracts base tables, base columns (aliases resolved per scope), CTE names, output aliases,
-functions, joins with predicates, filters, projections, aggregations, grouping, ordering and
-limits, and keeps the raw SQL. Base database identifiers are kept apart from CTE names, output
-aliases and functions so Schema Faithfulness never compares those.
+functions, joins with predicates and their equality join keys (resolved to base tables),
+filters, projections, aggregations, grouping, ordering and limits, and keeps the raw SQL. Base
+database identifiers are kept apart from CTE names, output aliases and functions so Schema
+Faithfulness never compares those. Identifier validity is decided elsewhere, against the
+catalog (``sql/reconcile.py``); the parser never compares with a reference.
 
 The dialect comes only from explicit configuration (``evaluation.sql_dialect``); it is never
 guessed. A parse failure is explicit (``parsed=False`` + diagnostics) and never fails a metric
@@ -15,7 +17,6 @@ from __future__ import annotations
 
 import importlib
 import re
-from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import Field
@@ -41,6 +42,13 @@ class SqlJoin(StrictModel):
     predicate: str | None = None
 
 
+class SqlJoinKey(StrictModel):
+    """One ``a.x = b.y`` equality of an ON clause between two base-table columns."""
+
+    left: SqlColumnRef
+    right: SqlColumnRef
+
+
 class SqlStructure(StrictModel):
     raw_sql: str
     dialect: str | None = None
@@ -55,6 +63,7 @@ class SqlStructure(StrictModel):
     output_aliases: list[NonEmptyStr] = Field(default_factory=list)
     functions: list[NonEmptyStr] = Field(default_factory=list)
     joins: list[SqlJoin] = Field(default_factory=list)
+    join_keys: list[SqlJoinKey] = Field(default_factory=list)
     filters: list[NonEmptyStr] = Field(default_factory=list)
     projections: list[NonEmptyStr] = Field(default_factory=list)
     aggregations: list[NonEmptyStr] = Field(default_factory=list)
@@ -63,22 +72,10 @@ class SqlStructure(StrictModel):
     limits: list[NonEmptyStr] = Field(default_factory=list)
 
 
-class SchemaComparison(StrictModel):
-    """Deterministic comparison of base identifiers with the cheat sheet (evidence only)."""
-
-    unknown_tables: list[NonEmptyStr] = Field(default_factory=list)
-    unknown_columns: list[NonEmptyStr] = Field(default_factory=list)
-    unresolved_columns: list[NonEmptyStr] = Field(default_factory=list)
-
-
 class SqlParser(Protocol):
     name: str
 
     def parse(self, sql: str, *, dialect: str | None) -> SqlStructure: ...
-
-    def remove_predicates(
-        self, sql: str, predicates: Sequence[str], *, dialect: str | None
-    ) -> tuple[str, bool]: ...
 
 
 def _sqlglot() -> Any:
@@ -124,48 +121,10 @@ class SqlglotParser:
             collector.collect(statement)
         return collector.result(sql, len(statements))
 
-    def remove_predicates(
-        self, sql: str, predicates: Sequence[str], *, dialect: str | None
-    ) -> tuple[str, bool]:
-        """Drop configured predicates (exact AST match) from AND / OR chains and WHERE clauses.
 
-        Used only for the judge's copy of the SQL; the stored response is never changed. When
-        the SQL or a predicate cannot be parsed, nothing is removed.
-        """
-        sqlglot = _sqlglot()
-        if sqlglot is None or not predicates or not sql.strip():
-            return sql, False
-        exp = sqlglot.exp
-        try:
-            targets = {_key(sqlglot.parse_one(p, read=dialect), dialect) for p in predicates}
-            statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
-        except (sqlglot.errors.ParseError, sqlglot.errors.TokenError, ValueError):
-            return sql, False
-        changed = False
-
-        def drop(node: Any) -> Any:
-            nonlocal changed
-            if isinstance(node, exp.And | exp.Or):
-                if _key(node.left, dialect) in targets:
-                    changed = True
-                    return node.right
-                if _key(node.right, dialect) in targets:
-                    changed = True
-                    return node.left
-            if isinstance(node, exp.Where) and _key(node.this, dialect) in targets:
-                changed = True
-                return None
-            return node
-
-        rewritten = [s.transform(drop) for s in statements]
-        if not changed:
-            return sql, False
-        return ";\n".join(s.sql(dialect=dialect) for s in rewritten), True
-
-
-def _key(node: Any, dialect: str | None) -> str:
-    inner = node.unnest() if hasattr(node, "unnest") else node
-    return " ".join(str(inner.sql(dialect=dialect)).casefold().split())
+def _qualified(table: Any) -> str:
+    """The base table name as written, qualifiers included (``ns.table``)."""
+    return ".".join(p for p in (table.catalog, table.db, table.name) if p)
 
 
 class _Collector:
@@ -178,6 +137,7 @@ class _Collector:
         self.output_aliases: dict[str, None] = {}
         self.functions: dict[str, None] = {}
         self.joins: list[SqlJoin] = []
+        self.join_keys: list[SqlJoinKey] = []
         self.filters: list[str] = []
         self.projections: list[str] = []
         self.aggregations: dict[str, None] = {}
@@ -201,7 +161,7 @@ class _Collector:
         for table in statement.find_all(exp.Table):
             if not table.name or table.name.casefold() in cte_names:
                 continue
-            qualified = ".".join(p for p in (table.catalog, table.db, table.name) if p)
+            qualified = _qualified(table)
             self.base_tables[qualified] = None
             if table.alias:
                 self.aliases[table.alias] = qualified
@@ -226,6 +186,8 @@ class _Collector:
                     predicate=predicate,
                 )
             )
+            if on is not None:
+                self._join_keys(on, exp)
         for func in statement.find_all(exp.Func):
             name = func.name if isinstance(func, exp.Anonymous) else func.sql_name()
             if name:
@@ -233,6 +195,36 @@ class _Collector:
             if isinstance(func, exp.AggFunc):
                 self.aggregations[self.sql(func)] = None
         self._resolve_columns(statement, exp)
+
+    def _join_keys(self, on: Any, exp: Any) -> None:
+        """``a.x = b.y`` equalities between columns of base tables (CTE / derived sides and
+        USING joins are skipped: they are not base identifiers or have no written sides)."""
+        for eq in on.find_all(exp.EQ):
+            left, right = eq.this, eq.expression
+            if not isinstance(left, exp.Column) or not isinstance(right, exp.Column):
+                continue
+            refs = [self._base_ref(left), self._base_ref(right)]
+            if refs[0] is not None and refs[1] is not None:
+                self.join_keys.append(SqlJoinKey(left=refs[0], right=refs[1]))
+
+    def _base_ref(self, column: Any) -> SqlColumnRef | None:
+        qualifier = column.table or None
+        if qualifier is None:
+            return SqlColumnRef(column=column.name, table=None, qualifier=None)
+        aliases = {alias.casefold(): table for alias, table in self.aliases.items()}
+        table = aliases.get(qualifier.casefold())
+        if table is None:
+            table = next(
+                (
+                    t
+                    for t in self.base_tables
+                    if t.rsplit(".", 1)[-1].casefold() == qualifier.casefold()
+                ),
+                None,
+            )
+        if table is None:
+            return None  # a CTE / derived-table qualifier
+        return SqlColumnRef(column=column.name, table=table, qualifier=qualifier)
 
     def _clauses(self, select: Any, exp: Any, *, top: bool) -> None:
         if top:
@@ -281,11 +273,11 @@ class _Collector:
                     source = base_sources.get(qualifier)
                     if source is None:
                         continue  # a CTE / derived-table column, not a base identifier
-                    table = source.name
+                    table = _qualified(source)
                 elif column.name.casefold() in aliases and len(base_sources) != 1:
                     continue  # a reference to an output alias (e.g. ORDER BY total)
                 elif len(base_sources) == 1:
-                    table = next(iter(base_sources.values())).name
+                    table = _qualified(next(iter(base_sources.values())))
                 elif not base_sources:
                     continue  # selects only from CTEs / subqueries
                 key = (column.name.casefold(), table.casefold() if table else None)
@@ -311,6 +303,7 @@ class _Collector:
             output_aliases=list(self.output_aliases),
             functions=list(self.functions),
             joins=self.joins,
+            join_keys=self.join_keys,
             filters=self.filters,
             projections=self.projections,
             aggregations=list(self.aggregations),
@@ -318,31 +311,3 @@ class _Collector:
             order_by=self.order_by,
             limits=self.limits,
         )
-
-
-def compare_with_schema(
-    structure: SqlStructure, allowed: Mapping[str, Iterable[str]]
-) -> SchemaComparison | None:
-    """Base identifiers not in the allowed tables/columns (case-insensitive; the last name part
-    of a qualified table is compared). None when the SQL was not parsed."""
-    if not structure.parsed:
-        return None
-    tables = {name.casefold(): {c.casefold() for c in cols} for name, cols in allowed.items()}
-    unknown_tables = [
-        t for t in structure.base_tables if t.rsplit(".", 1)[-1].casefold() not in tables
-    ]
-    unknown_columns: list[str] = []
-    unresolved: list[str] = []
-    for ref in structure.base_columns:
-        if ref.table is None:
-            if not any(ref.column.casefold() in cols for cols in tables.values()):
-                unresolved.append(ref.column)
-            continue
-        columns = tables.get(ref.table.rsplit(".", 1)[-1].casefold())
-        if columns is not None and ref.column.casefold() not in columns:
-            unknown_columns.append(f"{ref.table}.{ref.column}")
-    return SchemaComparison(
-        unknown_tables=unknown_tables,
-        unknown_columns=unknown_columns,
-        unresolved_columns=unresolved,
-    )

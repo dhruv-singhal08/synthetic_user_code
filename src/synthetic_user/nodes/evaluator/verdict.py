@@ -7,7 +7,11 @@ default over the run's selected metrics:
 - a scored metric below its best value with a SUPPORTED finding in that metric -> FAIL;
 - otherwise any sub-perfect, inconclusive or evaluation-error metric -> INCONCLUSIVE;
 - no usable score at all (everything not applicable / missing) -> INCONCLUSIVE, never PASS;
+- an ``unresolved`` finding (the evidence cannot settle it, D232) never supports a FAIL and
+  turns what would be a PASS into INCONCLUSIVE;
 - otherwise PASS.
+
+Artifacts written before the ``unresolved`` flag have none, so their verdicts are unchanged.
 
 not_applicable, cannot_generate, evidence_unavailable and unavailable results are never
 counted as passing evidence. Metrics with ``counts_toward_verdict = false`` (MRR, a run-level
@@ -59,7 +63,11 @@ class CompatibilityVerdictPolicy:
             if (definition := definitions.get(metric_id)) is None
             or definition.counts_toward_verdict
         }
-        supported = {f.category for f in findings if f.evidence_status is EvidenceStatus.SUPPORTED}
+        supported = {
+            f.category
+            for f in findings
+            if f.evidence_status is EvidenceStatus.SUPPORTED and not f.unresolved
+        }
         failing = [
             metric_id
             for metric_id, result in considered.items()
@@ -71,7 +79,8 @@ class CompatibilityVerdictPolicy:
             return Verdict.FAIL
         undecided = any(result.status in _UNDECIDED for result in considered.values())
         scored = any(result.status is MetricStatus.SCORED for result in considered.values())
-        if failing or undecided or not scored:
+        unresolved = any(f.unresolved for f in findings)
+        if failing or undecided or not scored or unresolved:
             return Verdict.INCONCLUSIVE
         return Verdict.PASS
 

@@ -42,6 +42,7 @@ from synthetic_user.nodes.evaluator.judge_common import (
     metric_blocks,
     render_response,
     score_example,
+    severity_rule,
 )
 from synthetic_user.nodes.evaluator.trace_tags import trace_catalog
 from synthetic_user.prompts.contracts import choices, render_contract
@@ -294,6 +295,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
         response=render_response(data.response, artifact_max_chars=data.artifact_max_chars),
         metric_rules=metric_blocks(marked),
         guidance=guidance_block(data.guidance),
+        severity_rule=severity_rule(),
         factual_rule=PROMPTS.text("factual_rule_on" if factual else "factual_rule_off"),
         contract=render_contract(
             judge_example(

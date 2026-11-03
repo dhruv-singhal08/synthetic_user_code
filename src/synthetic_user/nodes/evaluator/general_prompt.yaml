@@ -44,6 +44,7 @@ user: |
     scores, criteria and findings) is ONE short contiguous fragment copied character for
     character from the response, its artifacts or the tool trace - or null. evidence_status:
     supported (the quote shows it), weak or unsupported.
+  ${severity_rule}
   - related_tags: only exact tags from the traceability catalog that the finding directly
     affects; [] when none.
   - matches_known_gap: true only when the problem is listed under the product's

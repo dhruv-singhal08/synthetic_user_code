@@ -208,6 +208,8 @@ class EvaluationResult(StrictModel):
     # Profile of a schema-1 evaluation, kept as a label for legacy reports only.
     legacy_evaluation_profile: NonEmptyStr | None = None
     verdict: Verdict | None
+    # Why: the deciding findings / open points, or why the response was recorded only (D241).
+    verdict_reason: NonEmptyStr | None = None
     verdict_policy: NonEmptyStr | None = None
     evaluation_status: EvaluationStatus
     # Keyed by metric id: every selected metric for an evaluated response; empty otherwise.

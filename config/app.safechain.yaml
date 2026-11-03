@@ -32,6 +32,9 @@ evaluation:
   reference_lookup:          # bounded evidence lookups of the General Judge (SQL + data_catalog)
     enabled: true            # false = one judge call, deterministic reconciliation only
     max_requests: 10         # lookups the judge may request, all in ONE batch (one extra call)
+  # Verdict (D241): FAIL needs a proven finding (supported evidence) at least this severe (low |
+  # medium | high | critical); lower-severity issues pass with their reasons listed.
+  fail_severity: high
 generation:
   scenario:
     scenario_count: 3

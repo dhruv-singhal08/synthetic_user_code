@@ -13,6 +13,7 @@ LLM calls run concurrently: the General Judge (general metrics) and the Retrieva
 Judge (retrieval metrics + chunk labels for MRR). A group without applicable metrics makes no
 call; zero LLM metrics -> zero calls. MRR is computed by code. The final verdict comes from the
 provisional ``VerdictPolicy`` (verdict.py); the judge's own opinion is stored as llm_verdict.
+Verdict: ``verdict.py`` (D241) - decided from the findings' severity, always with a reason.
 Bug candidates: one per failed evaluation, from findings with severity >= medium and supported
 evidence (never an ``unresolved`` finding). LLM calls run under ``llm.max_concurrency``; ids are
 assigned afterwards in order.
@@ -109,7 +110,7 @@ from synthetic_user.nodes.evaluator.trace_tags import (
     link_finding_tags,
     merge_finding_tags,
 )
-from synthetic_user.nodes.evaluator.verdict import DEFAULT_VERDICT_POLICY, VerdictPolicy
+from synthetic_user.nodes.evaluator.verdict import SeverityVerdictPolicy, VerdictPolicy
 from synthetic_user.references.catalog_index import CatalogIndex, LookupSession
 from synthetic_user.sql.parser import SqlglotParser, SqlParser
 from synthetic_user.sql.reconcile import evidence_requests, reconcile
@@ -124,6 +125,9 @@ CONTEXT_RECALL_DISCLOSURE = (
 )
 UNKNOWN_AFTER_JUDGE_ERROR = (
     "Response classification unresolved: the General Judge call failed (see the error note)."
+)
+RECORDED_ONLY_REASON = (
+    "Recorded only: a {outcome} response has no answer or denial to judge, so it gets no verdict."
 )
 UNKNOWN_CLASSIFICATION_NOTE = (
     "Response classification unresolved: the adapter exposes no typed response kind and no "
@@ -165,7 +169,7 @@ class Evaluator:
         metric_config: ResolvedMetricConfig,
         id_generator: SequentialIdGenerator | None = None,
         sql_parser: SqlParser | None = None,
-        verdict_policy: VerdictPolicy = DEFAULT_VERDICT_POLICY,
+        verdict_policy: VerdictPolicy | None = None,
         evaluation_guidance: EvaluationGuidance | None = None,
     ) -> None:
         self._settings = settings
@@ -178,7 +182,7 @@ class Evaluator:
         self._general = GeneralJudge(llm, logger, max_retries=retries)
         self._retrieval = RetrievalJudge(llm, logger, max_retries=retries)
         self._parser: SqlParser = sql_parser or SqlglotParser()
-        self._policy = verdict_policy
+        self._policy = verdict_policy or SeverityVerdictPolicy(settings.evaluation.fail_severity)
         # Built once per catalog version (the reference is fixed for the run); None for
         # document collections and ungrounded runs.
         self._catalog = CatalogIndex.for_reference(
@@ -431,6 +435,9 @@ class Evaluator:
                     ClassificationSource.TYPED_OUTCOME if clarification else None
                 ),
                 verdict=None,
+                verdict_reason=" ".join(
+                    [RECORDED_ONLY_REASON.format(outcome=outcome.value), *notes]
+                ),
                 evaluation_status=EvaluationStatus.RECORDED_ONLY,
                 notes=notes,
             )
@@ -533,13 +540,15 @@ class Evaluator:
             )
             for d in deterministic
         ]
-        verdict = self._policy.decide(metrics, findings, self._definitions)
+        decision = self._policy.decide(metrics, findings, self._definitions)
+        verdict = decision.verdict
         return EvaluationResult(
             **ids,
             response_classification=classification,
             classification_source=source,
             classification_note=classification_note,
             verdict=verdict,
+            verdict_reason=decision.reason,
             verdict_policy=self._policy.name,
             evaluation_status=EvaluationStatus.EVALUATED,
             metrics=metrics,

@@ -255,6 +255,8 @@ def _metric_cells(ev: EvaluationResult, metric_id: str) -> dict[str, str]:
 
 
 def _verdict_reason(ev: EvaluationResult) -> str:
+    if ev.verdict_reason is not None:  # D241: decided with its reason
+        return ev.verdict_reason
     if ev.verdict is None:
         return NO_SQL_REASON if NO_SQL_REASON in ev.notes else ""
     if ev.findings:

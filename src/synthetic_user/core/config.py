@@ -26,6 +26,7 @@ from synthetic_user.core.loaders import read_yaml_mapping
 from synthetic_user.core.trace import MAX_FIELD_CHARS
 from synthetic_user.metrics.catalog import builtin_ids
 from synthetic_user.models.base import AmbiguityLevel
+from synthetic_user.models.evaluation import Severity
 from synthetic_user.models.question import (
     MAX_DELIVERABLES,
     MAX_SUCCESS_CRITERIA,
@@ -169,6 +170,9 @@ class EvaluationSettings(_Section):
     max_custom_metric_rows: int = Field(default=200, ge=1)
     # Optional evaluation guidance (typed or .txt / .md / .yaml), shown to every judge call.
     max_guidance_chars: int = Field(default=20_000, ge=100)
+    # Verdict (D241): FAIL needs a supported finding at least this severe; lower-severity issues
+    # pass with their reasons listed.
+    fail_severity: Severity = Severity.HIGH
 
     @model_validator(mode="after")
     def _known_default_metrics(self) -> Self:

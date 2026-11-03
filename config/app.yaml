@@ -53,6 +53,9 @@ evaluation:
   max_custom_metric_chars: 2000
   max_custom_metric_rows: 200
   max_guidance_chars: 20000  # optional evaluation guidance shown to every judge call
+  # Verdict (D241): FAIL needs a proven finding (supported evidence) at least this severe (low |
+  # medium | high | critical); lower-severity issues pass with their reasons listed.
+  fail_severity: high
 
 trace:
   enabled: true              # runs/<run_id>/run.log: every LLM / product call, prompt + output

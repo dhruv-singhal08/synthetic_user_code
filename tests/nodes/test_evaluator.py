@@ -16,7 +16,15 @@ from synthetic_user.core.exceptions import LLMProviderError
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.metrics.compiler import custom_metric_id
 from synthetic_user.metrics.registry import builtin_metric_config, freeze
-from synthetic_user.models.evaluation import EvaluationResult, MetricStatus, Verdict
+from synthetic_user.models.evaluation import (
+    EvaluationResult,
+    EvidenceStatus,
+    Finding,
+    FindingSource,
+    MetricStatus,
+    Severity,
+    Verdict,
+)
 from synthetic_user.models.execution import ExecutionRecord
 from synthetic_user.models.metrics import (
     CustomMetricInput,
@@ -37,7 +45,7 @@ from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 from synthetic_user.nodes.evaluator.retrieval_judge import reciprocal_rank
-from synthetic_user.nodes.evaluator.verdict import CompatibilityVerdictPolicy
+from synthetic_user.nodes.evaluator.verdict import SeverityVerdictPolicy
 from tests_support import scripted_retrieval_reply
 
 CRITERIA = ["names the employees ranked by total card spend", "covers the requested time period"]
@@ -237,7 +245,9 @@ async def test_correct_sql_passes_all_selected_metrics_in_one_general_call(
     )
     assert len(llm.calls) == 1 and "General Judge" in llm.calls[0].system
     assert statuses(result) == dict.fromkeys(SQL_METRICS, 1.0)
-    assert result.verdict is Verdict.PASS and result.verdict_policy.endswith("(provisional)")
+    assert result.verdict is Verdict.PASS and result.verdict_policy == "severity-v1 (fail at high+)"
+    assert result.verdict_reason == "Passed: every scored metric met its expectations"
+    assert "choose the lower level when" in llm.calls[0].user  # severity defined for the judge
     assert (result.response_classification, result.classification_source) == (
         "answered",
         "general_judge",
@@ -1013,17 +1023,84 @@ async def test_uncompiled_custom_metric_is_unavailable_but_others_run(
 # --- verdict policy and serialization ------------------------------------------------------------
 
 
-def test_verdict_policy_never_passes_without_a_usable_score() -> None:
+def _metric(score: float | None, status: MetricStatus = MetricStatus.SCORED) -> Any:
     from synthetic_user.models.evaluation import MetricResult
 
-    policy = CompatibilityVerdictPolicy()
-    na = MetricResult(status=MetricStatus.NOT_APPLICABLE, rationale="n/a")
-    missing = MetricResult(status=MetricStatus.EVIDENCE_UNAVAILABLE, rationale="no context")
-    ok = MetricResult(status=MetricStatus.SCORED, score=1.0, rationale="ok")
-    assert policy.decide({"a": na, "b": missing}, [], {}) is Verdict.INCONCLUSIVE
-    assert policy.decide({"a": na, "b": ok}, [], {}) is Verdict.PASS
-    partial = MetricResult(status=MetricStatus.SCORED, score=0.5, rationale="partly")
-    assert policy.decide({"a": partial}, [], {}) is Verdict.INCONCLUSIVE  # no supported finding
+    return MetricResult(status=status, score=score, rationale="judged")
+
+
+def _finding(
+    category: str,
+    severity: str,
+    evidence_status: str = "supported",
+    *,
+    unresolved: bool = False,
+) -> Finding:
+    return Finding(
+        finding_id="F_001",
+        category=category,
+        description=f"{severity} problem",
+        expected_behavior="e",
+        observed_behavior="o",
+        severity=Severity(severity),
+        evidence_status=EvidenceStatus(evidence_status),
+        source=FindingSource.LLM,
+        unresolved=unresolved,
+    )
+
+
+def test_verdict_policy_never_passes_without_a_usable_score() -> None:
+    policy = SeverityVerdictPolicy()
+    na = _metric(None, MetricStatus.NOT_APPLICABLE)
+    missing = _metric(None, MetricStatus.EVIDENCE_UNAVAILABLE)
+    decision = policy.decide({"a": na, "b": missing}, [], {})
+    assert decision.verdict is Verdict.INCONCLUSIVE and "could be scored" in decision.reason
+    assert policy.decide({"a": na, "b": _metric(1.0)}, [], {}).verdict is Verdict.PASS
+
+
+@pytest.mark.parametrize(
+    ("score", "finding", "verdict", "reason"),
+    [
+        # Only a proven problem at or above the fail line fails the response.
+        (0.5, ("a", "high"), Verdict.FAIL, "Failed: [high] a: high problem"),
+        (0.0, ("a", "critical"), Verdict.FAIL, "Failed: [critical] a: critical problem"),
+        # Not too strict: a limited problem passes, with its reason listed.
+        (0.5, ("a", "medium"), Verdict.PASS, "Passed with minor issues: [medium] a: medium"),
+        (0.5, ("a", "low"), Verdict.PASS, "Passed with minor issues: [low] a: low problem"),
+        (0.5, None, Verdict.PASS, "Passed with minor issues: a scored 0.5"),
+        # A serious problem that is not proven, or a 0 without a serious finding: a person looks.
+        (0.5, ("a", "high", "weak"), Verdict.INCONCLUSIVE, "not proven (weak evidence)"),
+        (0.0, ("a", "medium"), Verdict.INCONCLUSIVE, "a scored 0 but no finding explains"),
+        # A finding on a metric scored 1 never fails it (the judgement disagrees with itself).
+        (1.0, ("a", "high"), Verdict.PASS, "Passed with minor issues: [high] a: high problem"),
+    ],
+)
+def test_verdict_follows_finding_severity_with_a_reason(
+    score: float, finding: tuple[str, ...] | None, verdict: Verdict, reason: str
+) -> None:
+    findings = [_finding(*finding)] if finding else []
+    decision = SeverityVerdictPolicy().decide({"a": _metric(score)}, findings, {})
+    assert decision.verdict is verdict
+    assert reason in decision.reason
+
+
+def test_unresolved_and_undecided_metrics_are_inconclusive_never_fail() -> None:
+    policy = SeverityVerdictPolicy()
+    unresolved = _finding("a", "critical", unresolved=True)
+    decision = policy.decide({"a": _metric(0.5)}, [unresolved], {})
+    assert decision.verdict is Verdict.INCONCLUSIVE and "unresolved - [critical]" in decision.reason
+    error = _metric(None, MetricStatus.EVALUATION_ERROR)
+    decision = policy.decide({"a": _metric(1.0), "b": error}, [], {})
+    assert decision.verdict is Verdict.INCONCLUSIVE and "b evaluation_error" in decision.reason
+
+
+def test_fail_line_is_configurable() -> None:
+    medium = [_finding("a", "medium")]
+    strict = SeverityVerdictPolicy(Severity.MEDIUM).decide({"a": _metric(0.5)}, medium, {})
+    assert strict.verdict is Verdict.FAIL
+    lenient = SeverityVerdictPolicy(Severity.CRITICAL)
+    assert lenient.decide({"a": _metric(0.5)}, [_finding("a", "high")], {}).verdict is Verdict.PASS
+    assert lenient.name == "severity-v1 (fail at critical+)"
 
 
 async def test_statuses_and_reasons_survive_serialization(

@@ -33,6 +33,7 @@ user: |
   - Every metric scored 0 or 0.5 needs a finding with that metric as category. evidence is ONE
     short contiguous fragment copied character for character from the answer or from one chunk,
     or null; evidence_ids lists the chunk ids (or tool call numbers "tool-<n>") relied on.
+  ${severity_rule}
   - Use only chunk ids shown above. Do not judge whether the sources themselves are true.
 
   ## OUTPUT CONTRACT

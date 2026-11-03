@@ -24,6 +24,7 @@ from synthetic_user.nodes.evaluator.judge_common import (
     metric_blocks,
     render_response,
     score_example,
+    severity_rule,
 )
 from synthetic_user.prompts.contracts import choices, render_contract
 from synthetic_user.prompts.templates import prompts_beside
@@ -149,6 +150,7 @@ def build_retrieval_prompt(data: RetrievalJudgeInput) -> tuple[str, str]:
         chunks=json.dumps(chunks, indent=2),
         metric_rules=metric_blocks(definitions),
         guidance=guidance_block(data.guidance),
+        severity_rule=severity_rule(),
         rules="".join(f"{rule}\n" for rule in rules),
         contract=render_contract(retrieval_example(data)),
     )

@@ -34,6 +34,17 @@ evaluation_guidance: |
     tool results, retrieved context), the prohibited actions or safety constraints. Where it
     conflicts with them, follow them and say so in the rationale.
 
+# Finding severity (D241): the verdict is decided from it (see verdict.py), so it is defined here
+# for both judges. The judge is not told where the fail line is.
+severity_rule: |-
+  - severity of each finding, by its effect on THIS user's goal (choose the lower level when
+    unsure between two):
+    critical = the response fails the goal: the main result is wrong, misleading or missing,
+    or facts are fabricated; high = a requested part is missing or wrong, or an error changes
+    part of the result, while the rest is usable; medium = a real but limited problem that
+    does not change the requested result (e.g. an unrequested extra column, a weak
+    explanation, a less suitable but valid approach); low = cosmetic, style or wording.
+
 metric_block: |-
   - ${metric_id} (${display_name}): ${rubric}
     Score anchors: 1 = ${anchor_1}; 0.5 = ${anchor_half}; 0 = ${anchor_0}.

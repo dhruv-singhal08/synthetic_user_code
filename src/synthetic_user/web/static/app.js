@@ -900,7 +900,7 @@ function renderSummary() {
   const accuracy = tile("Accuracy", el("div", { class: "tile-row" }, ring,
     el("div", {}, el("div", { class: "tile-value small", text: k ? `${c.pass} passed` : "—" }),
       el("div", { class: "tile-sub", text: k ? `${c.pass} of ${judged} evaluated answers` : "available after evaluation" }))),
-  el("div", { class: "tile-sub", text: `Provisional verdict policy: passes only when every scored selected metric is perfect${k && k.verdict_policy ? ` (${k.verdict_policy})` : ""}` }));
+  el("div", { class: "tile-sub", text: `Verdict: fails only on a proven serious problem; minor issues pass with their reason${k && k.verdict_policy ? ` (${k.verdict_policy})` : ""}` }));
 
   const stack = el("div", { class: "stack" }, ...[["pass", c.pass], ["fail", c.fail], ["inconclusive", c.inconclusive], ["recorded", c.recorded]]
     .filter(([, n]) => n && total).map(([cls, n]) => el("div", { class: `c-${cls}`, style: `width:${(n / total) * 100}%`, title: `${cls}: ${n}` })));
@@ -1244,7 +1244,8 @@ function evaluationSections(ev) {
       (m.what_didnt || []).length ? el("ul", { class: "didnt" }, m.what_didnt.map((x) => el("li", { text: x }))) : null,
       details.length ? list(details) : null));
   }
-  return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")], minis,
+  return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")],
+    ev.verdict_reason ? el("p", { class: "verdict-reason", text: ev.verdict_reason }) : null, minis,
     el("h4", { text: "Why these scores" }), why,
     kvList([["Product outcome", human(ev.product_outcome)], ["Response kind", ev.response_classification ? `${human(ev.response_classification)} (${human(ev.classification_source)})` : ""],
       ["Judge's own opinion", ev.llm_verdict ? verdictPill(ev.llm_verdict) : ""], ["Verdict policy", ev.verdict_policy], ["Notes", ev.notes]]))];

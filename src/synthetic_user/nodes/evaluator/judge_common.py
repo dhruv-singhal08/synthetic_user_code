@@ -71,6 +71,11 @@ def guidance_block(guidance: str | None) -> str:
     return PROMPTS.text("evaluation_guidance", guidance=guidance) if guidance else ""
 
 
+def severity_rule() -> str:
+    """The finding-severity definitions shared by both judges (D241)."""
+    return PROMPTS.text("severity_rule")
+
+
 def metric_blocks(definitions: Iterable[MetricDefinition]) -> str:
     return "\n".join(
         PROMPTS.text(

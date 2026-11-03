@@ -600,3 +600,12 @@
   a clear message.
 - NOT verified: UI in a real browser (JS syntax-checked only); live LLM run. Old runs are not
   migrated (user decision).
+
+## Severity-based verdict with a reason (2026-11-03) - user request
+
+- Files: nodes/evaluator/{verdict.py (SeverityVerdictPolicy, VerdictDecision), evaluator.py,
+  judge_common.py, judge_common_prompt.yaml (severity_rule), general_prompt.{py,yaml},
+  retrieval_prompt.{py,yaml}, kpis.py}, models/evaluation.py (verdict_reason), core/config.py +
+  config/app.yaml + app.safechain.yaml (evaluation.fail_severity), web/{results_csv.py,
+  static/app.js}, README, tests; DECISIONS D241.
+- NOT verified: UI in a real browser (JS syntax-checked only).

@@ -521,7 +521,7 @@ def kpis_csv(kpis: RunKpis) -> str:
         kpis.accuracy,
         kpis.judged,
         note="pass verdicts / evaluated responses (answers + substantive denials); "
-        f"verdict policy {kpis.verdict_policy or 'n/a'} (provisional). task_success_rate in "
+        f"verdict policy {kpis.verdict_policy or 'n/a'}. task_success_rate in "
         "kpis.json is the same value, kept for older readers",
     )
     for m in kpis.metrics:

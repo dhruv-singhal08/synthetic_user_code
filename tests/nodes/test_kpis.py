@@ -194,7 +194,7 @@ def test_kpis_from_evaluations(sample_scenarios: list[Scenario]) -> None:
         "0.5",
         "2",
         "0 not applicable, 0 cannot generate, 0 evidence unavailable, 1 inconclusive, "
-        "0 evaluation error",
+        "0 evaluation error, 0 unavailable",
     ]
     assert table["Accuracy"][1:3] == ["0.333", "3"]
     assert table["Availability"][1] == "0.8"
@@ -496,7 +496,8 @@ def test_compiler_failures_reported_and_custom_findings_consolidated() -> None:
     assert (
         by["custom_01"].display_name == "Workflow adherence" and by["custom_01"].origin == "custom"
     )
-    assert by["custom_02"].evaluation_error == 1 and by["custom_02"].notes
+    assert (by["custom_02"].unavailable, by["custom_02"].evaluation_error) == (1, 0)
+    assert by["custom_02"].notes
     # findings of a custom metric consolidate without a fixed fallback map (no KeyError)
     summary = consolidate_findings(evaluations, [], config)
     (issue,) = summary.issues

@@ -285,6 +285,44 @@ def create_app(
         state = workspace.state(check_run_id(run_id))
         return {"state": state.model_dump(mode="json"), **workspace.results(run_id)}
 
+    @app.post("/api/runs/{run_id}/evaluation")
+    async def save_evaluation(
+        run_id: str,
+        custom_metrics: Annotated[UploadFile | None, File()] = None,
+        selected_metrics: Annotated[list[str] | None, Form()] = None,
+        custom_metrics_text: Annotated[str, Form()] = "",
+        remove_custom_metrics: Annotated[bool, Form()] = False,
+        question_complexity: Annotated[ComplexityPreference | None, Form()] = None,
+        scenario_count: Annotated[int | None, Form()] = None,
+        questions_per_scenario: Annotated[int | None, Form()] = None,
+        lock: Annotated[bool, Form()] = True,
+    ) -> dict[str, Any]:
+        """Save the run's Evaluation tab (and lock it: scenarios need a locked evaluation)."""
+        state = workspace.state(check_run_id(run_id))
+        workbook = (
+            Upload(custom_metrics.filename or CUSTOM_METRICS, await custom_metrics.read())
+            if custom_metrics
+            else None
+        )
+        state = workspace.update_evaluation(
+            state,
+            selected_metrics=selected_metrics,
+            custom_metrics_text=custom_metrics_text,
+            workbook=workbook,
+            remove_workbook=remove_custom_metrics,
+            scenario_count=scenario_count,
+            question_count=questions_per_scenario,
+            question_complexity=question_complexity,
+            lock=lock,
+        )
+        return {"state": state.model_dump(mode="json"), **workspace.results(run_id)}
+
+    @app.delete("/api/runs/{run_id}/evaluation/lock")
+    async def unlock_evaluation(run_id: str) -> dict[str, Any]:
+        """Edit the evaluation again (only until scenarios froze the metric configuration)."""
+        state = workspace.unlock_evaluation(workspace.state(check_run_id(run_id)))
+        return {"state": state.model_dump(mode="json"), **workspace.results(run_id)}
+
     @app.post("/api/runs/{run_id}/connection")
     async def connect_product(
         run_id: str,
@@ -334,6 +372,10 @@ def create_app(
         needed = _PREREQUISITE.get(step)
         if needed is not None and needed not in state.steps_done:
             raise ConfigError(f"Run the '{needed.value}' step before '{step.value}'")
+        if step is Step.SCENARIOS and not state.evaluation_locked:
+            raise ConfigError(
+                "Lock the evaluation in the Evaluation tab before generating scenarios"
+            )
         # The user's run selections win; server defaults apply when the run left them out.
         count = (
             state.scenario_count

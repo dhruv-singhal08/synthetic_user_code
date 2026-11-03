@@ -738,7 +738,7 @@ def _print_kpis(kpis: RunKpis) -> None:
             f"kpi {m.metric} mean={fmt(m.mean)} pass_rate={fmt(m.pass_rate)} n={m.n} "
             f"not_applicable={m.not_applicable} cannot_generate={m.cannot_generate} "
             f"evidence_unavailable={m.evidence_unavailable} inconclusive={m.inconclusive} "
-            f"evaluation_error={m.evaluation_error}"
+            f"evaluation_error={m.evaluation_error} unavailable={m.unavailable}"
         )
     if kpis.mrr is not None:
         typer.echo(

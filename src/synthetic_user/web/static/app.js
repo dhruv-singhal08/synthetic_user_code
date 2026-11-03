@@ -16,7 +16,7 @@ const SOURCE_LABELS = { persona: "Persona", product: "Product description", refe
 
 const state = {
   config: null, samples: {}, personaSource: "sample", useReference: false, instructionsSource: "none", uploads: {},
-  questionComplexity: "", selectedMetrics: new Set(), contextSource: "response_field",
+  questionComplexity: "", selectedMetrics: new Set(), contextSource: "response_field", removeSavedWorkbook: false,
   runId: null, run: null, rows: [], scenarios: [], packs: [], evaluations: [], executions: [], kpis: null, issues: null,
   questions: [], metricConfig: null, metricIds: [],
   filter: "all", filterIds: null, filterLabel: "", search: "", allColumns: false, breakdownBy: "by_task_type", busy: false,
@@ -194,7 +194,7 @@ function renderInput(kind) {
     renderComplexityOptions();
   }
   if (kind === "reference") $("#reference-clear").classList.toggle("hidden", !(state.uploads.reference && sample("reference")));
-  if (kind === "custom_metrics") $("#custom-clear").classList.toggle("hidden", !state.uploads.custom_metrics);
+  if (kind === "custom_metrics" && !input && savedWorkbook()) source.replaceChildren(icon("check"), `Saved with the run: ${savedWorkbook()}`);
   if (kind === "persona") renderComplexityOptions();
   renderEvaluation();
   updateUi();
@@ -278,8 +278,66 @@ function renderComplexityOptions() {
 
 // --- evaluation (run-level metric selection) --------------------------------------------------
 function catalog() { return (state.config && state.config.metric_catalog) || []; }
-function customGiven() { return Boolean($("#custom-metrics-text").value.trim() || state.uploads.custom_metrics); }
-function frozenSelection() { return state.run && state.run.metric_selection; }
+// The run's saved custom-metric workbook (kept by the server unless the user removes it).
+function savedWorkbook() {
+  const source = state.run && state.run.sources && state.run.sources.custom_metrics;
+  return source && source.startsWith("uploaded: ") && !state.removeSavedWorkbook ? fileName(source) : null;
+}
+function customGiven() { return Boolean($("#custom-metrics-text").value.trim() || state.uploads.custom_metrics || savedWorkbook()); }
+function evaluationLocked() { return Boolean(state.run && state.run.evaluation_locked); }
+// The selection the run uses: only once locked (a draft is edited in the controls).
+function frozenSelection() { return evaluationLocked() ? state.run.metric_selection : null; }
+
+// Fill the Evaluation controls from the run's saved draft / locked selection.
+function loadEvaluationDraft() {
+  if (!state.run) return;
+  const sel = state.run.metric_selection;
+  if (sel) {
+    state.selectedMetrics = new Set(sel.selected_metrics);
+    $("#custom-metrics-text").value = sel.custom_inputs.filter((c) => c.provenance.startsWith("free text item")).map((c) => c.text).join("\n\n");
+  }
+  $("#scenario-count").value = state.run.scenario_count || (state.config && state.config.scenario_count) || "";
+  $("#question-count").value = state.run.question_count || (state.config && state.config.question_count) || "";
+  state.questionComplexity = state.run.question_complexity || "";
+  state.removeSavedWorkbook = false;
+  delete state.uploads.custom_metrics;
+  renderComplexityOptions();
+  renderInput("custom_metrics");
+}
+
+function evaluationForm(lock) {
+  const form = new FormData();
+  for (const m of catalog().map((x) => x.id).filter((id) => state.selectedMetrics.has(id))) form.append("selected_metrics", m);
+  form.append("custom_metrics_text", $("#custom-metrics-text").value);
+  if (state.uploads.custom_metrics) form.append("custom_metrics", state.uploads.custom_metrics.file);
+  else if (state.removeSavedWorkbook) form.append("remove_custom_metrics", "true");
+  if (state.questionComplexity) form.append("question_complexity", state.questionComplexity);
+  if ($("#scenario-count").value) form.append("scenario_count", $("#scenario-count").value);
+  if ($("#question-count").value) form.append("questions_per_scenario", $("#question-count").value);
+  if (lock !== undefined) form.append("lock", lock ? "true" : "false");
+  return form;
+}
+
+async function lockEvaluation() {
+  await withBusy("Locking evaluation", async () => {
+    const body = await api(`/api/runs/${encodeURIComponent(state.runId)}/evaluation`, { method: "POST", body: evaluationForm(true) });
+    applyRun(body);
+    loadEvaluationDraft();
+    const sel = state.run.metric_selection;
+    log(`Evaluation locked (${plural(sel.selected_metrics.length, "metric")}${sel.custom_inputs.length ? ` + ${sel.custom_inputs.length} custom` : ""})`);
+    toast("Evaluation locked");
+    showView("connect");
+  });
+}
+
+async function unlockEvaluation() {
+  await withBusy("Unlocking evaluation", async () => {
+    const body = await api(`/api/runs/${encodeURIComponent(state.runId)}/evaluation/lock`, { method: "DELETE" });
+    applyRun(body);
+    loadEvaluationDraft();
+    log("Evaluation unlocked for editing");
+  });
+}
 // Metrics whose evidence is retrieved context: the connection page then asks for its source.
 function needsContext() {
   if (state.metricConfig) return state.metricConfig.definitions.some((d) => (d.required_execution_evidence || []).some((k) => ["retrieved_context", "ranked_context", "citations", "grounding_evidence"].includes(k)));
@@ -310,15 +368,28 @@ function renderEvaluation() {
   pillNode.className = `pill ${count || customGiven() ? "pill-ok" : "pill-req"}`;
   pillNode.textContent = frozen ? `${plural(count, "metric")} (frozen)` : `${plural(chosen.size, "built-in metric")}${customGiven() ? " + custom" : ""}`;
   for (const id of ["custom-metrics-text", "scenario-count", "question-count", "question-complexity"]) $(`#${id}`).disabled = Boolean(frozen) || state.busy;
+  for (const zone of $$("[data-drop]", panel("custom_metrics"))) zone.classList.toggle("hidden", Boolean(frozen));
+  $("#custom-clear").classList.toggle("hidden", Boolean(frozen) || !(state.uploads.custom_metrics || savedWorkbook()));
+  const scenariosDone = done().has("scenarios");
+  $("#lock-evaluation").classList.toggle("hidden", Boolean(frozen));
+  $("#lock-evaluation").disabled = !state.runId || state.busy || !(state.selectedMetrics.size > 0 || customGiven());
+  $("#unlock-evaluation").classList.toggle("hidden", !frozen || scenariosDone || !state.run.metric_selection);
+  $("#unlock-evaluation").disabled = state.busy;
+  $("#lock-hint").textContent = !state.runId ? "Start the run in Test setup first; your choices here are kept as its draft."
+    : frozen ? (scenariosDone ? "Locked: scenarios were generated with this evaluation." : "Locked. Edit it again any time before the scenarios are generated.")
+      : state.selectedMetrics.size > 0 || customGiven() ? "Lock the evaluation to continue to the product connection."
+        : "Select at least one metric (or add a custom metric).";
   let node;
   if (frozen) {
     const unavailable = state.metricConfig ? state.metricConfig.definitions.filter((d) => d.availability === "unavailable") : [];
     node = callout("info", `Run ${state.run.run_id} uses this selection.`,
-      el("div", {}, "The selection is part of the run and frozen at the scenarios step. Start a new run to change it.",
+      el("div", {}, scenariosDone ? "The selection is part of the run and frozen in its metric configuration. Start a new run to change it." : "The evaluation is locked. Use Edit evaluation to change it before the scenarios are generated.",
         frozen.custom_inputs.length ? list(frozen.custom_inputs.map((c) => `${c.provenance}: ${c.text}`)) : null,
         unavailable.length ? el("div", { class: "hint-warn", text: `Not compiled: ${unavailable.map((d) => `${d.metric_id} (${d.unavailable_reason})`).join("; ")}` }) : null));
   } else if (state.run && state.run.legacy_evaluation_profile) {
     node = callout("warn", "Legacy run.", `This run was created with the ${state.run.legacy_evaluation_profile.toUpperCase()} evaluation profile; its results stay readable. Start a new run to use metric selection.`);
+  } else if (state.run) {
+    node = callout("warn", `Run ${state.run.run_id}: evaluation draft.`, "Review the metrics, custom metrics and generation settings, then lock the evaluation. Scenarios can be generated only after it is locked.");
   } else {
     node = callout("info", "Applies to the whole run.", "Each selected metric gets one result per question: a score, or a status with its reason (not applicable, cannot generate, evidence unavailable, inconclusive, evaluation error). Retrieval metrics need a context source in Product connection.");
   }
@@ -373,12 +444,13 @@ async function createRun() {
   await withBusy("Starting run", async () => {
     const body = await api("/api/runs", { method: "POST", body: form });
     state.runId = body.state.run_id;
-    history.replaceState(null, "", `${location.pathname}?run=${encodeURIComponent(state.runId)}#connect`);
+    history.replaceState(null, "", `${location.pathname}?run=${encodeURIComponent(state.runId)}#evaluation`);
     for (const node of $$(".step")) { node.classList.remove("done", "error", "running"); $(".step-result", node).textContent = ""; }
     applyRun(body);
     log(`Run ${state.runId} started (${plural(state.run.metric_selection.selected_metrics.length, "metric")}${state.run.metric_selection.custom_inputs.length ? ` + ${state.run.metric_selection.custom_inputs.length} custom` : ""}, ${state.useReference ? "grounded" : "ungrounded"})`);
-    toast(`Run ${state.runId} started`);
-    showView("connect");
+    loadEvaluationDraft();
+    toast(`Run ${state.runId} started: review and lock the evaluation`);
+    showView("evaluation");
     loadRecent();
   });
 }
@@ -502,7 +574,7 @@ function updateUi() {
   const d = done();
   STEPS.forEach((step, i) => {
     const node = $(`.step[data-step="${step}"]`);
-    const ready = Boolean(state.runId) && (i === 0 || d.has(STEPS[i - 1]));
+    const ready = Boolean(state.runId) && (i === 0 ? evaluationLocked() : d.has(STEPS[i - 1]));
     const btn = $(".step-btn", node);
     btn.disabled = !ready || state.busy;
     btn.textContent = d.has(step) ? "Re-run" : "Run";
@@ -519,7 +591,7 @@ function updateUi() {
   const completed = STEPS.filter((s) => d.has(s)).length;
   $("#progress-bar").style.width = `${(completed / STEPS.length) * 100}%`;
   $("#progress-label").textContent = `${completed} of ${STEPS.length} steps`;
-  $("#run-all").disabled = !state.runId || state.busy || completed === STEPS.length;
+  $("#run-all").disabled = !state.runId || state.busy || completed === STEPS.length || !evaluationLocked();
   $("#connect").disabled = !canConnect();
   $("#disconnect").disabled = !state.runId || state.busy || !(state.run && (state.run.connection || state.run.contract));
   updateReadiness();
@@ -576,12 +648,12 @@ function updateUi() {
   const metricCount = sel ? sel.selected_metrics.length + sel.custom_inputs.length : state.selectedMetrics.size;
   const navStatus = {
     setup: state.runId ? "Run created" : readiness().ok ? "Ready to start" : "Persona, product, reference",
-    evaluation: `${plural(metricCount, "metric")}${!sel && customGiven() ? " + custom" : ""}`,
+    evaluation: `${plural(metricCount, "metric")}${!sel && customGiven() ? " + custom" : ""}${state.run ? (sel ? " · locked" : " · draft") : ""}`,
     connect: connection ? "Connected" : mock ? "Mock product" : "Not connected",
     run: `${completed} of ${STEPS.length} steps`,
     report: k ? `Accuracy ${pct(k.accuracy)}` : "Not available yet",
   };
-  const navDone = { setup: Boolean(state.runId), evaluation: Boolean(state.run), connect: Boolean(connection || mock), run: completed === STEPS.length, report: Boolean(k) };
+  const navDone = { setup: Boolean(state.runId), evaluation: evaluationLocked(), connect: Boolean(connection || mock), run: completed === STEPS.length, report: Boolean(k) };
   for (const node of $$("[data-nav]")) {
     $("[data-nav-status]", node).textContent = navStatus[node.dataset.nav];
     node.classList.toggle("done", navDone[node.dataset.nav]);
@@ -594,6 +666,7 @@ function renderRunCallout(connection, mock, d) {
   const go = (view, text) => el("a", { class: "btn btn-sm", href: `#${view}`, text });
   let node;
   if (!state.runId) node = callout("info", "No run yet.", "Complete the test setup and start a run first.", go("setup", "Go to test setup"));
+  else if (!evaluationLocked()) node = callout("warn", "Evaluation not locked.", "Review the metrics and generation settings, then lock the evaluation before generating scenarios.", go("evaluation", "Go to evaluation"));
   else if (connection) node = callout("info", "Connected.", `Questions go to ${connection.product_url}.`);
   else if (mock) node = callout("warn", "Mock product (demo).", "Answers come from an AI stand-in, not from the real product.", go("connect", "Change"));
   else if (!d.has("execute")) node = callout("warn", "No product connected.", `Questions will go to the configured "${adapterName()}" adapter (test data), not to your product.`, go("connect", "Connect product"));
@@ -798,7 +871,7 @@ function renderMetrics() {
     const m = k && k.metrics.find((x) => x.metric === name);
     const head = el("div", { class: "metric-name", text: info.label });
     const desc = el("div", { class: "metric-desc", text: info.help });
-    const statusCounts = m ? [["not applicable", m.not_applicable], ["cannot generate", m.cannot_generate], ["evidence unavailable", m.evidence_unavailable], ["inconclusive", m.inconclusive], ["error", m.evaluation_error]]
+    const statusCounts = m ? [["not applicable", m.not_applicable], ["cannot generate", m.cannot_generate], ["evidence unavailable", m.evidence_unavailable], ["inconclusive", m.inconclusive], ["error", m.evaluation_error], ["unavailable", m.unavailable || 0]]
       .filter(([, n]) => n).map(([label, n]) => `${n} ${label}`).join(" · ") : "";
     const notes = m && m.notes.length ? el("div", { class: "metric-desc", text: m.notes.join(" · ") }) : null;
     const mrr = name === "mrr" && k && k.mrr ? el("div", { class: "metric-desc", text: `Run MRR over ${plural(k.mrr.denominator, "question")}; ${k.mrr.excluded_missing_rank} excluded for missing rank, ${k.mrr.excluded_other} other exclusions` }) : null;
@@ -1217,7 +1290,12 @@ async function boot() {
   $("#use-reference").addEventListener("change", (e) => setUseReference(e.target.checked));
   $("#product-clear").addEventListener("click", () => clearUpload("product"));
   $("#reference-clear").addEventListener("click", () => clearUpload("reference"));
-  $("#custom-clear").addEventListener("click", () => clearUpload("custom_metrics"));
+  $("#custom-clear").addEventListener("click", () => {
+    if (!state.uploads.custom_metrics) state.removeSavedWorkbook = true;
+    clearUpload("custom_metrics");
+  });
+  $("#lock-evaluation").addEventListener("click", lockEvaluation);
+  $("#unlock-evaluation").addEventListener("click", unlockEvaluation);
   $("#custom-metrics-text").addEventListener("input", () => { renderEvaluation(); updateUi(); });
   for (const b of $$("#context-source button")) b.addEventListener("click", () => setContextSource(b.dataset.source));
   setContextSource("response_field");
@@ -1261,8 +1339,7 @@ async function boot() {
     try {
       applyRun(await api(`/api/runs/${encodeURIComponent(fromUrl)}`));
       $("#persona-queries").value = state.run.persona_queries.join(String.fromCharCode(10));
-      state.questionComplexity = state.run.question_complexity || "";
-      renderComplexityOptions();
+      loadEvaluationDraft();
       log(`Reopened run ${fromUrl}`);
       if (!VIEWS.includes(initial)) initial = done().has("evaluate") ? "report" : "run";
     } catch (err) {

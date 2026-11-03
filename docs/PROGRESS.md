@@ -446,3 +446,29 @@
   - Real context APIs / citation-exposing products: only stub transports were used.
 - Open questions for the user: see the end-of-phase report (verdict treatment of MRR,
   grounded runs now always building a cheat sheet, the `cg_id` workaround as config).
+
+## Live Gemini check + Evaluation lock button (2026-11-03) - user request
+
+- Live Gemini (`config/app.gemini.yaml`, model from `.env`), full pipeline with Gemini also
+  playing the product (the UI's mock-contract path, `MockLLMAdapter`), driven by a scratch
+  script (not committed):
+  - `pytest -m live -k gemini`: 1 passed.
+  - NL2SQL, grounded (card spend catalog), 4 scenarios x 1 question, 6 built-in + 2 custom
+    metrics (RUN_20261103_025221_a30c): compiler called once; the vague custom metric "Be
+    good." was marked unavailable with the reason; 3 answered + 1 typed denial; the judges
+    found the real defects (summing amounts across currencies; joining `merchants`, which the
+    catalog says has no relationship); faithfulness was evidence_unavailable (no context
+    exposed); SQL metrics were not_applicable on the denial.
+  - Policy chatbot, grounded (travel policy documents), 3 x 1, retrieval metrics, mock product
+    wrapped to expose the 4 documents as ranked chunks (RUN_20261103_025425_e667): Retrieval
+    Judge ran; MRR computed by code (ranks 1 and 3 -> 0.667); context_precision 0.5 is right
+    for a stand-in that always returns every document; citation_correctness
+    evidence_unavailable (no citations exposed); retrieval metrics not_applicable on the denial.
+- Fixed: D226 (`unavailable` KPI count). Added: D225 (Evaluation lock button).
+- Found, NOT fixed (needs a decision): a custom metric's free-text `applicability_policy`
+  reaches neither the applicability planner nor the judge, so "The answer must state the time
+  period" scored 0 on a correct denial and made it FAIL.
+- Commands + results: ruff OK, format OK, mypy (97 files) OK, `pytest -q -W error`
+  678 passed.
+- NOT verified: the lock flow in a real browser (API covered by tests; script parses and
+  every element id exists); SafeChain.

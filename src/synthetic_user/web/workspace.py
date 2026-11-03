@@ -119,6 +119,9 @@ class UiRunState(StrictModel):
     # Run-level metric selection from the Evaluation tab (frozen at the scenarios step).
     # None only for runs created before metric selection existed.
     metric_selection: MetricSelection | None = None
+    # The Evaluation tab (metrics, custom metrics, counts, complexity) is a draft until the user
+    # locks it; scenarios need it locked. Runs saved before this field were locked at creation.
+    evaluation_locked: bool = True
     scenario_count: int | None = Field(default=None, ge=1)
     question_count: int | None = Field(default=None, ge=1)
     # Profile-era runs: kept as labels only, never used for routing.
@@ -369,11 +372,7 @@ class Workspace:
         selection = self._metric_selection(
             selected_metrics, custom_metrics_text, uploads.get(CUSTOM_METRICS)
         )
-        for label, value in (("scenario count", scenario_count), ("questions", question_count)):
-            if value is not None and not 1 <= value <= self._settings.web.max_step_count:
-                raise InputAssetError(
-                    f"{label} must be between 1 and {self._settings.web.max_step_count}"
-                )
+        self._check_counts(scenario_count, question_count)
         texts: dict[str, str] = {}
         sources: dict[str, str] = {}
         for kind in YAML_KINDS:
@@ -439,12 +438,7 @@ class Workspace:
             name = Path(upload.filename).name
             self._store.write_text(self._input(run_id, f"{kind}/{name}"), _decode(upload))
         if workbook is not None:
-            # Kept byte for byte: the workbook is the provenance of the custom metrics.
-            path = self._store.path_for(
-                self._input(run_id, f"{CUSTOM_METRICS}/{Path(workbook.filename).name}")
-            )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(workbook.content)
+            self._save_workbook(run_id, workbook)
         self._store.write_with(
             self._input(run_id, "persona_queries.json"), queries, TypeAdapter(list[str])
         )
@@ -455,11 +449,90 @@ class Workspace:
             persona_queries=queries,
             question_complexity=question_complexity,
             metric_selection=selection,
+            evaluation_locked=False,
             scenario_count=scenario_count,
             question_count=question_count,
         )
         self.save_state(state)
         return state
+
+    # --- evaluation (draft until locked) ---------------------------------------------------
+
+    def update_evaluation(
+        self,
+        state: UiRunState,
+        *,
+        selected_metrics: list[str] | None,
+        custom_metrics_text: str,
+        workbook: Upload | None,
+        remove_workbook: bool,
+        scenario_count: int | None,
+        question_count: int | None,
+        question_complexity: ComplexityPreference | None,
+        lock: bool,
+    ) -> UiRunState:
+        """Replace the run's evaluation draft (and lock it when ``lock``).
+
+        Without a new workbook the run's saved workbook is kept, unless ``remove_workbook``.
+        A locked evaluation is refused: unlock it first (possible until scenarios exist).
+        """
+        if state.evaluation_locked:
+            raise InputAssetError(
+                f"Run {state.run_id}: the evaluation is locked; unlock it to change it"
+            )
+        if workbook is not None and remove_workbook:
+            raise InputAssetError("Upload a new workbook or remove the saved one, not both")
+        saved = self._single_file(state.run_id, CUSTOM_METRICS)
+        if workbook is None and saved is not None and not remove_workbook:
+            workbook = Upload(saved.name, saved.read_bytes())
+        selection = self._metric_selection(selected_metrics, custom_metrics_text, workbook)
+        self._check_counts(scenario_count, question_count)
+        if saved is not None and (remove_workbook or workbook is not None):
+            saved.unlink()
+        if workbook is not None:
+            self._save_workbook(state.run_id, workbook)
+        sources = {
+            **state.sources,
+            CUSTOM_METRICS: f"uploaded: {workbook.filename}" if workbook else "none",
+        }
+        updated = state.model_copy(
+            update={
+                "metric_selection": selection,
+                "scenario_count": scenario_count,
+                "question_count": question_count,
+                "question_complexity": question_complexity,
+                "sources": sources,
+                "evaluation_locked": lock,
+            }
+        )
+        self.save_state(updated)
+        return updated
+
+    def unlock_evaluation(self, state: UiRunState) -> UiRunState:
+        """Make the evaluation editable again; refused once scenarios froze the metric config."""
+        if Step.SCENARIOS in state.steps_done:
+            raise InputAssetError(
+                f"Run {state.run_id}: scenarios were generated with this evaluation (its metric "
+                "configuration is frozen); start a new run to change it"
+            )
+        updated = state.model_copy(update={"evaluation_locked": False})
+        self.save_state(updated)
+        return updated
+
+    def _check_counts(self, scenario_count: int | None, question_count: int | None) -> None:
+        for label, value in (("scenario count", scenario_count), ("questions", question_count)):
+            if value is not None and not 1 <= value <= self._settings.web.max_step_count:
+                raise InputAssetError(
+                    f"{label} must be between 1 and {self._settings.web.max_step_count}"
+                )
+
+    def _save_workbook(self, run_id: str, workbook: Upload) -> None:
+        # Kept byte for byte: the workbook is the provenance of the custom metrics.
+        path = self._store.path_for(
+            self._input(run_id, f"{CUSTOM_METRICS}/{Path(workbook.filename).name}")
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(workbook.content)
 
     def _metric_selection(
         self, selected: list[str] | None, text: str, workbook: Upload | None

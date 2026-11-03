@@ -231,7 +231,7 @@
         <div>
           <p class="eyebrow">Evaluation configuration</p>
           <h1 id="h-evaluation">Evaluation</h1>
-          <p class="lede">Choose the metrics for the whole run, add your own metrics, and set how many scenarios and questions to generate. The selection is frozen when the scenarios are generated; categories only group the list.</p>
+          <p class="lede">Choose the metrics for the whole run, add your own metrics, and set how many scenarios and questions to generate. After starting the run, review the choices here and lock them; scenarios need a locked evaluation. Categories only group the list.</p>
         </div>
         <span id="metrics-pill" class="pill pill-neutral"></span>
       </div>
@@ -271,6 +271,12 @@
           </div>
         </div>
       </article>
+      <div class="actionbar">
+        <span id="lock-hint" class="hint"></span>
+        <div class="spacer"></div>
+        <button id="unlock-evaluation" class="btn hidden" type="button">Edit evaluation</button>
+        <button id="lock-evaluation" class="btn btn-primary" type="button" disabled>Lock evaluation</button>
+      </div>
     </section>
 
     <!-- 2. Connection =================================================================== -->

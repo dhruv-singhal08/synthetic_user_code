@@ -29,6 +29,7 @@ class MetricKpi(StrictModel):
     cannot_generate: int = Field(default=0, ge=0)
     evidence_unavailable: int = Field(default=0, ge=0)
     evaluation_error: int = Field(default=0, ge=0)
+    unavailable: int = Field(default=0, ge=0)  # custom metric that could not be compiled
     lower_is_better: bool
     # Most frequent reasons behind non-scored statuses ("status: reason" -> count).
     reasons: dict[NonEmptyStr, int] = Field(default_factory=dict)

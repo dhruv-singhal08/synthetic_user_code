@@ -87,7 +87,16 @@ def _run(client: TestClient, *, grounded: bool = True, product: bytes = PRODUCT_
         data={"persona_queries": "", "use_reference": "true" if grounded else "false"},
     )
     assert response.status_code == 200, response.text
-    return str(response.json()["state"]["run_id"])
+    run_id = str(response.json()["state"]["run_id"])
+    _lock(client, run_id)
+    return run_id
+
+
+def _lock(client: TestClient, run_id: str, **data: Any) -> dict[str, Any]:
+    """Lock the run's evaluation (the Evaluation tab's button); ``data`` = the form fields."""
+    response = client.post(f"/api/runs/{run_id}/evaluation", data=data)
+    assert response.status_code == 200, response.text
+    return dict(response.json()["state"])
 
 
 def _steps(client: TestClient, run_id: str, *steps: str) -> dict[str, Any]:
@@ -560,6 +569,74 @@ def test_evaluation_tab_payload_is_frozen_and_drives_the_steps(client: TestClien
     # counts are run selections: a step request may not override them
     early = client.post(f"/api/runs/{state['run_id']}/steps/scenarios", json={"count": 5})
     assert early.status_code == 422
+
+
+def test_evaluation_is_a_draft_until_locked_and_editable_until_scenarios(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/runs",
+        files={
+            "product": ("p.yaml", PRODUCT_YAML),
+            "custom_metrics": ("metrics.csv", b"Metric,Definition\nTone,Polite and brief\n"),
+        },
+        data={"selected_metrics": ["relevance"], "use_reference": "false"},
+    )
+    state = response.json()["state"]
+    run_id = state["run_id"]
+    assert state["evaluation_locked"] is False
+    refused = client.post(f"/api/runs/{run_id}/steps/scenarios", json={})
+    assert refused.status_code == 400 and "Lock the evaluation" in refused.json()["detail"]
+
+    # a draft save replaces the selection; the saved workbook is kept without a new upload
+    draft = _lock(
+        client,
+        run_id,
+        selected_metrics=["relevance", "correctness_completeness"],
+        custom_metrics_text="- Brevity: answers in at most three sentences",
+        scenario_count="1",
+        questions_per_scenario="1",
+        question_complexity="simple",
+        lock="false",
+    )
+    assert draft["evaluation_locked"] is False
+    assert draft["metric_selection"]["selected_metrics"] == [
+        "relevance",
+        "correctness_completeness",
+    ]
+    assert [c["provenance"] for c in draft["metric_selection"]["custom_inputs"]] == [
+        "free text item 1",
+        "metrics.csv: row 2",
+    ]
+    assert (draft["scenario_count"], draft["question_count"]) == (1, 1)
+    assert draft["question_complexity"] == "simple"
+
+    # remove the workbook and lock
+    locked = _lock(client, run_id, selected_metrics=["relevance"], remove_custom_metrics="true")
+    assert locked["evaluation_locked"] is True
+    assert locked["metric_selection"]["custom_inputs"] == []
+    assert locked["sources"]["custom_metrics"] == "none"
+    again = client.post(f"/api/runs/{run_id}/evaluation", data={"selected_metrics": ["mrr"]})
+    assert again.status_code == 400 and "evaluation is locked" in again.json()["detail"]
+
+    # unlock is allowed before scenarios, refused after (the metric config is frozen)
+    unlocked = client.delete(f"/api/runs/{run_id}/evaluation/lock")
+    assert unlocked.status_code == 200 and unlocked.json()["state"]["evaluation_locked"] is False
+    _lock(client, run_id, selected_metrics=["relevance"])
+    _steps(client, run_id, "scenarios")
+    late = client.delete(f"/api/runs/{run_id}/evaluation/lock")
+    assert late.status_code == 400 and "start a new run" in late.json()["detail"]
+
+
+def test_runs_saved_before_the_lock_button_stay_locked(
+    client: TestClient, config_path: Path
+) -> None:
+    run_id = _run(client, grounded=False)
+    path = load_config(config_path).paths.artifacts_dir / "runs" / run_id / "ui_state.json"
+    data = json.loads(path.read_text())
+    data.pop("evaluation_locked")
+    path.write_text(json.dumps(data))
+    assert client.get(f"/api/runs/{run_id}").json()["state"]["evaluation_locked"] is True
 
 
 @pytest.mark.parametrize(

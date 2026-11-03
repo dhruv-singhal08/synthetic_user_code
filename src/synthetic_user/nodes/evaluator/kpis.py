@@ -4,7 +4,8 @@ Definitions:
 - one KPI row per SELECTED metric (frozen metric config; legacy runs: the ids they recorded);
   mean / pass rate over responses where the metric was scored (n = the denominator); every
   non-scored status (not_applicable, cannot_generate, evidence_unavailable, inconclusive,
-  evaluation_error) is counted separately with its most frequent reasons, never averaged in;
+  evaluation_error, unavailable) is counted separately with its most frequent reasons, never
+  averaged in;
 - metric pass rate = share scoring the best value;
 - MRR = mean reciprocal rank over questions with ranked chunks + relevance labels; per-question
   rows and exclusions are reported;
@@ -528,7 +529,7 @@ def kpis_csv(kpis: RunKpis) -> str:
         excluded = (
             f"{m.not_applicable} not applicable, {m.cannot_generate} cannot generate, "
             f"{m.evidence_unavailable} evidence unavailable, {m.inconclusive} inconclusive, "
-            f"{m.evaluation_error} evaluation error"
+            f"{m.evaluation_error} evaluation error, {m.unavailable} unavailable"
         )
         direction = "lower is better" if m.lower_is_better else "higher is better"
         note = "; ".join([direction, *m.notes])
@@ -615,7 +616,8 @@ def _metric_kpi(
         inconclusive=counts[MetricStatus.INCONCLUSIVE],
         cannot_generate=counts[MetricStatus.CANNOT_GENERATE],
         evidence_unavailable=counts[MetricStatus.EVIDENCE_UNAVAILABLE],
-        evaluation_error=counts[MetricStatus.EVALUATION_ERROR] + counts[MetricStatus.UNAVAILABLE],
+        evaluation_error=counts[MetricStatus.EVALUATION_ERROR],
+        unavailable=counts[MetricStatus.UNAVAILABLE],
         lower_is_better=lower,
         reasons=dict(reasons.most_common(MAX_REASONS)),
         notes=notes,

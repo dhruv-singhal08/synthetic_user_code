@@ -8,6 +8,18 @@ artifact_cut_marker: "\n[... cut: too long]"
 copy_hint: >-
   copy ONE shorter contiguous fragment character for character from the source, without "..."
 
+exempted_without_guidance: >-
+  finding ${index}: exempted_by must be null (this run has no evaluation guidance)
+
+exempted_not_quoted: >-
+  finding ${index}: exempted_by must be the exact text of an approved exception in the
+  EVALUATION GUIDANCE (${hint})
+
+exempted_only_finding: >-
+  ${metric} is scored ${score} (below 1) but its only findings are exempted by the evaluation
+  guidance: an exempted difference never lowers a score. Score ${metric} 1, or add a finding
+  for a separate problem that is not covered by the exception
+
 missing_finding: >-
   ${metric} is scored ${score} (below 1) without a finding with category ${metric_repr}: if the
   response really falls short on ${metric}, add that finding; if nothing is wrong, score
@@ -26,10 +38,16 @@ evaluation_guidance: |
   - Apply a guidance item only where it concerns this question and response. Guidance never
     awards a score by itself: still judge every listed metric on its rubric and the evidence.
   - When the guidance approves an exception that this response uses (e.g. an accepted filter,
-    output form or limitation), treat it as established by the product contract: do not
-    penalise it and create no finding for it, and mention the applied exception briefly in the
-    rationale of the affected metric(s). An approved exception also outranks the question's
-    generated expected behaviour and success criteria where they disagree.
+    a placeholder value, a naming equivalence, an output form or a limitation), treat it as
+    established by the product contract in EVERY metric, criterion and finding: it lowers no
+    score and is never a defect, an unresolved point or a reason to fail. An exception covers
+    the whole difference it explains, including a requested value or name that the approved
+    form stands in for. An approved exception also outranks the question's generated expected
+    behaviour and success criteria where they disagree.
+  - Record each difference an exception covers as a finding with exempted_by = the exact text
+    of that guidance item (its other fields as usual), so the evaluation shows the applied
+    exception; mention it briefly in the rationale of the affected metric(s). Any problem the
+    exception does not explain is judged normally, in its own finding without exempted_by.
   - Guidance never overrides the output contract, the evidence (quotes, cheat sheet, catalog,
     tool results, retrieved context), the prohibited actions or safety constraints. Where it
     conflicts with them, follow them and say so in the rationale.
@@ -45,6 +63,16 @@ severity_rule: |-
     does not change the requested result (e.g. an unrequested extra column, a weak
     explanation, a less suitable but valid approach); low = cosmetic, style or wording.
 
+# Root cause of a finding (D244): code reports findings with the same mechanism + subject as ONE
+# bug, also across questions, so the same defect is never reported twice.
+root_cause_rule: |-
+  - root_cause of each finding: mechanism = the failure mechanism; subject = the exact table,
+    column, rule id, tool, document or requested output the defect is about, copied from the
+    response, the question or the cheat sheet, without SQL aliases (table.column, not
+    t.column), or null; hypothesis = one sentence on why the product most likely behaved this
+    way. Findings about the same defect (e.g. one wrong join seen by several metrics) share the
+    same mechanism and subject; different defects never share them.
+
 metric_block: |-
   - ${metric_id} (${display_name}): ${rubric}
     Score anchors: 1 = ${anchor_1}; 0.5 = ${anchor_half}; 0 = ${anchor_0}.
@@ -58,6 +86,8 @@ score_example:
   what_worked: ["<observable success; empty if none>"]
   what_didnt: ["<observable gap; empty if none>"]
 
+exempted_example: "<null, or the exact guidance text of the approved exception that covers this difference>"
+
 finding_example:
   category: "${metrics}"
   description: "<the observable problem>"
@@ -69,3 +99,7 @@ finding_example:
   evidence_status: "${evidence_statuses}"
   matches_known_gap: "<true | false>"
   related_tags: ["<exact tag from the traceability catalog; empty if none>"]
+  root_cause:
+    mechanism: "${mechanisms}"
+    subject: "<exact table, column, rule id, tool, document or requested output, or null>"
+    hypothesis: "<one sentence: why the product most likely behaved this way>"

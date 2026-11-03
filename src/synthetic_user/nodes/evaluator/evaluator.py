@@ -43,7 +43,8 @@ from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.models.evaluation import (
     EVALUATION_SCHEMA_VERSION,
-    BugCandidate,
+    GOAL_PROBLEM_SEVERITY,
+    GOAL_ROOT_CAUSE,
     ClassificationSource,
     CriterionResult,
     EvaluationResult,
@@ -52,11 +53,13 @@ from synthetic_user.models.evaluation import (
     FactualVerification,
     Finding,
     FindingSource,
+    GoalCompletion,
     JudgedScore,
     MetricResult,
     MetricStatus,
+    RootCause,
+    RootCauseMechanism,
     Severity,
-    Verdict,
 )
 from synthetic_user.models.execution import (
     AnsweredResponse,
@@ -73,6 +76,7 @@ from synthetic_user.models.lookup import (
     ReferenceCheckRecord,
 )
 from synthetic_user.models.metrics import (
+    GOAL_COMPLETION_CATEGORY,
     EvidenceKind,
     JudgeGroup,
     MetricDefinition,
@@ -92,9 +96,20 @@ from synthetic_user.nodes.evaluator.applicability import (
     MetricPlan,
     plan_metrics,
 )
+from synthetic_user.nodes.evaluator.bugs import (
+    BugGroup,
+    SubjectResolver,
+    assign_bugs,
+    bug_groups,
+)
 from synthetic_user.nodes.evaluator.general_judge import GeneralJudge, GeneralJudgement
 from synthetic_user.nodes.evaluator.general_prompt import GeneralJudgeInput, SqlEvidence
-from synthetic_user.nodes.evaluator.judge_common import matches_known_gap
+from synthetic_user.nodes.evaluator.judge_common import (
+    matches_known_gap,
+    normalise,
+    quoted,
+    response_text,
+)
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 from synthetic_user.nodes.evaluator.retrieval_judge import (
     RetrievalJudge,
@@ -109,6 +124,7 @@ from synthetic_user.nodes.evaluator.trace_tags import (
     criterion_tag,
     link_finding_tags,
     merge_finding_tags,
+    trace_catalog,
 )
 from synthetic_user.nodes.evaluator.verdict import SeverityVerdictPolicy, VerdictPolicy
 from synthetic_user.references.catalog_index import CatalogIndex, LookupSession
@@ -117,8 +133,6 @@ from synthetic_user.sql.reconcile import evidence_requests, reconcile
 
 Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
-MAX_BUG_TITLE_CHARS = 200
-_SEVERITY_RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2, Severity.CRITICAL: 3}
 CONTEXT_RECALL_DISCLOSURE = (
     "Expectation-based coverage of the question's required-information checklist; "
     "not exhaustive recall over the full corpus."
@@ -217,7 +231,16 @@ class Evaluator:
             _check_links(case, self._reference)
         semaphore = asyncio.Semaphore(self._settings.llm.max_concurrency)
         judgements = await asyncio.gather(*(self._judge(c, product, semaphore) for c in cases))
-        results = [self._assemble(c, j, product) for c, j in zip(cases, judgements, strict=True)]
+        assembled = [self._assemble(c, j, product) for c, j in zip(cases, judgements, strict=True)]
+        # One bug per root cause across the batch (D244), from the failing findings only.
+        results = assign_bugs(
+            [
+                (result, case.question, groups)
+                for case, (result, groups) in zip(cases, assembled, strict=True)
+            ],
+            product.product_id,
+            self._ids,
+        )
         self._log.info(
             "Evaluated %d execution(s): %s",
             len(results),
@@ -284,6 +307,8 @@ class Evaluator:
                 if session is not None and lookup_settings.enabled
                 else 0,
                 guidance=self._guidance.text if self._guidance else None,
+                capability=case.scenario.capability,
+                capability_rationale=case.scenario.capability_rationale,
             )
             calls.append(self._run_general(case, general_input, semaphore, result, session))
         if plan.retrieval_call:
@@ -405,7 +430,8 @@ class Evaluator:
         case: EvaluationCase,
         judgements: _Judgements | None,
         product: ProductDescription,
-    ) -> EvaluationResult:
+    ) -> tuple[EvaluationResult, list[BugGroup]]:
+        """The evaluation (without bugs yet) and its failing findings grouped by root cause."""
         outcome = case.execution.outcome
         ids: dict[str, Any] = {
             "schema_version": EVALUATION_SCHEMA_VERSION,
@@ -426,7 +452,7 @@ class Evaluator:
                 and self._config.needs_evidence(EvidenceKind.SQL)
                 else []
             )
-            return EvaluationResult(
+            recorded = EvaluationResult(
                 **ids,
                 response_classification=(
                     ResponseClassification.CLARIFICATION if clarification else None
@@ -441,6 +467,7 @@ class Evaluator:
                 evaluation_status=EvaluationStatus.RECORDED_ONLY,
                 notes=notes,
             )
+            return recorded, []
 
         plan, general, retrieval = judgements.plan, judgements.general, judgements.retrieval
         notes = list(judgements.notes)
@@ -532,6 +559,9 @@ class Evaluator:
                     "observed_behavior": d.observed_behavior,
                     "severity": Severity.HIGH,
                     "evidence_status": EvidenceStatus.SUPPORTED,
+                    "root_cause": RootCause(
+                        mechanism=RootCauseMechanism.MISSING_OUTPUT, hypothesis=d.description
+                    ),
                 },
                 FindingSource.DETERMINISTIC,
                 case,
@@ -540,9 +570,37 @@ class Evaluator:
             )
             for d in deterministic
         ]
-        decision = self._policy.decide(metrics, findings, self._definitions)
+        goal = self._goal(case, general)
+        if goal is not None and goal.status in GOAL_PROBLEM_SEVERITY:
+            # The goal is not met: a finding of its own (never a metric score), so the verdict
+            # and the bug candidate see it like any other problem (D243).
+            findings.append(
+                self._finding(
+                    {
+                        "category": GOAL_COMPLETION_CATEGORY,
+                        "description": goal.reason,
+                        "expected_behavior": case.question.expectations.expected_behavior,
+                        "observed_behavior": goal.evidence or goal.reason,
+                        "evidence": goal.evidence,
+                        "severity": GOAL_PROBLEM_SEVERITY[goal.status],
+                        # The judge's quote was checked against the response.
+                        "evidence_status": EvidenceStatus.SUPPORTED,
+                        "root_cause": RootCause(
+                            mechanism=GOAL_ROOT_CAUSE[goal.status], hypothesis=goal.reason
+                        ),
+                    },
+                    FindingSource.LLM,
+                    case,
+                    criteria_results,
+                    product,
+                )
+            )
+        decision = self._policy.decide(metrics, findings, self._definitions, goal)
         verdict = decision.verdict
-        return EvaluationResult(
+        groups = bug_groups(
+            findings, decision.failing, decision.confirmed, self._subject_resolver(case)
+        )
+        result = EvaluationResult(
             **ids,
             response_classification=classification,
             classification_source=source,
@@ -554,10 +612,63 @@ class Evaluator:
             metrics=metrics,
             criteria_results=criteria_results,
             findings=findings,
-            bug_candidates=self._bug_candidates(verdict, findings, case, product),
             llm_verdict=general.draft.overall_verdict if general and general.draft else None,
+            goal_completion=goal,
             notes=list(dict.fromkeys(notes)),
             reference_checks=judgements.reference_checks,
+        )
+        return result, groups
+
+    def _subject_resolver(self, case: EvaluationCase) -> SubjectResolver:
+        """A root-cause subject counts for grouping only when it is verifiable: found in the
+        response, the question or the cheat sheet (a dotted name part by part), or a trace tag
+        of this question. Catalog tables / columns are canonicalised (namespace dropped)."""
+        response = case.execution.response
+        assert isinstance(response, AnsweredResponse | DeniedResponse)
+        pack = case.pack
+        haystack = "\n".join(
+            [
+                response_text(response),
+                case.question.utterance,
+                pack.model_dump_json() if pack is not None else "",
+            ]
+        )
+        catalog = self._catalog
+        # A trace tag (TABLE-RULE-01.01, COLUMN-02.03) is numbered per pack: read the item.
+        tagged = {item.tag.casefold(): item.text for item in trace_catalog(case.question, pack)}
+
+        def resolve(subject: str) -> str | None:
+            text = subject.strip().strip("`'\"[] ")
+            text = tagged.get(text.casefold(), text)
+            if not text:
+                return None
+            parts = [p for p in text.split(".") if p]
+            dotted = len(parts) > 1 and " " not in text
+            if not (quoted(text, haystack) or (dotted and all(quoted(p, haystack) for p in parts))):
+                return None
+            if catalog is not None and " " not in text:
+                table, _ = catalog.resolve_table(text)
+                if table is not None:
+                    return table.name.casefold()
+                if dotted:
+                    table, _ = catalog.resolve_table(".".join(parts[:-1]))
+                    if table is not None:
+                        return f"{table.name}.{parts[-1]}".casefold()
+            return normalise(text)
+
+        return resolve
+
+    @staticmethod
+    def _goal(case: EvaluationCase, general: GeneralJudgement | None) -> GoalCompletion | None:
+        draft = general.draft.goal_completion if general and general.draft else None
+        if draft is None:
+            return None
+        return GoalCompletion(
+            status=draft.status,
+            reason=draft.reason,
+            evidence=draft.evidence,
+            capability=case.scenario.capability.value,
+            product_response_type=case.execution.response.product_response_type,
         )
 
     def _classification(
@@ -719,42 +830,6 @@ class Evaluator:
                 "matches_known_gap": known,
             }
         )
-
-    def _bug_candidates(
-        self,
-        verdict: Verdict,
-        findings: Sequence[Finding],
-        case: EvaluationCase,
-        product: ProductDescription,
-    ) -> list[BugCandidate]:
-        if verdict is not Verdict.FAIL:
-            return []
-        qualifying = sorted(
-            (
-                f
-                for f in findings
-                if _SEVERITY_RANK[f.severity] >= _SEVERITY_RANK[Severity.MEDIUM]
-                and f.evidence_status is EvidenceStatus.SUPPORTED
-                and not f.unresolved
-            ),
-            key=lambda f: -_SEVERITY_RANK[f.severity],
-        )
-        if not qualifying:
-            return []
-        lead = qualifying[0]
-        return [
-            BugCandidate(
-                bug_id=self._ids.next(IdKind.BUG),
-                title=f"{lead.category}: {lead.description}"[:MAX_BUG_TITLE_CHARS],
-                description="; ".join(f.description for f in qualifying),
-                reproduction_question=case.question.utterance,
-                product_id=product.product_id,
-                question_id=case.question.question_id,
-                scenario_id=case.scenario.id,
-                execution_id=case.execution.execution_id,
-                finding_ids=[f.finding_id for f in qualifying],
-            )
-        ]
 
 
 def _check_links(case: EvaluationCase, reference: Reference | None) -> None:

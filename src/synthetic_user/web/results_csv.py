@@ -52,6 +52,7 @@ SCENARIO_COLUMNS = ["scenario_id", "mode", "scenario_title", "business_goal", "c
 QUESTION_COLUMNS = ["question_id", "question", "expected_behavior", "success_criteria"]
 EXECUTION_COLUMNS = [
     "product_outcome",
+    "product_response_type",  # the product's own type, as returned (D242)
     "response_classification",
     "answer_text",
     "artifacts",
@@ -60,7 +61,13 @@ EXECUTION_COLUMNS = [
     "product_message",
     "latency_ms",
 ]
-VERDICT_COLUMNS = ["final_verdict", "verdict_reason", "bug_ids", "evaluation_notes"]
+VERDICT_COLUMNS = [
+    "final_verdict",
+    "verdict_reason",
+    "goal_completion",  # the General Judge's independent goal check (D243)
+    "bug_ids",
+    "evaluation_notes",
+]
 
 
 def metric_columns(metric_ids: Sequence[str]) -> list[str]:
@@ -229,6 +236,7 @@ def _execution_cells(e: ExecutionRecord) -> dict[str, str]:
         context_cell += f": {context.error}"
     return {
         "product_outcome": e.outcome.value,
+        "product_response_type": response.product_response_type or "",
         "answer_text": text,
         "artifacts": artifacts,
         "tool_calls": tools,
@@ -278,6 +286,11 @@ def _evaluation_cells(ev: EvaluationResult, metric_ids: Sequence[str]) -> dict[s
         ),
         "final_verdict": ev.verdict.value if ev.verdict else "recorded_only",
         "verdict_reason": _verdict_reason(ev),
+        "goal_completion": (
+            f"{ev.goal_completion.status.value}: {ev.goal_completion.reason}"
+            if ev.goal_completion is not None
+            else ""
+        ),
         "bug_ids": bullets([b.bug_id for b in ev.bug_candidates]),
         "evaluation_notes": bullets(list(ev.notes)),
     }

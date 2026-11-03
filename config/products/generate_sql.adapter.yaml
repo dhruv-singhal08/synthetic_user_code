@@ -42,10 +42,16 @@ options:
         path: widget_title
       - kind: column_display_hints
         path: column_display_hints
-    # `type` is "sql" for an answer and "clarification" when the product asks a question back.
-    clarification_when: "type == clarification"
+    # The product's own `type` decides the outcome and is kept on every response (D242), so an
+    # HTTP 200 that did not complete the task is never recorded as answered. A value not listed
+    # here is kept and judged as an answer of unknown kind (add it when it is known).
+    response_type:
+      path: type
+      outcomes:
+        sql: answered                 # an SQL answer
+        clarification: clarification  # the product asks a question back
+        unsupported: denied           # the product says it cannot do this request
+        blocked: denied               # the product blocked the request
     clarification_message: message
     clarification_options: options    # the choices offered; the synthetic user picks one
-    # Map other values when known, e.g.:
-    # denied_when: "type == unsupported"
-    # denied_message: message
+    denied_message: message

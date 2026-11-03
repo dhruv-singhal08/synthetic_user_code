@@ -40,6 +40,7 @@ user: |
     retrieved context shown above). ${factual_rule}
   - A response saying the product cannot do something is not an error: judge whether the
     limitation is justified by the product contract and the expectations.
+  ${goal_rule}
   - Every metric scored 0 or 0.5 needs a finding with that metric as category. evidence (in
     scores, criteria and findings) is ONE short contiguous fragment copied character for
     character from the response, its artifacts or the tool trace - or null. evidence_status:
@@ -174,6 +175,64 @@ dialect_unknown: No SQL dialect is configured; do not judge dialect-specific syn
 
 response_kind_answer: answered payload
 response_kind_denial: typed denial
+response_kind_unable: answered payload, typed by the product as unable to answer
+# Added when the adapter exposes the product's own response type (D242).
+response_kind_typed: "${kind}; the product's own response type: ${type}"
+
+# --- goal completion (D243): independent of the metric scores --------------------------------
+goal_rule: |-
+  - goal_completion (required, independent of the metric scores: never lower or raise a score
+    for it): does the response complete this user's goal for this question?
+    completed = the goal is met (minor issues allowed); partially_completed = the main result
+    is there but a requested part is missing or wrong; not_completed = an attempted answer does
+    not meet the goal (wrong, misleading or missing main result); justified_decline = the
+    product declined or said it cannot answer, and the product contract or the request itself
+    justifies it; unjustified_decline = the product declined or said it cannot answer although
+    its documented capability covers the request. A decline (a typed denial, "unsupported",
+    "blocked", "I cannot answer") always takes one of the two decline statuses. evidence: one
+    exact fragment of the response showing the status (required for partially_completed,
+    not_completed and unjustified_decline).
+    Scenario capability, decided from the product contract when the scenario was written:
+    ${capability}${rationale}. ${capability_rule}
+
+capability_rationale: " (${rationale})"
+
+capability_rule:
+  supported: >-
+    The request is within the documented capability: a decline is justified only when the
+    product contract documents that specific limitation (not_supported, known_limitations) or
+    the request breaks a stated policy; otherwise it is unjustified.
+  unsupported: >-
+    The request is outside the documented capability: a clear decline or an honest statement
+    of the limitation completes it (justified_decline); an answer presented as if the request
+    were supported is not_completed.
+  unknown: >-
+    Support for this request is not established: decide from the product contract and the
+    actual response, without assuming that the request is supported.
+
+goal_example:
+  status: "${statuses}"
+  reason: "<why, citing the product contract or the response>"
+  evidence: "<one exact fragment of the response, or null>"
+
+# Retry feedback (general_judge.py).
+goal_required: >-
+  goal_completion is required (status, reason, evidence)
+
+goal_decline_status: >-
+  goal_completion.status is ${status} but the response is a decline: use justified_decline or
+  unjustified_decline
+
+goal_answer_status: >-
+  goal_completion.status is ${status} but the response is an answer, not a decline: use
+  completed, partially_completed or not_completed
+
+goal_evidence_required: >-
+  goal_completion.status ${status} needs evidence: one exact fragment of the response that
+  shows it
+
+goal_evidence_not_quoted: >-
+  goal_completion.evidence ${evidence} is not in the response (${hint})
 
 judge_example:
   response_classification: "<answered | unable_to_answer>"

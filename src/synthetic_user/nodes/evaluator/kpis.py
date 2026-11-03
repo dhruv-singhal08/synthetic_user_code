@@ -52,6 +52,7 @@ from synthetic_user.models.kpi import (
 from synthetic_user.models.metrics import EvidenceKind, ResolvedMetricConfig
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.nodes.evaluator.bugs import consolidate_bugs
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 
 _SEVERITY_RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2, Severity.CRITICAL: 3}
@@ -265,6 +266,7 @@ def consolidate_findings(
         for evaluation in evaluations
         if evaluation.question_id in no_sql_questions
         for finding in evaluation.findings
+        if finding.exempted_by is None  # an applied guidance exception is not an issue (D243)
     ]
 
     rows = sorted(
@@ -273,6 +275,7 @@ def consolidate_findings(
             for evaluation in evaluations
             if evaluation.question_id not in no_sql_questions
             for finding in evaluation.findings
+            if finding.exempted_by is None
         ),
         key=lambda item: (
             item[1].matches_known_gap,
@@ -412,15 +415,15 @@ def compute_kpis(
 
     new_bugs: Counter[str] = Counter()
     known = 0
-    for ev in evaluations:
-        by_id = {f.finding_id: f for f in ev.findings}
-        for bug in ev.bug_candidates:
-            findings = [by_id[i] for i in bug.finding_ids if i in by_id]
-            if findings and all(f.matches_known_gap for f in findings):
-                known += 1
-                continue
-            worst = max(findings, key=lambda f: _SEVERITY_RANK[f.severity])
-            new_bugs[worst.severity.value] += 1
+    # One count per bug (root cause), however many questions it affects (D244).
+    by_id = {f.finding_id: f for ev in evaluations for f in ev.findings}
+    for bug in consolidate_bugs(evaluations):
+        findings = [by_id[i] for i in bug.finding_ids if i in by_id]
+        if findings and all(f.matches_known_gap for f in findings):
+            known += 1
+            continue
+        worst = max(findings, key=lambda f: _SEVERITY_RANK[f.severity])
+        new_bugs[worst.severity.value] += 1
 
     by_scenario = {s.id: s for s in scenarios}
     metric_ids = _metric_ids(metric_config, evaluations)

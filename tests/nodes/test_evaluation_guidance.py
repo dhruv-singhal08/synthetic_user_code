@@ -186,7 +186,8 @@ async def test_guidance_reaches_every_judge_call_without_extra_calls(
         assert f"<<<EVALUATION_GUIDANCE\n{GUIDANCE}\nEVALUATION_GUIDANCE>>>" in user
         flat = " ".join(user.split())
         assert "never awards a score by itself" in flat
-        assert "do not penalise it and create no finding for it" in flat
+        assert "it lowers no score and is never a defect" in flat
+        assert "exempted_by = the exact text of that guidance item" in flat
         assert "Guidance never overrides the output contract, the evidence" in flat
     assert result.evaluation_guidance_sha256 == given.sha256
     assert case.execution.response.artifacts[0].content == SQL  # product response unchanged

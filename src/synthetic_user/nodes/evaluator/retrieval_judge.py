@@ -67,7 +67,9 @@ def check_retrieval(draft: RetrievalJudgeDraft, data: RetrievalJudgeInput) -> li
     ids = [d.metric_id for d in data.definitions]
     chunk_ids = {c.chunk_id for c in data.context.chunks}
     quotable = "\n".join([response_text(data.response), *(c.text for c in data.context.chunks)])
-    errors = check_scores_and_findings(draft.metrics, draft.findings, ids, quotable)
+    errors = check_scores_and_findings(
+        draft.metrics, draft.findings, ids, quotable, guidance=data.guidance
+    )
     tool_refs = {f"tool-{c.order}" for c in data.tool_trace or ()}
     for name, judged in draft.metrics.items():
         unknown = sorted(set(judged.evidence_ids) - chunk_ids - tool_refs)

@@ -19,10 +19,16 @@ from typing import Any
 from synthetic_user.models.evaluation import (
     CriterionStatus,
     FactualVerification,
+    GoalStatus,
     JoinBasis,
     Verdict,
 )
-from synthetic_user.models.execution import ConversationTurn, DeniedResponse, ToolCall
+from synthetic_user.models.execution import (
+    ConversationTurn,
+    DeniedResponse,
+    ResponseClassification,
+    ToolCall,
+)
 from synthetic_user.models.lookup import (
     ArtifactReconciliation,
     IdentifierStatus,
@@ -34,6 +40,7 @@ from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
+from synthetic_user.models.scenario import CapabilityClassification
 from synthetic_user.nodes.evaluator.judge_common import (
     EvaluableResponse,
     bounded,
@@ -93,6 +100,9 @@ class GeneralJudgeInput:
     requested_lookups: Sequence[LookupResult] | None = None
     # Optional run-level evaluation guidance (D237); None -> prompt unchanged.
     guidance: str | None = None
+    # The scenario's capability (and why) for the goal-completion assessment (D243).
+    capability: CapabilityClassification = CapabilityClassification.UNKNOWN
+    capability_rationale: str | None = None
 
     @property
     def reconciled(self) -> bool:
@@ -161,6 +171,7 @@ def judge_example(
     unresolved_findings: bool = False,
     lookup_offer: bool = False,
     join_decisions: bool = False,
+    guidance: bool = False,
 ) -> dict[str, Any]:
     ids = [d.metric_id for d in definitions]
     metrics: dict[str, Any] = {}
@@ -182,7 +193,8 @@ def judge_example(
                     metric_ids=choices([*ids, "null"]),
                 )
             ],
-            "findings": [_finding_example(ids, unresolved=unresolved_findings)],
+            "findings": [_finding_example(ids, unresolved=unresolved_findings, guidance=guidance)],
+            "goal_completion": PROMPTS.data("goal_example", statuses=choices(GoalStatus)),
             "overall_verdict": PROMPTS.text("verdict_example", verdicts=choices(Verdict)),
         }
     )
@@ -193,8 +205,8 @@ def judge_example(
     return out
 
 
-def _finding_example(ids: Sequence[str], *, unresolved: bool) -> dict[str, Any]:
-    example = finding_example(ids)
+def _finding_example(ids: Sequence[str], *, unresolved: bool, guidance: bool) -> dict[str, Any]:
+    example = finding_example(ids, guidance=guidance)
     if unresolved:
         example["unresolved"] = PROMPTS.text("unresolved_example")
     return example
@@ -287,15 +299,21 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
         trace_catalog=json.dumps(
             [item.as_dict() for item in trace_catalog(question, data.pack)], indent=2
         ),
-        response_kind=PROMPTS.text(
-            "response_kind_denial"
-            if isinstance(data.response, DeniedResponse)
-            else "response_kind_answer"
-        ),
+        response_kind=_response_kind(data.response),
         response=render_response(data.response, artifact_max_chars=data.artifact_max_chars),
         metric_rules=metric_blocks(marked),
         guidance=guidance_block(data.guidance),
         severity_rule=severity_rule(),
+        goal_rule=PROMPTS.text(
+            "goal_rule",
+            capability=data.capability.value,
+            rationale=(
+                PROMPTS.text("capability_rationale", rationale=data.capability_rationale)
+                if data.capability_rationale
+                else ""
+            ),
+            capability_rule=PROMPTS.data("capability_rule")[data.capability.value],
+        ),
         factual_rule=PROMPTS.text("factual_rule_on" if factual else "factual_rule_off"),
         contract=render_contract(
             judge_example(
@@ -304,10 +322,23 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
                 unresolved_findings=data.reconciled,
                 lookup_offer=data.max_lookup_requests > 0,
                 join_decisions=bool(data.undocumented_joins()),
+                guidance=bool(data.guidance),
             )
         ),
     )
     return SYSTEM, user
+
+
+def _response_kind(response: EvaluableResponse) -> str:
+    if isinstance(response, DeniedResponse):
+        kind = PROMPTS.text("response_kind_denial")
+    elif response.response_classification is ResponseClassification.UNABLE_TO_ANSWER:
+        kind = PROMPTS.text("response_kind_unable")
+    else:
+        kind = PROMPTS.text("response_kind_answer")
+    if response.product_response_type is None:
+        return kind
+    return PROMPTS.text("response_kind_typed", kind=kind, type=response.product_response_type)
 
 
 def _sql_view(index: int, item: SqlEvidence) -> dict[str, Any]:

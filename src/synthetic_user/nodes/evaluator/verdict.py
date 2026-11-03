@@ -14,6 +14,13 @@ count toward the verdict (MRR, a run-level ranking measure, does not):
 - PASS otherwise: lower-severity issues (a 0.5 with a medium finding, a cosmetic problem) do
   not fail the response; they are listed in the reason.
 
+The General Judge's independent goal-completion assessment (D243) enters as a finding with
+category ``goal_completion`` (no metric score is changed): an unjustified decline or a goal not
+completed is critical, a partially completed goal high, so a supported request the product
+refused without justification never passes, while a justified decline of an unsupported request
+can. A finding exempted by an approved exception of the evaluation guidance (``exempted_by``)
+never counts: it is listed in the reason as an applied exception.
+
 not_applicable, cannot_generate, evidence_unavailable and unavailable results are never counted
 as passing evidence. The judge's own overall verdict is stored, never decisive. Every score,
 status and finding is stored, so a later policy can recompute verdicts without regenerating
@@ -29,12 +36,14 @@ from typing import Protocol
 from synthetic_user.models.evaluation import (
     EvidenceStatus,
     Finding,
+    GoalCompletion,
+    GoalStatus,
     MetricResult,
     MetricStatus,
     Severity,
     Verdict,
 )
-from synthetic_user.models.metrics import MetricDefinition
+from synthetic_user.models.metrics import GOAL_COMPLETION_CATEGORY, MetricDefinition
 
 _UNDECIDED = frozenset({MetricStatus.INCONCLUSIVE, MetricStatus.EVALUATION_ERROR})
 SEVERITY_RANK = {Severity.LOW: 0, Severity.MEDIUM: 1, Severity.HIGH: 2, Severity.CRITICAL: 3}
@@ -44,12 +53,20 @@ PASSED = "Passed: every scored metric met its expectations"
 PASSED_WITH_ISSUES = "Passed with minor issues"
 INCONCLUSIVE = "Inconclusive"
 NOTHING_SCORED = "no selected metric could be scored"
+GOAL_LABEL = "Goal completion"
+EXCEPTIONS_APPLIED = "Exceptions applied (evaluation guidance)"
+JUSTIFIED_DECLINE = "Justified decline"
 
 
 @dataclass(frozen=True)
 class VerdictDecision:
     verdict: Verdict
     reason: str
+    # FAIL only: the ids of the proven findings that decided it (the only bug sources, D244).
+    failing: tuple[str, ...] = ()
+    # Every confirmed problem: supported, settled, not exempted, in a metric scored below its
+    # best (or the goal check) - the only findings that may support a bug (D244).
+    confirmed: tuple[str, ...] = ()
 
 
 class VerdictPolicy(Protocol):
@@ -60,6 +77,7 @@ class VerdictPolicy(Protocol):
         metrics: Mapping[str, MetricResult],
         findings: Sequence[Finding],
         definitions: Mapping[str, MetricDefinition],
+        goal: GoalCompletion | None = None,
     ) -> VerdictDecision: ...
 
 
@@ -69,6 +87,36 @@ class SeverityVerdictPolicy:
         self.name = f"severity-v1 (fail at {fail_severity.value}+)"
 
     def decide(
+        self,
+        metrics: Mapping[str, MetricResult],
+        findings: Sequence[Finding],
+        definitions: Mapping[str, MetricDefinition],
+        goal: GoalCompletion | None = None,
+    ) -> VerdictDecision:
+        decision = self._decide(metrics, findings, definitions)
+        notes = []
+        if goal is not None and goal.status is GoalStatus.JUSTIFIED_DECLINE:
+            notes.append(f"{JUSTIFIED_DECLINE}: {goal.reason.rstrip('.')}")
+        if exempted := [f for f in findings if f.exempted_by is not None]:
+            notes.append(
+                _reason(
+                    EXCEPTIONS_APPLIED,
+                    [
+                        f"{(f.exempted_by or '').rstrip('.')} - {f.description.rstrip('.')}"
+                        for f in exempted
+                    ],
+                )
+            )
+        if not notes:
+            return decision
+        return VerdictDecision(
+            decision.verdict,
+            ". ".join([decision.reason, *notes]),
+            decision.failing,
+            decision.confirmed,
+        )
+
+    def _decide(
         self,
         metrics: Mapping[str, MetricResult],
         findings: Sequence[Finding],
@@ -87,15 +135,24 @@ class SeverityVerdictPolicy:
             and result.score is not None
             and result.score != _best(definitions.get(metric_id))
         }
-        relevant = [f for f in findings if f.category in considered]
+        # Metric findings and the goal finding; an exempted difference is never a problem.
+        relevant = [
+            f
+            for f in findings
+            if (f.category in considered or f.category == GOAL_COMPLETION_CATEGORY)
+            and f.exempted_by is None
+        ]
         settled = [f for f in relevant if not f.unresolved]
         serious = [
             f
             for f in settled
-            if SEVERITY_RANK[f.severity] >= self._fail_rank and f.category in below
+            if SEVERITY_RANK[f.severity] >= self._fail_rank
+            and (f.category in below or f.category == GOAL_COMPLETION_CATEGORY)
         ]
 
         def label(metric_id: str) -> str:
+            if metric_id == GOAL_COMPLETION_CATEGORY:
+                return GOAL_LABEL
             definition = definitions.get(metric_id)
             return definition.display_name if definition is not None else metric_id
 
@@ -104,7 +161,18 @@ class SeverityVerdictPolicy:
 
         proven = [f for f in serious if f.evidence_status is EvidenceStatus.SUPPORTED]
         if proven:
-            return VerdictDecision(Verdict.FAIL, _reason(FAILED, [item(f) for f in proven]))
+            confirmed = tuple(
+                f.finding_id
+                for f in settled
+                if f.evidence_status is EvidenceStatus.SUPPORTED
+                and (f.category in below or f.category == GOAL_COMPLETION_CATEGORY)
+            )
+            return VerdictDecision(
+                Verdict.FAIL,
+                _reason(FAILED, [item(f) for f in proven]),
+                tuple(f.finding_id for f in proven),
+                confirmed,
+            )
 
         open_points = [f"unresolved - {item(f)}" for f in relevant if f.unresolved]
         open_points += [

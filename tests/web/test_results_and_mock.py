@@ -106,7 +106,7 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
 
 def test_columns_follow_the_selected_metrics() -> None:
     columns = columns_for(["relevance", "custom_01", "mrr"])
-    assert columns[-13:] == [
+    assert columns[-14:] == [
         "relevance",
         "relevance_status",
         "relevance_reason",
@@ -118,10 +118,12 @@ def test_columns_follow_the_selected_metrics() -> None:
         "mrr_reason",
         "final_verdict",
         "verdict_reason",
+        "goal_completion",
         "bug_ids",
         "evaluation_notes",
     ]
     assert {"product_outcome", "response_classification", "success_criteria"} <= set(columns)
+    assert "product_response_type" in columns
     assert {"tool_calls", "retrieved_context"} <= set(columns)
     for removed in (
         "metric_expectations",

@@ -101,7 +101,7 @@ def test_question_example_lists_only_metrics_that_need_expectations() -> None:
 @pytest.mark.parametrize("classify", [True, False])
 def test_general_judge_example_matches_the_model(classify: bool) -> None:
     example = judge_example(GENERAL, needs_classification=classify)
-    expected = {"metrics", "criteria", "findings", "overall_verdict"}
+    expected = {"metrics", "criteria", "findings", "goal_completion", "overall_verdict"}
     if classify:
         expected |= {"response_classification", "classification_note"}
     assert set(example) == expected
@@ -111,8 +111,13 @@ def test_general_judge_example_matches_the_model(classify: bool) -> None:
         if metric_id != "correctness_completeness":
             keys -= {"factual_verification"}
         assert set(score) == keys, metric_id
-    # "unresolved" and "evidence_requests" are offered only with a catalog reconciliation
-    assert set(example["findings"][0]) == set(FindingDraft.model_fields) - {"unresolved"}
+    # "unresolved" and "evidence_requests" are offered only with a catalog reconciliation;
+    # "exempted_by" only with evaluation guidance (D243)
+    assert set(example["findings"][0]) == set(FindingDraft.model_fields) - {
+        "unresolved",
+        "exempted_by",
+    }
+    assert set(example["goal_completion"]) == {"status", "reason", "evidence"}
     assert set(GeneralJudgeDraft.model_fields) - {"evidence_requests", "join_decisions"} >= set(
         example
     )
@@ -125,8 +130,10 @@ def test_reconciled_general_judge_example_shows_every_field() -> None:
         unresolved_findings=True,
         lookup_offer=True,
         join_decisions=True,
+        guidance=True,
     )
     assert set(example) == set(GeneralJudgeDraft.model_fields)
+    assert set(example["findings"][0]) == set(FindingDraft.model_fields)
     assert example["evidence_requests"] == []
     _assert_matches(example["join_decisions"][0], JoinDecisionDraft, "join_decision")
     _assert_matches(example["findings"][0], FindingDraft, "finding")
@@ -204,5 +211,5 @@ def test_compiler_example_matches_the_model() -> None:
 )
 def test_contracts_stay_short(example: dict[str, Any]) -> None:
     contract = render_contract(example)
-    assert len(contract.splitlines()) < 120
+    assert len(contract.splitlines()) < 130  # + goal_completion (D243)
     assert "$defs" not in contract and json.loads(contract.split("\n", 1)[1]) == example

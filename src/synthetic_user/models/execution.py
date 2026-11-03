@@ -162,6 +162,9 @@ class _ResponseBase(StrictModel):
     # raw/<execution_id>.json, clearing it here.
     latency_ms: float | None = Field(default=None, ge=0)
     raw_response: JsonValue = None
+    # The product's own response type exactly as returned (e.g. "sql", "unsupported",
+    # "blocked", "clarification") when the adapter maps one (D242); None = not exposed.
+    product_response_type: str | None = None
 
 
 class AnsweredResponse(_ResponseBase):

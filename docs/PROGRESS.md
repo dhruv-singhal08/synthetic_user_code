@@ -609,3 +609,35 @@
   config/app.yaml + app.safechain.yaml (evaluation.fail_severity), web/{results_csv.py,
   static/app.js}, README, tests; DECISIONS D241.
 - NOT verified: UI in a real browser (JS syntax-checked only).
+
+## Live-review fixes: verdict goal check, response type, guidance exceptions (2026-11-04)
+
+- P0 verdict: independent goal_completion in the General Judge call (D243); P0 executor:
+  response_mapping.response_type + product_response_type (D242); P1 guidance: exempted_by
+  findings (D243).
+- Files: adapters/http_common.py, config/products/generate_sql.adapter.yaml,
+  models/{execution,evaluation,metrics}.py, nodes/evaluator/{evaluator,verdict,general_judge,
+  general_prompt.py/.yaml,judge_common.py,judge_common_prompt.yaml,retrieval_prompt.py,
+  retrieval_judge.py,kpis.py}, web/{results_csv.py,static/app.js}, README, tests (new:
+  adapters/test_response_type.py, nodes/test_goal_and_exemptions.py); DECISIONS D242-D243.
+- Commands + results: ruff OK, format OK, mypy (103 files) OK, `pytest -q -W error` 799 passed.
+- Live Gemini (scratch): SQL with cg_id IN ('DUMMY') for "BCA 123456" + the user's guidance ->
+  exempted finding, all scores 1, PASS, exception named in the reason, no bug; a typed
+  `unsupported` denial of a supported request -> unjustified_decline, FAIL, BUG_001, Relevance 1.
+- NOT verified: the real NL2SQL endpoint (adapter covered by tests with the real contract file);
+  UI in a real browser (JS syntax-checked).
+
+## Bug reporting and root-cause deduplication (2026-11-04) - P1 live review
+
+- Verified first: one bug per failed evaluation, no cross-question dedup, distinct defects of a
+  question merged, non-failing findings inside bugs, no severity / hypothesis / impact.
+- Files: nodes/evaluator/{bugs.py (new), evaluator.py, verdict.py, judge_common.py,
+  judge_common_prompt.yaml, kpis.py}, models/evaluation.py (RootCause, BugOccurrence, optional
+  BugCandidate fields), pipeline.py, cli.py, web/static/app.js, README, tests (new:
+  nodes/test_bug_reporter.py); DECISIONS D244.
+- Commands + results: ruff OK, format OK, mypy (104 files) OK, `pytest -q -W error` 814 passed.
+- Live Gemini (scratch, sql_eval fixture): two questions both summing the gross LPC column ->
+  8 findings (different mechanisms per metric) -> ONE bug with 2 occurrences and a full
+  description; first attempt keyed on mechanism and over-split into 7 (fixed, regression test).
+- NOT verified: the UI bug list in a real browser (JS syntax-checked). Observation: the judge
+  passed an extra market breakdown the question did not ask for (Q_003 of the scratch check).

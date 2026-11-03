@@ -9,7 +9,8 @@ returns the response classification within the same call (no extra classifier ca
 Validation is structural: exactly the requested metric keys, 0 / 0.5 / 1 scores, every quote
 found in the response / artifacts / tool trace, every success criterion listed once, a finding
 for every score below 1, a factual-verification state where the metric asks for one, and no
-schema finding that names an SQL output alias, CTE or function (from the parser, not a regex).
+schema finding that names an SQL output alias, CTE or function (from the parser, not a regex),
+and a goal-completion assessment consistent with the response kind (D243).
 Invalid output is retried (bounded); exhausted retries or a provider failure produce
 ``evaluation_error`` results with the reason, never a guessed score.
 
@@ -30,12 +31,23 @@ from dataclasses import dataclass, field, replace
 from synthetic_user.core.exceptions import LLMOutputValidationError, LLMProviderError
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
-from synthetic_user.models.evaluation import GeneralJudgeDraft, JoinBasis
+from synthetic_user.models.evaluation import (
+    DECLINE_STATUSES,
+    GOAL_PROBLEM_SEVERITY,
+    GeneralJudgeDraft,
+    JoinBasis,
+)
+from synthetic_user.models.execution import DeniedResponse, ResponseClassification
 from synthetic_user.models.lookup import LookupOrigin
 from synthetic_user.models.metrics import EvidenceKind, ReferenceAsset
-from synthetic_user.nodes.evaluator.general_prompt import GeneralJudgeInput, build_general_prompt
+from synthetic_user.nodes.evaluator.general_prompt import (
+    PROMPTS,
+    GeneralJudgeInput,
+    build_general_prompt,
+)
 from synthetic_user.nodes.evaluator.judge_common import (
     COPY_HINT,
+    EvaluableResponse,
     check_scores_and_findings,
     normalise,
     quoted,
@@ -78,7 +90,9 @@ def check_general(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: s
     if draft.overall_verdict is None:
         return ["overall_verdict is required"]
     ids = [d.metric_id for d in data.definitions]
-    errors = check_scores_and_findings(draft.metrics, draft.findings, ids, quotable)
+    errors = check_scores_and_findings(
+        draft.metrics, draft.findings, ids, quotable, guidance=data.guidance
+    )
     if data.needs_classification and draft.response_classification is None:
         errors.append("response_classification is required (answered | unable_to_answer)")
     for definition in data.definitions:
@@ -107,7 +121,48 @@ def check_general(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: s
             )
     errors.extend(_non_base_identifier_findings(draft, data))
     errors.extend(_unaddressed_undocumented_joins(draft, data))
+    errors.extend(_goal_problems(draft, data, quotable))
     return errors
+
+
+def _goal_problems(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: str) -> list[str]:
+    """The goal-completion assessment (D243): present, a decline status exactly when the
+    response is a decline (typed, or as the judge classified it), and a quoted fragment for
+    every problem status. Whether a decline is justified is the judge's reading of the
+    contract; code never decides it."""
+    goal = draft.goal_completion
+    if goal is None:
+        return [PROMPTS.text("goal_required")]
+    kind = _response_kind(data.response, draft)
+    errors: list[str] = []
+    if kind is ResponseClassification.UNABLE_TO_ANSWER and goal.status not in DECLINE_STATUSES:
+        errors.append(PROMPTS.text("goal_decline_status", status=goal.status.value))
+    if kind is ResponseClassification.ANSWERED and goal.status in DECLINE_STATUSES:
+        errors.append(PROMPTS.text("goal_answer_status", status=goal.status.value))
+    if goal.status in GOAL_PROBLEM_SEVERITY:
+        if not goal.evidence:
+            errors.append(PROMPTS.text("goal_evidence_required", status=goal.status.value))
+        elif not quoted(goal.evidence, quotable):
+            errors.append(
+                PROMPTS.text(
+                    "goal_evidence_not_quoted", evidence=repr(goal.evidence), hint=COPY_HINT
+                )
+            )
+    return errors
+
+
+def _response_kind(
+    response: EvaluableResponse, draft: GeneralJudgeDraft
+) -> ResponseClassification | None:
+    """Answered / unable_to_answer from the typed outcome, the adapter or the judge's own
+    classification; None when nothing says."""
+    if isinstance(response, DeniedResponse):
+        return ResponseClassification.UNABLE_TO_ANSWER
+    if response.response_classification is not None:
+        return response.response_classification
+    if draft.response_classification is not None:
+        return ResponseClassification(draft.response_classification)
+    return None
 
 
 def _unaddressed_undocumented_joins(draft: GeneralJudgeDraft, data: GeneralJudgeInput) -> list[str]:

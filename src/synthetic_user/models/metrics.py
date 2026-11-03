@@ -24,7 +24,10 @@ EXPECTATION_FIELD_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
 # one of these ids, so every other key of success_criteria is a metric id.
 GENERAL_CRITERIA_KEY = "general"
 CHEAT_SHEET_KEY = "cheat_sheet"
-RESERVED_METRIC_IDS = frozenset({GENERAL_CRITERIA_KEY, CHEAT_SHEET_KEY})
+# The category of the finding made from the General Judge's goal-completion assessment (D243):
+# not a metric, so a metric never takes this id either.
+GOAL_COMPLETION_CATEGORY = "goal_completion"
+RESERVED_METRIC_IDS = frozenset({GENERAL_CRITERIA_KEY, CHEAT_SHEET_KEY, GOAL_COMPLETION_CATEGORY})
 # The 0 / 0.5 / 1 scale shared by every judged metric.
 JUDGED_SCALE = (0.0, 0.5, 1.0)
 METRIC_CONFIG_SCHEMA_VERSION = 1

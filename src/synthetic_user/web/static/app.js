@@ -990,14 +990,21 @@ function filterToQuestions(ids, label) {
 }
 
 function bugEntries() {
-  const out = [];
+  // One entry per bug id: a root cause seen in several questions is ONE bug (D244).
+  const byId = new Map();
   for (const ev of state.evaluations) {
     for (const bug of ev.bug_candidates) {
-      const findings = ev.findings.filter((f) => bug.finding_ids.includes(f.finding_id));
-      const severity = findings.reduce((best, f) => (SEVERITY_RANK[f.severity] > SEVERITY_RANK[best] ? f.severity : best), "low");
-      out.push({ bug, ev, severity, known: findings.length > 0 && findings.every((f) => f.matches_known_gap) });
+      const entry = byId.get(bug.bug_id) || { bug, questions: [], findings: [] };
+      entry.questions.push(ev.question_id);
+      entry.findings.push(...ev.findings.filter((f) => bug.finding_ids.includes(f.finding_id)));
+      byId.set(bug.bug_id, entry);
     }
   }
+  const out = [...byId.values()].map(({ bug, questions, findings }) => ({
+    bug, questions: [...new Set(questions)],
+    severity: findings.reduce((best, f) => (SEVERITY_RANK[f.severity] > SEVERITY_RANK[best] ? f.severity : best), "low"),
+    known: findings.length > 0 && findings.every((f) => f.matches_known_gap),
+  }));
   return out.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.bug.bug_id.localeCompare(b.bug.bug_id));
 }
 
@@ -1006,12 +1013,12 @@ function renderBugs() {
   block.classList.toggle("hidden", !state.kpis);
   const entries = bugEntries();
   if (!entries.length) { $("#bugs").replaceChildren(el("div", { class: "empty-card", text: "No bug candidates in this run." })); return; }
-  $("#bugs").replaceChildren(el("div", { class: "bug-list" }, entries.map(({ bug, severity, known }) => {
+  $("#bugs").replaceChildren(el("div", { class: "bug-list" }, entries.map(({ bug, questions, severity, known }) => {
     const row = state.rows.find((r) => r.question_id === bug.question_id);
-    const button = el("button", { class: `bug sev-${severity}`, type: "button" },
+    const button = el("button", { class: `bug sev-${severity}`, type: "button", title: bug.description },
       el("span", { class: "bug-ic" }, icon("bug")),
       el("span", {}, el("div", { class: "bug-title", text: bug.title }),
-        el("div", { class: "bug-meta", text: `${bug.bug_id} · ${bug.question_id} · Reproduce: “${bug.reproduction_question}”` })),
+        el("div", { class: "bug-meta", text: `${bug.bug_id} · ${questions.join(", ")} · Reproduce: “${bug.reproduction_question}”` })),
       el("span", { class: "bug-side" }, known ? pill("known gap", "neutral") : null, pill(severity, severity)));
     if (row) button.addEventListener("click", () => openDrawer(row));
     return button;
@@ -1178,7 +1185,7 @@ function openDrawer(row) {
         t.options && t.options.length ? el("div", { class: "turn-meta", text: `Options: ${t.options.join(" · ")}` }) : null)))));
   }
   if (row.product_outcome) {
-    const content = [kvList([["Outcome", OUTCOME_LABELS[row.product_outcome] || row.product_outcome], ["Response kind", human(row.response_classification)],
+    const content = [kvList([["Outcome", OUTCOME_LABELS[row.product_outcome] || row.product_outcome], ["Product response type", row.product_response_type], ["Response kind", human(row.response_classification)],
       ["Answer", row.answer_text], ["Message", row.product_message], ["Tool calls", split(row.tool_calls)], ["Retrieved context", row.retrieved_context],
       ["Latency", row.latency_ms ? ms(Number(row.latency_ms)) : ""]])];
     for (const artifact of split(row.artifacts)) content.push(el("pre", { text: artifact }));
@@ -1248,6 +1255,7 @@ function evaluationSections(ev) {
     ev.verdict_reason ? el("p", { class: "verdict-reason", text: ev.verdict_reason }) : null, minis,
     el("h4", { text: "Why these scores" }), why,
     kvList([["Product outcome", human(ev.product_outcome)], ["Response kind", ev.response_classification ? `${human(ev.response_classification)} (${human(ev.classification_source)})` : ""],
+      ["Goal completion", ev.goal_completion ? `${human(ev.goal_completion.status)}: ${ev.goal_completion.reason}` : ""],
       ["Judge's own opinion", ev.llm_verdict ? verdictPill(ev.llm_verdict) : ""], ["Verdict policy", ev.verdict_policy], ["Notes", ev.notes]]))];
 }
 

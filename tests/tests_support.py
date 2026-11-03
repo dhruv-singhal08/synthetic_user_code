@@ -87,3 +87,16 @@ def scripted_retrieval_reply(user: str, relevant: set[str] | None = None) -> dic
             for c in citations
         ]
     return reply
+
+
+def goal_for(user: str, classification: str | None = None) -> dict[str, Any]:
+    """A consistent goal_completion for a scripted General Judge reply (D243): a decline is a
+    justified decline, anything else a completed goal."""
+    declined = (
+        "Product response (typed denial" in user
+        or "typed by the product as unable to answer" in user
+        or classification == "unable_to_answer"
+    )
+    if declined:
+        return {"status": "justified_decline", "reason": "the contract justifies it"}
+    return {"status": "completed", "reason": "the goal is met"}

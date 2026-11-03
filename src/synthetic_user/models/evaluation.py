@@ -120,6 +120,32 @@ class MetricResult(StrictModel):
         return self
 
 
+class RootCauseMechanism(StrEnum):
+    """The failure mechanism behind a finding (product-agnostic, D244). Findings of the same
+    defect share mechanism + subject, so code can report them as ONE bug."""
+
+    WRONG_SOURCE = "wrong_source"  # wrong / nonexistent data source, table, column, doc or tool
+    INVALID_RELATIONSHIP = "invalid_relationship"  # sources combined over a wrong relationship
+    RULE_VIOLATION = "rule_violation"  # a documented business / data rule not applied or broken
+    WRONG_LOGIC = "wrong_logic"  # wrong calculation, aggregation, grouping, ordering or limit
+    WRONG_SCOPE = "wrong_scope"  # wrong, missing or extra filter, period or population
+    MISSING_OUTPUT = "missing_output"  # a requested output, or part of it, is missing
+    WRONG_RESULT = "wrong_result"  # the main result is wrong or misleading for another reason
+    UNJUSTIFIED_REFUSAL = "unjustified_refusal"  # declined a request the capability covers
+    UNSUPPORTED_CLAIM = "unsupported_claim"  # a claim the evidence does not support
+    CLARIFICATION = "clarification"  # a needed clarification missing, or an unneeded one asked
+    PRESENTATION = "presentation"  # format, wording or presentation only
+    OTHER = "other"
+
+
+class RootCause(StrictModel):
+    mechanism: RootCauseMechanism
+    # The exact table, column, rule id, tool, document or requested output the defect is about
+    # (no SQL aliases); None when there is no single subject.
+    subject: NonEmptyStr | None = None
+    hypothesis: NonEmptyStr  # one sentence: why the product most likely behaved this way
+
+
 class Finding(StrictModel):
     finding_id: NonEmptyStr = Field(pattern=r"^F_\d{3,}$")
     category: NonEmptyStr  # the metric id this finding explains
@@ -139,6 +165,11 @@ class Finding(StrictModel):
     # The evidence cannot establish whether this is a defect (e.g. an unrequested filter no
     # contract or rule establishes, contradictory rules): reported, never a pass or a fail.
     unresolved: bool = False
+    # A difference covered by an approved exception of the evaluation guidance (D243): the
+    # exact guidance text it relies on. Recorded and shown, never a defect, a fail or a bug.
+    exempted_by: NonEmptyStr | None = None
+    # The judge's root-cause reading (D244); None in older artifacts or when not given.
+    root_cause: RootCause | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -180,7 +211,25 @@ class CriterionResult(StrictModel):
     metric_id: NonEmptyStr | None = None
 
 
+class BugOccurrence(StrictModel):
+    """One question where a bug was observed, with what reproduces it."""
+
+    question_id: NonEmptyStr
+    scenario_id: NonEmptyStr
+    execution_id: NonEmptyStr
+    reproduction_question: NonEmptyStr
+    finding_ids: list[NonEmptyStr] = Field(min_length=1)
+    metric_ids: list[NonEmptyStr] = Field(default_factory=list)
+    evidence: list[NonEmptyStr] = Field(default_factory=list)  # exact quotes from the response
+
+
 class BugCandidate(StrictModel):
+    """One defect (D244: one bug per root cause). In an evaluation it is that question's
+    occurrence (the same bug_id in every affected evaluation); in bug_candidates.json it is
+    consolidated over every affected question. ``question_id`` / ``scenario_id`` /
+    ``execution_id`` / ``reproduction_question`` name the first occurrence. The fields after
+    ``status`` are absent in artifacts written before D244."""
+
     bug_id: NonEmptyStr = Field(pattern=r"^BUG_\d{3,}$")
     title: NonEmptyStr
     description: NonEmptyStr
@@ -191,6 +240,16 @@ class BugCandidate(StrictModel):
     execution_id: NonEmptyStr
     finding_ids: list[NonEmptyStr] = Field(min_length=1)
     status: BugStatus = BugStatus.NEEDS_REVIEW
+    severity: Severity | None = None  # the most severe finding behind the bug
+    root_cause: RootCause | None = None
+    # Grouping key: mechanism + canonical subject (cross-question) or + question (no subject).
+    root_cause_key: NonEmptyStr | None = None
+    metric_ids: list[NonEmptyStr] = Field(default_factory=list)
+    expected_behavior: NonEmptyStr | None = None
+    actual_behavior: NonEmptyStr | None = None
+    impact: NonEmptyStr | None = None
+    evidence: list[NonEmptyStr] = Field(default_factory=list)
+    occurrences: list[BugOccurrence] = Field(default_factory=list)
 
 
 class EvaluationResult(StrictModel):
@@ -218,6 +277,8 @@ class EvaluationResult(StrictModel):
     findings: list[Finding] = Field(default_factory=list)
     bug_candidates: list[BugCandidate] = Field(default_factory=list)
     llm_verdict: Verdict | None = None  # the general judge's own opinion; never decisive
+    # Independent goal-completion check (D243); None when no General Judge call ran.
+    goal_completion: GoalCompletion | None = None
     notes: list[NonEmptyStr] = Field(default_factory=list)
     # Catalog reconciliation + exact lookups behind the judgement (data_catalog runs whose
     # selected metrics need an SQL artifact); None otherwise and in earlier artifacts.
@@ -360,6 +421,8 @@ class FindingDraft(StrictModel):
     matches_known_gap: bool = False
     related_tags: list[NonEmptyStr] = Field(default_factory=list)
     unresolved: bool = False
+    exempted_by: NonEmptyStr | None = None
+    root_cause: RootCause | None = None
 
 
 class CriterionDraft(StrictModel):
@@ -386,6 +449,51 @@ class JoinDecisionDraft(StrictModel):
     reason: NonEmptyStr
 
 
+class GoalStatus(StrEnum):
+    """Does the response complete the user's goal for this question (D243)?"""
+
+    COMPLETED = "completed"  # the goal is met (minor issues allowed)
+    PARTIALLY_COMPLETED = "partially_completed"  # main result there; a requested part is not
+    NOT_COMPLETED = "not_completed"  # an attempted answer does not meet the goal
+    JUSTIFIED_DECLINE = "justified_decline"  # declined, and the contract / request justifies it
+    UNJUSTIFIED_DECLINE = "unjustified_decline"  # declined a request the capability covers
+
+
+DECLINE_STATUSES = frozenset({GoalStatus.JUSTIFIED_DECLINE, GoalStatus.UNJUSTIFIED_DECLINE})
+# A goal status that is a problem, and how severe it is (compared with evaluation.fail_severity).
+GOAL_PROBLEM_SEVERITY = {
+    GoalStatus.NOT_COMPLETED: Severity.CRITICAL,
+    GoalStatus.UNJUSTIFIED_DECLINE: Severity.CRITICAL,
+    GoalStatus.PARTIALLY_COMPLETED: Severity.HIGH,
+}
+
+
+# The failure mechanism of a goal problem (the goal finding's root cause, D244).
+GOAL_ROOT_CAUSE = {
+    GoalStatus.NOT_COMPLETED: RootCauseMechanism.WRONG_RESULT,
+    GoalStatus.UNJUSTIFIED_DECLINE: RootCauseMechanism.UNJUSTIFIED_REFUSAL,
+    GoalStatus.PARTIALLY_COMPLETED: RootCauseMechanism.MISSING_OUTPUT,
+}
+
+
+class GoalCompletionDraft(StrictModel):
+    status: GoalStatus
+    reason: NonEmptyStr
+    evidence: str | None = None  # exact fragment of the response showing the status
+
+
+class GoalCompletion(StrictModel):
+    """The General Judge's goal-completion assessment, independent of the metric scores."""
+
+    status: GoalStatus
+    reason: NonEmptyStr
+    evidence: str | None = None
+    # The scenario's capability the assessment was made against (supported / unsupported /
+    # unknown) and the product's own response type, when exposed.
+    capability: NonEmptyStr
+    product_response_type: str | None = None
+
+
 class GeneralJudgeDraft(StrictModel):
     """The General Judge's reply for one evaluable response."""
 
@@ -402,6 +510,8 @@ class GeneralJudgeDraft(StrictModel):
     evidence_requests: list[LookupRequest] = Field(default_factory=list)
     # One per undocumented join of the reconciliation (asked only when there is one).
     join_decisions: list[JoinDecisionDraft] = Field(default_factory=list)
+    # Required on a scoring reply (D243): checked by the General Judge.
+    goal_completion: GoalCompletionDraft | None = None
 
 
 class ChunkRelevanceDraft(StrictModel):

@@ -66,6 +66,7 @@ from synthetic_user.models.run import EvaluationGuidance, GenerationMode, RunMan
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluator.benchmark import load_cases, load_scenarios, run_benchmark
+from synthetic_user.nodes.evaluator.bugs import consolidate_bugs
 from synthetic_user.nodes.evaluator.kpis import compute_kpis, kpis_csv
 from synthetic_user.pipeline import RunInputs, RunSummary, Step, SyntheticUserPipeline
 from synthetic_user.prompts.smoke import SMOKE_SYSTEM, SMOKE_USER
@@ -598,7 +599,7 @@ async def _evaluate(
         evaluation_guidance=_guidance(settings, guidance_path),
     )
     results = await evaluator.evaluate_many(cases, product)
-    bugs = [b for r in results for b in r.bug_candidates]
+    bugs = consolidate_bugs(results)  # one entry per root cause (D244)
     kpis = compute_kpis(
         run_id="file-mode",
         product_id=product.product_id,

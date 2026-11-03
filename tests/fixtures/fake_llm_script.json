@@ -414,7 +414,11 @@
           }
         ],
         "findings": [],
-        "overall_verdict": "pass"
+        "overall_verdict": "pass",
+        "goal_completion": {
+          "status": "justified_decline",
+          "reason": "Forecasting is listed as not supported in the product contract."
+        }
       }
     },
     {
@@ -516,7 +520,11 @@
             "basis": "reference",
             "reason": "The reference lists only card_transactions.employee_id = employees.employee_id between these tables."
           }
-        ]
+        ],
+        "goal_completion": {
+          "status": "completed",
+          "reason": "the goal is met"
+        }
       }
     },
     {
@@ -560,7 +568,11 @@
           }
         ],
         "findings": [],
-        "overall_verdict": "pass"
+        "overall_verdict": "pass",
+        "goal_completion": {
+          "status": "completed",
+          "reason": "the goal is met"
+        }
       }
     }
   ]

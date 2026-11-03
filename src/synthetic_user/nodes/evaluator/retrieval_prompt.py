@@ -170,5 +170,5 @@ def retrieval_example(data: RetrievalJudgeInput) -> dict[str, Any]:
         example["citation_checks"] = [
             PROMPTS.data("citation_check_example", support=choices(SupportStatus))
         ]
-    example["findings"] = [finding_example(ids)] if ids else []
+    example["findings"] = [finding_example(ids, guidance=bool(data.guidance))] if ids else []
     return example

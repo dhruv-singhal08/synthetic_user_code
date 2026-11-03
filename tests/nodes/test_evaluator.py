@@ -104,9 +104,13 @@ def general(metrics: dict[str, Any], **extra: Any) -> dict[str, Any]:
         ],
         "findings": [],
         "overall_verdict": "pass",
+        "goal_completion": {"status": "completed", "reason": "the goal is met"},
     }
     reply.update(extra)
     return reply
+
+
+JUSTIFIED = {"status": "justified_decline", "reason": "The contract lists it as not supported."}
 
 
 def all_pass(*metric_ids: str, classify: bool = True) -> dict[str, Any]:
@@ -319,6 +323,7 @@ async def test_unable_to_answer_without_sql_is_not_a_sql_failure(
     decline = {"outcome": "answered", "text": "I cannot forecast spend."}
     reply = all_pass("relevance", "correctness_completeness")
     reply["response_classification"] = "unable_to_answer"
+    reply["goal_completion"] = JUSTIFIED
     result, _ = await evaluate(app_config, sample_product, case, sample_reference, decline, [reply])
     assert result.product_outcome == "answered"  # the executor's outcome is never overwritten
     assert result.response_classification == "unable_to_answer"
@@ -353,6 +358,7 @@ async def test_substantive_denial_is_judged_on_answer_level_metrics_only(
 ) -> None:
     denial = {"outcome": "denied", "message": "Forecasting is not supported yet."}
     reply = all_pass("relevance", "correctness_completeness", classify=False)
+    reply["goal_completion"] = JUSTIFIED
     result, llm = await evaluate(
         app_config, sample_product, case, sample_reference, denial, [reply]
     )

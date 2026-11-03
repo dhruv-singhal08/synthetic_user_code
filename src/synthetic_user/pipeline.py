@@ -52,6 +52,7 @@ from synthetic_user.models.reference import Reference, ReferencePack, ReferenceP
 from synthetic_user.models.run import EvaluationGuidance, GenerationMode, RunManifest
 from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+from synthetic_user.nodes.evaluator.bugs import consolidate_bugs
 from synthetic_user.nodes.evaluator.kpis import compute_kpis, kpis_csv
 from synthetic_user.nodes.executor.executor import ProductExecutor
 from synthetic_user.nodes.question.generator import QuestionGenerator
@@ -576,7 +577,7 @@ class SyntheticUserPipeline:
                 executions=executions,
                 evaluations=evaluations,
             )
-            bugs = [b for e in evaluations for b in e.bug_candidates]
+            bugs = consolidate_bugs(evaluations)
             kpis = self._store.read_model(self._file(run_id, "kpis"), RunKpis)
             return EvaluateStep(evaluations, bugs, kpis, reused=True)
 
@@ -598,7 +599,7 @@ class SyntheticUserPipeline:
         )
         with self._trace(run_id, Step.EVALUATE):
             evaluations = await evaluator.evaluate_many(cases, inputs.product)
-        bugs = [b for e in evaluations for b in e.bug_candidates]
+        bugs = consolidate_bugs(evaluations)  # one entry per root cause (D244)
         kpis = compute_kpis(
             run_id=run_id,
             product_id=inputs.product.product_id,

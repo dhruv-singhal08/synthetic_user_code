@@ -7,6 +7,9 @@ expose metric telemetry, all by dotted paths (no eval, no JSONPath):
 - ``citations``: citation -> chunk mappings exposed with the answer;
 - ``tool_trace``: the ordered tool / function calls (name, operation, arguments, result, error);
 - ``unable_to_answer_when``: a typed "cannot answer" response kind inside an answered payload;
+- ``response_type``: the product's own response-type field (D242): its raw value is kept on
+  every response and each listed value decides the outcome (e.g. ``unsupported: denied``), so
+  an HTTP 200 that did not complete the task is not recorded as answered;
 - ``correlation_id``: the product's request / trace id for this execution.
 
 Alternatively ``context_api`` fetches the context of the SAME execution from a separate
@@ -27,6 +30,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Self
 from urllib.parse import quote, urlsplit
@@ -141,6 +145,25 @@ class ToolTraceMapping(StrictModel):
     error: NonEmptyStr | None = None
 
 
+class ResponseTypeOutcome(StrEnum):
+    """What one value of the product's response-type field means (D242)."""
+
+    ANSWERED = "answered"  # an answer (typed answered)
+    UNABLE_TO_ANSWER = "unable_to_answer"  # an answered payload saying it cannot answer
+    DENIED = "denied"  # the product declined (unsupported, blocked, out of scope, ...)
+    CLARIFICATION = "clarification"  # the product asks a question back
+    ERROR = "error"  # the product reports an error
+
+
+class ResponseTypeMapping(StrictModel):
+    """``path``: the product's response-type field. ``outcomes``: product value -> meaning. A
+    value not listed is kept (and shown to the judges) with the payload mapped as an answer of
+    unknown kind, never assumed answered."""
+
+    path: NonEmptyStr
+    outcomes: dict[NonEmptyStr, ResponseTypeOutcome] = Field(min_length=1)
+
+
 class ResponseMapping(StrictModel):
     text: NonEmptyStr | None = None
     artifacts: list[ArtifactMapping] = Field(default_factory=list)
@@ -155,6 +178,8 @@ class ResponseMapping(StrictModel):
     product_version: NonEmptyStr | None = None
     # Typed "I cannot answer" inside an answered payload (product_outcome stays answered).
     unable_to_answer_when: NonEmptyStr | None = None
+    # The product's own response type (kept on every response) and what each value means.
+    response_type: ResponseTypeMapping | None = None
     correlation_id: NonEmptyStr | None = None
     context: ContextMapping | None = None
     citations: CitationMapping | None = None
@@ -419,25 +444,52 @@ class ResponseMapper:
     ) -> ProductResponse:
         mapping = self.mapping
         version = _text_at(document, mapping.product_version)
-        if matched := self._matched(self._error, document, condition_documents):
+        product_type, typed = self._response_type(document, condition_documents)
+        outcome = (
+            mapping.response_type.outcomes.get(product_type)
+            if mapping.response_type is not None and product_type is not None
+            else None
+        )
+
+        def by_type(wanted: ResponseTypeOutcome) -> Any | None:
+            return typed if outcome is wanted else None
+
+        if matched := (
+            self._matched(self._error, document, condition_documents)
+            or by_type(ResponseTypeOutcome.ERROR)
+        ):
             message = _message_at(matched, document, mapping.error_message)
             return ErrorResponse(
                 error_type="ProductError",
                 message=message or f"HTTP {status}: product reported an error",
                 product_version=version,
+                product_response_type=product_type,
             )
-        if matched := self._matched(self._clarification, document, condition_documents):
+        if matched := (
+            self._matched(self._clarification, document, condition_documents)
+            or by_type(ResponseTypeOutcome.CLARIFICATION)
+        ):
             message = _message_at(matched, document, mapping.clarification_message or mapping.text)
             if message:
                 options = _options_at(matched, document, mapping.clarification_options)
                 return ClarificationResponse(
-                    message=message, options=options, product_version=version
+                    message=message,
+                    options=options,
+                    product_version=version,
+                    product_response_type=product_type,
                 )
             return mapping_error(status, "clarification matched but no message was found")
-        if matched := self._matched(self._denied, document, condition_documents):
+        if matched := (
+            self._matched(self._denied, document, condition_documents)
+            or by_type(ResponseTypeOutcome.DENIED)
+        ):
             message = _message_at(matched, document, mapping.denied_message or mapping.text)
             if message:
-                return DeniedResponse(message=message, product_version=version)
+                return DeniedResponse(
+                    message=message,
+                    product_version=version,
+                    product_response_type=product_type,
+                )
             return mapping_error(status, "denied matched but no message was found")
         text = _text_at(document, mapping.text)
         artifacts = [
@@ -450,11 +502,21 @@ class ResponseMapper:
         if not text and not artifacts:
             return mapping_error(status, "no text or artifact at the mapped paths")
         classification = None
-        if self._unable is not None:
+        if outcome is ResponseTypeOutcome.ANSWERED:
+            classification = ResponseClassification.ANSWERED
+        elif outcome is ResponseTypeOutcome.UNABLE_TO_ANSWER:
+            classification = ResponseClassification.UNABLE_TO_ANSWER
+        elif self._unable is not None:
             classification = (
                 ResponseClassification.UNABLE_TO_ANSWER
                 if self._unable.matches(document)
                 else ResponseClassification.ANSWERED
+            )
+        if product_type is not None and outcome is None and mapping.response_type is not None:
+            _log.warning(
+                "Product response type %r is not listed in response_mapping.response_type."
+                "outcomes: mapped as an answer of unknown kind",
+                product_type,
             )
         context = None
         if mapping.context is not None:
@@ -464,12 +526,25 @@ class ResponseMapper:
         return AnsweredResponse(
             text=text,
             artifacts=artifacts,
-            product_version=version,
             response_classification=classification,
             tool_trace=map_tool_trace(document, mapping.tool_trace),
             retrieved_context=context,
             correlation_id=_text_at(document, mapping.correlation_id),
+            product_version=version,
+            product_response_type=product_type,
         )
+
+    def _response_type(
+        self, document: Any, alternatives: Sequence[Any]
+    ) -> tuple[str | None, Any | None]:
+        """The product's own response type (raw value as text) and the document holding it."""
+        if self.mapping.response_type is None:
+            return None, None
+        path = self.mapping.response_type.path
+        for candidate in (document, *reversed(alternatives)):
+            if (value := _text_at(candidate, path)) is not None:
+                return value, candidate
+        return None, None
 
     @staticmethod
     def _matched(

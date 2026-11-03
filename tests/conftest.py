@@ -23,7 +23,7 @@ from synthetic_user.references.loader import load_reference, parse_reference
 from synthetic_user.references.pack import build_pack
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact
-from tests_support import AGENT_CONTEXT, TOOL_CATALOG, scripted_retrieval_reply
+from tests_support import AGENT_CONTEXT, TOOL_CATALOG, goal_for, scripted_retrieval_reply
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_CONFIG = REPO_ROOT / "config" / "app.yaml"
@@ -299,8 +299,10 @@ def scripted_judge(
             else [],
             "overall_verdict": "fail" if bad else "pass",
         }
-        if "Also classify the response kind" in user:
+        asked = "Also classify the response kind" in user
+        if asked:
             reply["response_classification"] = classification
+        reply["goal_completion"] = goal_for(user, classification if asked else None)
         return reply
 
     return judge

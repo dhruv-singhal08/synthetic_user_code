@@ -16,6 +16,7 @@ from synthetic_user.models.evaluation import (
     EvidenceStatus,
     FindingDraft,
     JudgedScore,
+    RootCauseMechanism,
     Severity,
 )
 from synthetic_user.models.execution import AnsweredResponse, DeniedResponse
@@ -72,8 +73,12 @@ def guidance_block(guidance: str | None) -> str:
 
 
 def severity_rule() -> str:
-    """The finding-severity definitions shared by both judges (D241)."""
-    return PROMPTS.text("severity_rule")
+    """The finding-severity and root-cause definitions shared by both judges (D241, D244)."""
+    first, *rest = (PROMPTS.text("severity_rule") + "\n" + PROMPTS.text("root_cause_rule")).split(
+        "\n"
+    )
+    # The rules sit in an indented bullet list (``  ${severity_rule}``): indent what follows.
+    return "\n".join([first, *(f"  {line}" for line in rest)])
 
 
 def metric_blocks(definitions: Iterable[MetricDefinition]) -> str:
@@ -97,13 +102,17 @@ def score_example() -> dict[str, Any]:
     return example
 
 
-def finding_example(metric_ids: Sequence[str]) -> dict[str, Any]:
+def finding_example(metric_ids: Sequence[str], *, guidance: bool = False) -> dict[str, Any]:
+    """``guidance``: the run has evaluation guidance, so a finding may be exempted (D243)."""
     example: dict[str, Any] = PROMPTS.data(
         "finding_example",
         metrics=choices(metric_ids),
         severities=choices(Severity),
         evidence_statuses=choices(EvidenceStatus),
+        mechanisms=choices(RootCauseMechanism),
     )
+    if guidance:
+        example["exempted_by"] = PROMPTS.text("exempted_example")
     return example
 
 
@@ -133,9 +142,13 @@ def check_scores_and_findings(
     findings: Sequence[FindingDraft],
     expected: Sequence[str],
     quotable: str,
+    *,
+    guidance: str | None = None,
 ) -> list[str]:
     """Shared structural checks: exactly the expected metric keys, quotes found in the source,
-    finding categories among the judged metrics, and a finding for every score below 1."""
+    finding categories among the judged metrics, a finding for every score below 1 and, for an
+    exempted finding, its exception copied from the run's evaluation guidance (D243): an
+    exempted difference alone never explains a score below 1."""
     errors: list[str] = []
     wanted = set(expected)
     if missing := sorted(wanted - set(metrics)):
@@ -159,14 +172,21 @@ def check_scores_and_findings(
             errors.append(
                 f"finding {index}: evidence {finding.evidence!r} is not in the source ({COPY_HINT})"
             )
+        if finding.exempted_by is not None:
+            if guidance is None:
+                errors.append(PROMPTS.text("exempted_without_guidance", index=index))
+            elif not quoted(finding.exempted_by, guidance):
+                errors.append(PROMPTS.text("exempted_not_quoted", index=index, hint=COPY_HINT))
+    explained = {f.category for f in findings if f.exempted_by is None}
     for name, judged in metrics.items():
-        if (
-            name in wanted
-            and judged.score is not None
-            and judged.score < 1
-            and name not in categories
-        ):
+        if name not in wanted or judged.score is None or judged.score >= 1:
+            continue
+        if name not in categories:
             errors.append(missing_finding_message(name, judged.score))
+        elif name not in explained:
+            errors.append(
+                PROMPTS.text("exempted_only_finding", metric=name, score=f"{judged.score:g}")
+            )
     return errors
 
 

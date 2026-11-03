@@ -45,6 +45,7 @@ from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.references.loader import load_reference
 from synthetic_user.references.pack import build_pack
 from synthetic_user.web.results_csv import build_rows
+from tests_support import goal_for
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "references" / "sql_eval_catalog.yaml"
 SQL_METRICS = ("semantic_correctness", "schema_faithfulness", "rules_adherence")
@@ -155,6 +156,7 @@ def judge(
             "criteria": [{"criterion": CRITERION, "status": "met", "rationale": "ok"}],
             "findings": findings or [],
             "overall_verdict": "pass",
+            "goal_completion": goal_for(user),
         }
         if "response_classification" in user:
             reply["response_classification"] = "answered"

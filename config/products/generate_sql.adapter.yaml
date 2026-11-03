@@ -3,25 +3,36 @@
 #   Auth: Authorization: Bearer <BLUE_TOKEN>
 #   200 -> {"type": "sql", "result": "<SQL>", "widget_title": ..., "column_display_hints": [...],
 #           "message": "Here is the SQL query for: ...", "session_id": "<id>"}
+#   200 -> {"type": "clarification", "result": null, "message": "How many airline routes ...?",
+#           "options": ["Top 10 routes", "Top 25 routes", ...], "session_id": "<id>"}
+#   A clarification is answered (one of the options, as the persona) on the SAME session_id
+#   until the product returns SQL; needs product.clarification_policy: ask in the app config
+#   (product.max_clarification_turns caps the answers; still asking after that = recorded only).
 #
 # Web UI: upload this file as the contract in "Product connection" (the URL field wins over
 #   options.url below).
 # CLI:    product_adapter: ./config/products/generate_sql.adapter.yaml
 #
-# Before running (Mac/zsh):  export BLUE_TOKEN='<YOUR_BLUE_TOKEN>'   (token valid ~1 hour)
+# Token (valid ~1 hour): paste it into the Authorization header below, replacing
+#   PASTE_YOUR_BLUE_TOKEN_HERE. It is masked in logs, traces and stored results, but this file
+#   is tracked by git: do not commit it with the token in it. To keep the token out of the
+#   file instead, use  Authorization: "Bearer ${BLUE_TOKEN}"  and  export BLUE_TOKEN='...'.
+# SSL: certificate checking is OFF for this QA endpoint (ssl_verify: false below).
 type: http_json
 options:
   url: https://gcsgenaiconvbi-qa.aexp.com/generate/sql/?timeout=300   # ?timeout = the product's own limit
   method: POST
+  ssl_verify: false                   # SSL off: the endpoint's certificate is NOT checked
   timeout: 320                        # HTTP wait per question; a bit above the product's 300s
                                       # (the app config's product.timeout_seconds is also a limit; lower wins)
   headers:
-    Authorization: "Bearer ${BLUE_TOKEN}"
+    Authorization: "Bearer PASTE_YOUR_BLUE_TOKEN_HERE"   # or "Bearer ${BLUE_TOKEN}" (from env)
     accept: "*/*"
     Content-Type: application/json
   request_template:
     input: "{utterance}"
-    session_id: "{uuid}"              # a fresh session per question (no shared history)
+    session_id: "{session_id}"        # one session per question, reused for its clarification
+                                      # answers (a fresh one for the next question)
   response_mapping:
     text: message                     # the product's explanation, judged by the generic checks
     artifacts:
@@ -31,8 +42,10 @@ options:
         path: widget_title
       - kind: column_display_hints
         path: column_display_hints
-    # `type` is "sql" for an answer. Map other values when known, e.g.:
-    # clarification_when: "type == clarification"
-    # clarification_message: message
+    # `type` is "sql" for an answer and "clarification" when the product asks a question back.
+    clarification_when: "type == clarification"
+    clarification_message: message
+    clarification_options: options    # the choices offered; the synthetic user picks one
+    # Map other values when known, e.g.:
     # denied_when: "type == unsupported"
     # denied_message: message

@@ -138,7 +138,12 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
     expected = {
         "question": question.utterance,
         "conversation": [
-            {"role": t.role.value, "kind": t.kind.value, "message": t.message}
+            {
+                "role": t.role.value,
+                "kind": t.kind.value,
+                "message": t.message,
+                **({"options": list(t.options)} if t.options else {}),
+            }
             for t in data.conversation
         ],
         "expected_behavior": question.expectations.expected_behavior,

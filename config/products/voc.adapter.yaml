@@ -25,8 +25,9 @@ options:
     # Authorization: "Bearer ${VOC_API_TOKEN}"
   request_template:
     question: "{utterance}"
-    session: "{uuid}"                 # a fresh session per question (no shared history)
-    request_id: "synthetic-{uuid}"    # same uuid as the session, prefixed
+    session: "{session_id}"           # one session per question, reused for its clarification
+                                      # answers (a fresh one for the next question)
+    request_id: "synthetic-{uuid}"    # a fresh id per request
     channel: api
     is_admin: false
   response_mapping:

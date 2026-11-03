@@ -16,6 +16,7 @@ from synthetic_user.adapters.http_common import (
     render_template,
     resolve_ca_bundle,
     resolve_headers,
+    scrub_text,
 )
 from synthetic_user.adapters.http_sse import (
     HttpSseAdapter,
@@ -202,6 +203,25 @@ def test_headers_resolved_from_env_with_secrets_collected() -> None:
     with pytest.raises(ConfigError, match="MISSING") as info:
         resolve_headers({"Authorization": "${MISSING}"}, {})
     assert "Authorization" in str(info.value)
+
+
+def test_token_written_in_the_contract_needs_no_env_and_is_masked() -> None:
+    resolved = resolve_headers(
+        {
+            "Authorization": "Bearer literal-blue-token",
+            "X-Auth-Token": "second-literal",
+            "Accept": "application/json",
+        },
+        {},
+    )
+    assert resolved.values["Authorization"] == "Bearer literal-blue-token"
+    assert set(resolved.secrets) == {
+        "Bearer literal-blue-token",
+        "literal-blue-token",  # the bare credential is masked too
+        "second-literal",
+    }
+    echoed = "auth=Bearer literal-blue-token token=literal-blue-token x=second-literal json"
+    assert scrub_text(echoed, resolved.secrets) == "auth=*** token=*** x=*** json"
 
 
 def test_ca_bundle_resolution_keeps_verification_on(tmp_path: Path) -> None:

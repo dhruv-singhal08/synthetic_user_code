@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from synthetic_user.adapters.base import ProductRequest
+from synthetic_user.adapters.http_common import HttpRequest, HttpResult
+from synthetic_user.adapters.http_json import HttpJsonAdapter
 from synthetic_user.core.config import AppConfig, ClarificationPolicy
 from synthetic_user.core.trace import record_product_http, trace_redactions, trace_step
 from synthetic_user.llm.fake import FakeLLMClient
@@ -111,6 +116,86 @@ async def test_ask_policy_answers_clarification_as_persona_in_same_session(
         ("product", "answer"),
     ]
     assert "Which quarter?" in llm.calls[0].user and "synthetic user" in llm.calls[0].system
+
+
+INSIGHT_ADAPTER = Path(__file__).resolve().parents[2] / "config/products/generate_sql.adapter.yaml"
+INSIGHT_CLARIFICATION = {
+    "type": "clarification",
+    "result": None,
+    "message": "How many airline routes would you like to see in the ranking?",
+    "options": ["Top 10 routes", "Top 25 routes", "Top 50 routes", "All routes"],
+    "session_id": "echoed",
+}
+INSIGHT_SQL = {
+    "type": "sql",
+    "result": "SELECT a.route FROM t a ORDER BY 1 LIMIT 10",
+    "widget_title": "Top 10 routes",
+    "message": "Here is the SQL query",
+    "session_id": "echoed",
+}
+
+
+class ScriptedTransport:
+    """Replies with the next canned body; records every request."""
+
+    def __init__(self, bodies: list[dict[str, Any]]) -> None:
+        self.bodies = bodies
+        self.requests: list[HttpRequest] = []
+
+    async def __call__(self, request: HttpRequest) -> HttpResult:
+        self.requests.append(request)
+        body = self.bodies[min(len(self.requests), len(self.bodies)) - 1]
+        return HttpResult(200, json.dumps(body).encode())
+
+
+def _insight(transport: ScriptedTransport) -> HttpJsonAdapter:
+    """The shipped Insight Agent (generate_sql) contract, unchanged, over a stub transport."""
+    options = yaml.safe_load(INSIGHT_ADAPTER.read_text(encoding="utf-8"))["options"]
+    return HttpJsonAdapter.from_options(options, env={}, transport=transport)  # token in file
+
+
+async def test_insight_clarification_options_are_answered_on_the_same_session(
+    app_config: AppConfig, sample_scenarios: list[Scenario], sample_persona: Persona
+) -> None:
+    transport = ScriptedTransport([INSIGHT_CLARIFICATION, INSIGHT_SQL])
+    llm = FakeLLMClient([{"reply": "Top 10 routes"}])
+    record = await _execute(
+        _insight(transport),
+        _policy(app_config, ClarificationPolicy.ASK),
+        sample_scenarios[0],
+        sample_persona,
+        llm,
+    )
+    bodies = [json.loads(r.body or b"{}") for r in transport.requests]
+    assert [b["input"] for b in bodies] == ["Who spent most?", "Top 10 routes"]
+    assert bodies[0]["session_id"] == bodies[1]["session_id"] == record.session_id
+    # SSL off and the token written in the contract itself (no environment variable)
+    assert all(not r.ssl_verify for r in transport.requests)
+    assert transport.requests[0].headers["Authorization"] == "Bearer PASTE_YOUR_BLUE_TOKEN_HERE"
+    assert record.outcome == "answered"
+    assert record.response.first_artifact("sql").content == INSIGHT_SQL["result"]
+    clarification = record.turns[1]
+    assert clarification.kind == "clarification"
+    assert clarification.options == INSIGHT_CLARIFICATION["options"]
+    # the persona sees the offered options and is told to pick one of them verbatim
+    assert '"Top 25 routes"' in llm.calls[0].user
+    assert "reply with exactly one of them" in llm.calls[0].user
+
+
+async def test_clarification_turns_are_capped(
+    app_config: AppConfig, sample_scenarios: list[Scenario], sample_persona: Persona
+) -> None:
+    transport = ScriptedTransport([INSIGHT_CLARIFICATION])  # the product never stops asking
+    settings = _policy(app_config, ClarificationPolicy.ASK)
+    settings = settings.model_copy(
+        update={"product": settings.product.model_copy(update={"max_clarification_turns": 2})}
+    )
+    llm = FakeLLMClient([{"reply": "Top 10 routes"}, {"reply": "All routes"}])
+    record = await _execute(_insight(transport), settings, sample_scenarios[0], sample_persona, llm)
+    assert len(transport.requests) == 3  # question + 2 answers, then it stops
+    assert len(llm.calls) == 2
+    assert record.outcome == "clarification"  # unresolved: recorded only, never judged
+    assert [t.kind for t in record.turns].count("clarification_answer") == 2
 
 
 async def test_ask_policy_without_llm_records_the_clarification(

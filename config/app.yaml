@@ -19,6 +19,9 @@ product:
   timeout_seconds: 300        # per product call (the executor's timeout, any adapter)
   max_concurrency: 1          # questions sent to the product at once (1 = one by one)
   clarification_policy: assume # assume = hidden single-turn instruction; ask = send unchanged
+                              # and answer each clarification as the persona (same session)
+  max_clarification_turns: 3  # ask mode: clarification answers per question; still asking
+                              # after that = unresolved clarification (recorded only)
   ssl_verify: true            # SSL on/off for http_json / http_sse products: false = do NOT
                               # check the product's certificate (self-signed test servers only)
   context_max_chunks: 50      # retrieved chunks kept per execution (metric telemetry)

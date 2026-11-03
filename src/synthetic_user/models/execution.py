@@ -138,6 +138,8 @@ class ConversationTurn(StrictModel):
     role: ConversationRole
     kind: ConversationTurnKind
     message: NonEmptyStr
+    # Choices the product offered with a clarification (e.g. "Top 10 routes"); [] otherwise.
+    options: list[NonEmptyStr] = Field(default_factory=list)
     latency_ms: float | None = Field(default=None, ge=0)
 
 
@@ -197,6 +199,8 @@ class AnsweredResponse(_ResponseBase):
 class ClarificationResponse(_ResponseBase):
     outcome: Literal[ProductOutcome.CLARIFICATION] = ProductOutcome.CLARIFICATION
     message: NonEmptyStr
+    # Choices the product offered (response_mapping.clarification_options); [] when none.
+    options: list[NonEmptyStr] = Field(default_factory=list)
 
 
 class DeniedResponse(_ResponseBase):

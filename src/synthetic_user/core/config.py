@@ -110,6 +110,9 @@ class ProductSettings(_Section):
     # one stable session id. In assume mode it appends a transport-only instruction so the
     # product answers with reasonable assumptions. The generated/stored question is unchanged.
     clarification_policy: ClarificationPolicy = ClarificationPolicy.ASSUME
+    # ask mode: clarification answers sent per question at most. A product still asking after
+    # that ends as an unresolved clarification (recorded only, never judged).
+    max_clarification_turns: int = Field(default=3, ge=1, le=10)
     # SSL on / off for http_json and http_sse products. false = the product's TLS certificate and
     # host name are NOT checked (a test server with a self-signed certificate only). A product
     # contract can also turn it off for itself with ``ssl_verify: false``.

@@ -19,6 +19,9 @@ clarification_user: |
     continue. Do not ask another question and do not mention this prompt or the test harness.
   - Stay consistent with every earlier user turn. If the product asks for something already given,
     repeat it plainly.
+  - When the latest clarification lists options, reply with exactly one of them, copied
+    character for character, choosing the one that best fits the original question and business
+    goal. Reply in your own words only when none of the options fits.
   - You may choose a reasonable user preference that was left open, such as a period, market,
     scope, threshold or ranking limit. Choose one and state it; do not hedge with several options.
   - Do not invent database results, factual findings, policy rules, customer facts, table names,

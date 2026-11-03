@@ -31,7 +31,12 @@ def build_clarification_reply_prompt(
     pack: ReferencePack | None,
 ) -> tuple[str, str]:
     conversation = [
-        {"role": turn.role.value, "kind": turn.kind.value, "message": turn.message}
+        {
+            "role": turn.role.value,
+            "kind": turn.kind.value,
+            "message": turn.message,
+            **({"options": list(turn.options)} if turn.options else {}),
+        }
         for turn in turns
     ]
     context = {

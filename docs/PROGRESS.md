@@ -472,3 +472,21 @@
   678 passed.
 - NOT verified: the lock flow in a real browser (API covered by tests; script parses and
   every element id exists); SafeChain.
+
+## Clarification follow-ups for the Insight Agent (2026-11-03) - user request
+
+- Files: models/execution.py (options on ClarificationResponse / ConversationTurn),
+  adapters/http_common.py (`clarification_options`), core/config.py
+  (`product.max_clarification_turns`), nodes/executor/{executor.py, prompt.py, prompt.yaml},
+  nodes/evaluator/general_prompt.py, web/static/{app.js, product_contract_template.yaml},
+  config/app*.yaml, config/products/{generate_sql,voc}.adapter.yaml; tests (executor
+  conversations with the shipped Insight contract, options mapping). See D227.
+- Commands + results: ruff OK, format OK, mypy (97 files) OK, `pytest -q -W error` 684 passed.
+- Verified: live Gemini as the persona answered the Insight clarification from the user's
+  Postman capture with "Top 10 routes" (an exact option) on the same session_id; the SQL that
+  followed became the evaluated answer. Product side was a stub transport replaying the capture.
+- NOT verified: the real Insight Agent endpoint (Amex network + BLUE_TOKEN), in particular that
+  it accepts an option text as the next `input` on the same session_id (the Postman capture
+  shows the option sent as input, but with a different session id).
+- Follow-up (same day): Insight contract SSL off + token written in the file (D228); credential
+  masking widened to literal tokens. Gate: 685 passed.

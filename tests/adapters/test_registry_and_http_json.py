@@ -265,6 +265,24 @@ async def test_clarification_and_denied_rules() -> None:
     assert response.message == "Forecasts are not supported."
 
 
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (["Top 10", " Top 25 ", "", None], ["Top 10", "Top 25"]),  # blanks are not choices
+        ("All routes", ["All routes"]),  # a single value is one choice
+        ([{"label": "Q1"}], ['{"label": "Q1"}']),  # structured items kept as JSON text
+        (None, []),
+    ],
+)
+async def test_clarification_options_are_mapped(options: Any, expected: list[str]) -> None:
+    mapping = {**HTTP_OPTIONS["response_mapping"], "clarification_options": "data.options"}
+    body: dict[str, Any] = {"data": {"type": "clarification", "answer": "How many?"}}
+    if options is not None:
+        body["data"]["options"] = options
+    response = await _http(StubTransport(body=body), response_mapping=mapping).send(_req())
+    assert isinstance(response, ClarificationResponse) and response.options == expected
+
+
 async def test_equality_uses_json_text_for_non_strings() -> None:
     mapping = {**HTTP_OPTIONS["response_mapping"], "denied_when": "data.ok == false"}
     adapter = _http(

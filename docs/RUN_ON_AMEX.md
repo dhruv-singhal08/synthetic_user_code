@@ -103,8 +103,9 @@ In the UI (top to bottom):
    guide for a grounded run, or leave it **off** for an ungrounded run. Then **Start run**.
 2. **Product connection** - enter the product URL, upload a contract (YAML/JSON: request
    template + where the answer is in the reply; **Download a contract template** shows the
-   format) and click **Connect**. Put tokens in `.env` and reference them as
-   `${PRODUCT_API_TOKEN}` in the contract headers - never paste a token into the file.
+   format) and click **Connect**. A token can be written straight into the contract header
+   (`Authorization: "Bearer <token>"`) or referenced as `${PRODUCT_API_TOKEN}` from `.env`; it
+   is masked in logs and results either way. Do not commit a contract file that holds a token.
    **Mock product** is for demos only (an LLM stand-in plays the described product). Without a
    connection the configured fixture product answers, and it only knows the offline demo
    questions: live questions come back as `error` (recorded only).

@@ -1113,7 +1113,8 @@ function openDrawer(row) {
     parts.push(section(["Conversation", el("span", { class: "section-note", text: `session ${execution.session_id || "—"}` })],
       el("div", { class: "turns" }, execution.turns.map((t) => el("div", { class: `turn ${t.role}` },
         el("div", { class: "turn-meta", text: `${t.role} · ${human(t.kind)}${t.latency_ms != null ? ` · ${ms(t.latency_ms)}` : ""}` }),
-        el("div", { class: "turn-msg", text: t.message }))))));
+        el("div", { class: "turn-msg", text: t.message }),
+        t.options && t.options.length ? el("div", { class: "turn-meta", text: `Options: ${t.options.join(" · ")}` }) : null)))));
   }
   if (row.product_outcome) {
     const content = [kvList([["Outcome", OUTCOME_LABELS[row.product_outcome] || row.product_outcome], ["Response kind", human(row.response_classification)],

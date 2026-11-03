@@ -15,6 +15,7 @@ product:
   timeout_seconds: 30
   max_concurrency: 4
   clarification_policy: assume
+  max_clarification_turns: 3
   ssl_verify: true
 product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.yaml
   type: fixture             # fixture | http_json | http_sse | python

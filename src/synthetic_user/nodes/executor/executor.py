@@ -3,8 +3,10 @@
 Depends on the ProductAdapter protocol and, when clarification policy is ``ask``, the configured
 LLM for persona replies. Per question:
 - one stable session id is reused for every product turn;
-- a clarification is answered as the persona and sent back until the product reaches a terminal
-  answer / denial / error or the overall ``product.timeout_seconds`` expires;
+- a clarification is answered as the persona (picking one of the product's offered options when
+  it lists them) and sent back on the same session until the product reaches a terminal
+  answer / denial / error, ``product.max_clarification_turns`` answers were sent (the result
+  stays an unresolved clarification) or the overall ``product.timeout_seconds`` expires;
 - ProductAdapterError -> ErrorResponse; any other exception at this boundary -> ErrorResponse
   (error_type = class name), logged with traceback (one documented broad catch, no bare except);
 - output that fails ProductResponse validation -> ErrorResponse "invalid_adapter_response"
@@ -191,6 +193,8 @@ class ProductExecutor:
         ]
         raw_bodies: list[JsonValue] = []
         completed_calls = 0
+        clarification_answers = 0
+        max_answers = self._settings.product.max_clarification_turns
         single_call_latency: float | None = None
         redactions = (
             (
@@ -275,6 +279,14 @@ class ProductExecutor:
                     )
                     if not can_continue:
                         break
+                    if clarification_answers >= max_answers:
+                        self._log.info(
+                            "%s: product still asks for clarification after %d answer(s); "
+                            "recorded as an unresolved clarification",
+                            question.question_id,
+                            clarification_answers,
+                        )
+                        break
                     assert persona is not None and scenario is not None
                     remaining = timeout - (time.perf_counter() - conversation_start)
                     if remaining <= 0:
@@ -308,6 +320,7 @@ class ProductExecutor:
                         )
                     )
                     next_utterance = reply
+                    clarification_answers += 1
 
             # Latency covers the product conversation only, never the context fetch.
             elapsed_ms = (time.perf_counter() - conversation_start) * 1000
@@ -455,8 +468,10 @@ def bound_context(
 
 
 def _response_turn(response: ProductResponse, latency_ms: float | None) -> ConversationTurn:
+    options: list[str] = []
     if isinstance(response, ClarificationResponse):
         kind, message = ConversationTurnKind.CLARIFICATION, response.message
+        options = list(response.options)
     elif isinstance(response, AnsweredResponse):
         kinds = ", ".join(a.kind for a in response.artifacts)
         message = response.text or f"Returned artifact(s): {kinds}"
@@ -473,6 +488,7 @@ def _response_turn(response: ProductResponse, latency_ms: float | None) -> Conve
         role=ConversationRole.PRODUCT,
         kind=kind,
         message=message,
+        options=options,
         latency_ms=latency_ms,
     )
 

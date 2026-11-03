@@ -63,6 +63,9 @@ _MISSING = object()
 _SENSITIVE_HEADER_NAMES = frozenset(
     {"authorization", "proxy-authorization", "x-api-key", "api-key"}
 )
+# A header whose NAME contains one of these carries a credential: its value (written in the
+# contract or taken from ${ENV}) is scrubbed from logs, traces and stored evidence.
+_CREDENTIAL_NAME_PARTS = ("auth", "token", "secret", "password", "api-key", "apikey", "cookie")
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,8 @@ class ResponseMapping(StrictModel):
     artifacts: list[ArtifactMapping] = Field(default_factory=list)
     clarification_when: NonEmptyStr | None = None
     clarification_message: NonEmptyStr | None = None
+    # Path to the choices offered with a clarification (a list; each item kept as text).
+    clarification_options: NonEmptyStr | None = None
     denied_when: NonEmptyStr | None = None
     denied_message: NonEmptyStr | None = None
     error_when: NonEmptyStr | None = None
@@ -273,9 +278,20 @@ def resolve_headers(templates: Mapping[str, str], env: Mapping[str, str]) -> Res
             )
         values[header] = _ENV_REF.sub(lambda match: env[match.group(1)], template)
         secrets.update(env[name] for name in names)
-        if header.casefold() in _SENSITIVE_HEADER_NAMES and values[header]:
-            secrets.add(values[header])
+        value = values[header].strip()
+        if value and is_credential_header(header):
+            # The whole value and, for "<scheme> <credential>", the bare credential too: a
+            # token written straight into the contract is masked like one from ${ENV}.
+            secrets.add(value)
+            scheme, _, credential = value.partition(" ")
+            if scheme and credential.strip():
+                secrets.add(credential.strip())
     return ResolvedHeaders(values, tuple(sorted(secrets, key=len, reverse=True)))
+
+
+def is_credential_header(name: str) -> bool:
+    folded = name.casefold()
+    return folded in _SENSITIVE_HEADER_NAMES or any(p in folded for p in _CREDENTIAL_NAME_PARTS)
 
 
 def resolve_ca_bundle(template: str | None, env: Mapping[str, str]) -> str | None:
@@ -413,7 +429,10 @@ class ResponseMapper:
         if matched := self._matched(self._clarification, document, condition_documents):
             message = _message_at(matched, document, mapping.clarification_message or mapping.text)
             if message:
-                return ClarificationResponse(message=message, product_version=version)
+                options = _options_at(matched, document, mapping.clarification_options)
+                return ClarificationResponse(
+                    message=message, options=options, product_version=version
+                )
             return mapping_error(status, "clarification matched but no message was found")
         if matched := self._matched(self._denied, document, condition_documents):
             message = _message_at(matched, document, mapping.denied_message or mapping.text)
@@ -743,6 +762,18 @@ def _json_at(document: Any, path: str | None) -> Any:
 def _message_at(matched: Any, document: Any, path: str | None) -> str | None:
     fallback = _text_at(document, path) if matched is not document else None
     return _text_at(matched, path) or fallback
+
+
+def _options_at(matched: Any, document: Any, path: str | None) -> list[str]:
+    """Clarification choices: every non-empty item of the list at ``path`` as text (a single
+    value is one choice); [] when the path is not mapped or absent."""
+    if path is None:
+        return []
+    found = _json_at(matched, path) if matched is not document else None
+    if found is None:
+        found = _json_at(document, path)
+    items = found if isinstance(found, list) else [] if found is None else [found]
+    return [text for item in items if item is not None and (text := _as_text(item).strip())]
 
 
 def _artifact_content(found: Any) -> str | dict[str, Any] | list[Any]:

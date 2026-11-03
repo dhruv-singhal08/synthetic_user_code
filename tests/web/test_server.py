@@ -439,7 +439,8 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     after_scenarios = _steps(client, run_id, "reference", "scenarios")
     assert len(after_scenarios["rows"]) == 3
     assert all(r["scenario_id"] and not r["question_id"] for r in after_scenarios["rows"])
-    assert "employees (full_name)" in after_scenarios["rows"][0]["cheat_sheet"]
+    sheet = json.loads(after_scenarios["rows"][0]["success_criteria"])["cheat_sheet"]
+    assert "employees (full_name)" in sheet["items"]
     assert after_scenarios["detail"]["reference_packs"] == 3
     assert [p["pack_id"] for p in after_scenarios["reference_packs"]] == [
         "RP_SCN_001",
@@ -716,7 +717,8 @@ def test_ungrounded_run_has_no_reference_pack(client: TestClient) -> None:
     assert state["sources"]["reference"] == "off"
     body = _steps(client, run_id, "scenarios", "questions")
     assert body["rows"] and all(r["mode"] == "ungrounded" for r in body["rows"])
-    assert all(not r["cheat_sheet"] for r in body["rows"]) and body["reference_packs"] == []
+    assert body["reference_packs"] == []
+    assert all("cheat_sheet" not in json.loads(r["success_criteria"]) for r in body["rows"])
     assert all(r["question"] for r in body["rows"])
 
 
@@ -753,7 +755,8 @@ def test_edit_reference_pack(client: TestClient) -> None:
     assert body["pack"]["edited"] is True
     assert body["state"]["steps_done"] == ["reference", "scenarios"]  # questions are stale
     assert all(not r["question_id"] for r in body["rows"])
-    assert body["rows"][0]["cheat_sheet"] == "employees (full_name)"
+    sheet = json.loads(body["rows"][0]["success_criteria"])["cheat_sheet"]
+    assert sheet["items"] == ["employees (full_name)"]
     missing = client.put(f"/api/runs/{run_id}/reference_packs/RP_SCN_009", json=draft)
     assert missing.status_code == 404
 

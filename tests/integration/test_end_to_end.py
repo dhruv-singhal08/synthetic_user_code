@@ -573,3 +573,25 @@ async def test_first_evaluation_with_guidance_is_not_logged_as_a_change(
         await pipeline.run(replace(inputs, evaluation_guidance=guidance), run_id=RUN_ID)
     assert "Evaluation guidance applied to every judge call" in caplog.text  # captured
     assert "Evaluation guidance changed" not in caplog.text
+
+
+async def test_rerunning_questions_passes_the_earlier_ones_as_diversity_context(
+    settings: AppConfig, inputs: RunInputs
+) -> None:
+    """D239: re-running the questions step (same scenarios) gives each scenario's call its
+    earlier questions; a repeat of one of them is a near-duplicate, never silently kept."""
+    pipeline, _, _ = _pipeline(settings)
+    await pipeline.run(inputs, run_id=RUN_ID)
+    first = _load(
+        settings.paths.artifacts_dir / "runs" / RUN_ID,
+        "questions.json",
+        TypeAdapter(list[QuestionCase]),
+    )
+    pipeline2, llm2, _ = _pipeline(settings)
+    step = await pipeline2.generate_questions(RUN_ID, inputs, force=True)
+    prompts = [c.user for c in llm2.calls if "You role-play" in c.system]
+    assert prompts and all("Questions already generated for this scenario" in p for p in prompts)
+    assert all(q.utterance in " ".join(prompts) for q in first)
+    # the offline script repeats its questions: rejected as near-duplicates with the reason
+    assert not step.questions
+    assert all(r.reasons[0].startswith("near-duplicate of earlier question") for r in step.rejected)

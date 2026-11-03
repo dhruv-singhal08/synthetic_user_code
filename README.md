@@ -39,7 +39,7 @@ by every later step. See [docs/DECISIONS.md](docs/DECISIONS.md) D211-D224.
 |---|---|---|
 | Reference check | Loads your reference (data_catalog or document_collection, YAML/JSON, size-capped) and optional usage instructions; the id changes when either changes. None given -> ungrounded. | no |
 | 2 Scenarios | Business goal + success criteria (guidance) for tasks this persona would do with this product. Grounded: also a **cheat sheet** (Reference Pack) - the tables / columns / joins / rule ids, or the documents, a correct answer needs, picked by exact name; code checks every pick and copies the reference's own text in (unknown picks dropped and recorded; none valid -> scenario rejected). Saved in `reference_packs.json`, editable in the UI. | yes |
-| 3 Questions | One call per accepted scenario (concurrent, `generation.question.max_parallel_scenarios`, default 5; order kept, failures isolated). Natural-language questions in the persona's voice; each carries `expected_behavior`, 1-4 `success_criteria` and `metric_expectations` **only** for selected metrics that need a question-specific value (`generated` / `not_applicable` / `cannot_generate` with a reason). Grounded: the cheat sheet + instructions inform the question; identifier-like names must not leak into it. Only structural checks (counts, limits, canonical names, exact duplicates, leaks) - no regex semantic gates. | yes |
+| 3 Questions | One call per accepted scenario (concurrent, `generation.question.max_parallel_scenarios`, default 5; order kept, failures isolated). Natural-language questions in the persona's voice; the LLM writes `expected_behavior`, 1-4 criteria and metric expectations **only** for selected metrics that need a question-specific value (`generated` / `not_applicable` / `cannot_generate` with a reason). After validation code collects everything except `expected_behavior` into ONE structured `success_criteria` (D240): `general` (the criteria), one key per such metric (its metric id) and `cheat_sheet` (a copy of the scenario's pack, grounded only); each judge reads only its metrics' keys. Grounded: the cheat sheet + instructions inform the question; identifier-like names must not leak into it. Only structural checks (counts, limits, canonical names, exact duplicates, leaks) - no regex semantic gates. | yes |
 | 4 Product executor | Sends each question through the configured product adapter and records answered (text + artifacts, e.g. SQL) / clarification / denied / error / timeout, plus the exposed tool trace and the retrieved context (from the response, or a separate context API for the same execution). Artifacts are **never executed**. | no |
 | 5 Evaluator | Applicability is decided by code from the frozen metric definitions, the question's expectations, the reference and the captured evidence. Then at most two LLM calls per evaluable response: the **General Judge** and the **Retrieval/Grounding Judge** (each only when it has metrics). Every selected metric gets a score (0 / 0.5 / 1; MRR's reciprocal rank by code) or a status with its reason: `not_applicable`, `cannot_generate`, `evidence_unavailable`, `inconclusive`, `evaluation_error`, `unavailable`. Answers and **substantive denials** are judged; unresolved clarifications, errors and timeouts are recorded only. `product_outcome` (transport) and `response_classification` (answered / unable_to_answer / clarification / unknown) are separate columns. A provisional verdict policy decides pass / fail / inconclusive. Run KPIs go to `kpis.json` / `kpis.csv`. | yes |
 
@@ -167,6 +167,8 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `evaluation.catalog_namespaces` | `null` | Qualifiers accepted on table names in generated SQL (`ns.table`): `null` = any qualifier is dropped before the exact catalog lookup; a list = only these (D230) |
 | `evaluation.reference_lookup.enabled` | `true` | The General Judge may request ONE batch of exact catalog lookups (one extra call) on SQL + data-catalog runs; `false` = one call, deterministic reconciliation only (D231) |
 | `evaluation.reference_lookup.max_requests` | `10` | Lookups allowed in that batch (1-50) |
+| `generation.question.diversity_check` | `true` | Flag near-duplicate questions of one scenario (same structure + similar content words) and expectations copied between questions; uses the existing retry (D239) |
+| `generation.question.max_question_similarity` | `0.6` | Content-word similarity (0-1) at which same-structure questions count as near-duplicates |
 | `evaluation.max_guidance_chars` | `20000` | Maximum length of the optional evaluation guidance (D237) |
 | `evaluation.max_custom_metrics` | `20` | Custom metrics per run (text + workbook rows) |
 | `product.context_max_chunks` / `context_max_chunk_chars` | `50` / `4000` | Bounds of the stored retrieved context |
@@ -201,7 +203,7 @@ Global options `--config PATH`, `--log-level LEVEL` (also accepted after the com
 | `generate-questions` | `--run-id` (required), `--count` (`question_count`) | Node 3; always regenerates |
 | `execute` | `--run-id` (required), `--adapter-config FILE` (config `product_adapter`) | Node 4 via the product adapter; always regenerates |
 | `export-fixture-template` | `--run-id` (required), `--out` (`runs/<run_id>/fixture_template.json`) | Template (question_id, utterance, outcome, text, artifacts[]) to paste real answers into, for any product |
-| `evaluate` | `--run-id`, **or** `--questions --executions --scenarios` (+ `--reference-packs` for grounded questions, `--metric-config` (a run's `metric_config.json`; default: built-in `default_metrics`), `--out-dir`, default: executions file's folder) | Node 5 |
+| `evaluate` | `--run-id`, **or** `--questions --executions --scenarios` (+ `--metric-config` (a run's `metric_config.json`; default: built-in `default_metrics`), `--out-dir`, default: executions file's folder) | Node 5 |
 | `run` | `--run-id` (new), `--reference`, `--from-step STEP`, `--force-step STEP` (repeatable), `--scenario-count`, `--question-count`, `--metrics`, `--custom-metrics-text`, `--custom-metrics-file` | Full pipeline with reuse (a changed metric selection regenerates from scenarios) |
 | `migrate-run` | `--run-id` (required), `--map-completion` | Legacy (profile-era) runs: reports their metric ids; with `--map-completion` explicitly relabels `completion` as `correctness_completeness` (marked; original kept as `evaluations.legacy.json`) |
 | `benchmark-evaluator` | `--cases`, `--scenarios` (from `inputs.benchmark_*`; products from `inputs.benchmark_product_paths`) | **Live only**: evaluator agreement with labeled cases, per mode/product and overall |
@@ -389,8 +391,8 @@ Without a reachable product (or before writing its adapter), you supply what the
    product, paste each answer into `runs/<run_id>/executions.json` (one `ExecutionRecord`
    per question; see `src/synthetic_user/models/execution.py`), then
    `synthetic-user evaluate --run-id RUN_…`. Or use file mode:
-   `evaluate --questions q.json --executions e.json --scenarios s.json
-   --reference-packs reference_packs.json --out-dir out/` (packs needed for grounded runs).
+   `evaluate --questions q.json --executions e.json --scenarios s.json --out-dir out/`
+   (grounded questions carry their cheat sheet in `success_criteria`).
 3. **Notebook:** `notebooks/pipeline_walkthrough.ipynb` predates design v2.1/v3 and does not
    run against the current code (to be ported).
 

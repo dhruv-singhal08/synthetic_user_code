@@ -308,7 +308,7 @@ def test_removed_scenario_keys_are_refused(tmp_path: Path, key: str, message: st
 def test_removed_question_keys_are_refused(tmp_path: Path) -> None:
     data = _minimal()
     data["generation"] = {"question": {"near_duplicate_threshold": 0.8}}
-    with pytest.raises(ConfigError, match="only exact duplicates"):
+    with pytest.raises(ConfigError, match="replaced by diversity_check"):
         load_config(_write(tmp_path, data), env={})
 
 

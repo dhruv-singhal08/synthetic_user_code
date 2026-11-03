@@ -14,8 +14,12 @@ Validation keeps the deterministic, structural checks only: schema / enums, coun
 of the existing hard policy (deliverables, sources, words, criteria, complexity, follow-ups),
 canonical product data-source membership, metric-expectation shape and canonical tool / source
 membership, exact structural duplicates (normalized text equality) and the reference-name leak
-check (a security check). There is no regex / keyword semantic rejection and no similarity-based
-duplicate detection: semantic fairness is the prompt's job and offline regression tests'.
+check (a security check). There is no regex / keyword semantic rejection.
+
+Semantic diversity (D239): the prompt asks for different angles of the same goal and lists the
+scenario's earlier questions (when the step is re-run) in the SAME call; diversity.py flags
+near-duplicates (same structure + near-identical content words) and expectations copied from a
+sibling. Those feed the existing bounded retry; what persists is rejected per question.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,6 +63,12 @@ from synthetic_user.models.question import (
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
+from synthetic_user.nodes.question.diversity import (
+    QuestionShape,
+    diversity_problem,
+    diversity_problems,
+    shape_of,
+)
 from synthetic_user.nodes.question.expectations import (
     ExpectationRequest,
     build_expectations,
@@ -139,9 +149,11 @@ class QuestionGenerator:
         *,
         count: int | None = None,
         metrics: Sequence[MetricDefinition] = (),
+        previous: Mapping[str, Sequence[QuestionCase]] | None = None,
     ) -> QuestionGenerationResult:
         """``reference`` and ``packs`` are needed only for grounded scenarios; ``metrics`` are
-        the run's selected (frozen) metric definitions."""
+        the run's selected (frozen) metric definitions; ``previous`` = questions already
+        generated per scenario id (diversity context when the step is re-run)."""
         cfg = self._settings.generation.question
         per_scenario = count if count is not None else cfg.question_count
         if per_scenario < 1:
@@ -151,7 +163,15 @@ class QuestionGenerator:
         outcomes = await asyncio.gather(
             *(
                 self._for_scenario(
-                    persona, product, s, grounding, per_scenario, semaphore, reference, metrics
+                    persona,
+                    product,
+                    s,
+                    grounding,
+                    per_scenario,
+                    semaphore,
+                    reference,
+                    metrics,
+                    list((previous or {}).get(s.id, ())),
                 )
                 for s, grounding in zip(scenarios, groundings, strict=True)
             )
@@ -217,8 +237,15 @@ class QuestionGenerator:
         semaphore: asyncio.Semaphore,
         reference: Reference | None,
         metrics: Sequence[MetricDefinition],
+        previous: Sequence[QuestionCase] = (),
     ) -> _ScenarioOutcome:
         cfg = self._settings.generation.question
+        earlier = [
+            shape
+            for q in previous
+            if (shape := shape_of(q, f"earlier question {q.question_id}")) is not None
+        ]
+        threshold = cfg.max_question_similarity
         rules = persona_question_rules(persona, self._settings)
         identifiers = pack_identifiers(grounding[0]) if grounding is not None else []
         # Leak check only in grounded mode (there are no identifiers otherwise).
@@ -241,6 +268,7 @@ class QuestionGenerator:
             language=cfg.language,
             allow_vague_questions=rules.allow_vague,
             technical_persona=rules.technical,
+            previous_questions=tuple(q.utterance for q in previous),
         )
         system, user = build_question_prompt(
             persona,
@@ -256,6 +284,7 @@ class QuestionGenerator:
         def post_validate(batch: _RawQuestionBatch) -> list[str]:
             last[:] = [batch]
             errors: list[str] = []
+            shapes: list[QuestionShape | None] = []
             for i, raw in enumerate(batch.questions, start=1):
                 if enforce_leaks and (
                     leaks := find_leaks(str(raw.get("utterance", "")), identifiers)
@@ -269,7 +298,9 @@ class QuestionGenerator:
                 except ValidationError:
                     # Schema failures are rejected item-by-item below. Retrying here would let
                     # one malformed item consume retries for otherwise valid questions.
+                    shapes.append(None)
                     continue
+                shapes.append(shape_of(draft, f"question {i}"))
                 errors.extend(
                     f"question {i}: {problem}"
                     for problem in [
@@ -283,6 +314,11 @@ class QuestionGenerator:
                             for problem in problems
                         ),
                     ]
+                )
+            if cfg.diversity_check:
+                errors.extend(
+                    f"question {problem.index + 1}: {problem.message}"
+                    for problem in diversity_problems(shapes, earlier, threshold=threshold)
                 )
             return errors
 
@@ -311,14 +347,31 @@ class QuestionGenerator:
                 )
 
         outcome = _ScenarioOutcome()
-        for raw in batch.questions:
+        accepted: list[QuestionShape] = []
+        for position, raw in enumerate(batch.questions, start=1):
             if len(outcome.drafts) >= count:
                 outcome.rejected.append(_reject(scenario, raw, [SURPLUS]))
                 continue
             checked = self._check(raw, product, identifiers, enforce_leaks, rules, request)
             if isinstance(checked, tuple):
                 draft, _ = checked
-                expectations = build_expectations(draft.expectations, request, reference)
+                shape = shape_of(draft, f"question {position}")
+                problem = (
+                    diversity_problem(shape, [*earlier, *accepted], threshold=threshold)
+                    if cfg.diversity_check and shape is not None
+                    else None
+                )
+                if problem is not None:  # persisted after the retries: rejected, kept first
+                    outcome.rejected.append(_reject(scenario, raw, [problem]))
+                    continue
+                if shape is not None:
+                    accepted.append(shape)
+                expectations = build_expectations(
+                    draft.expectations,
+                    request,
+                    reference,
+                    grounding[0] if grounding is not None else None,
+                )
                 outcome.drafts.append((draft, expectations, raw))
             else:
                 outcome.rejected.append(_reject(scenario, raw, checked))

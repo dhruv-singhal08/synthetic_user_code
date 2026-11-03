@@ -82,7 +82,7 @@ def _case(sample_scenarios: Any, sample_packs: Any) -> Any:
         "text": "Here.",
         "artifacts": [{"kind": "sql", "content": SQL}],
     }
-    return EvaluationCase(question, scenario, pack, _execution(response, None))
+    return EvaluationCase(question, scenario, _execution(response, None))
 
 
 def _general(user: str) -> dict[str, Any]:
@@ -111,7 +111,6 @@ async def _evaluate(
         case = EvaluationCase(
             case.question,
             case.scenario,
-            case.pack,
             case.execution.model_validate(
                 {**case.execution.model_dump(mode="json"), "context": context}
             ),
@@ -198,7 +197,7 @@ async def test_guidance_is_kept_in_the_lookup_follow_up_call(app_config: AppConf
     from nodes import test_sql_evaluation as sql_tests
 
     reference = sql_tests.load_reference(sql_tests.FIXTURE, max_chars=200_000)
-    scenario, question, pack = sql_tests.make_case(reference)
+    scenario, question, _ = sql_tests.make_case(reference)
     execution = sql_tests.execution_for(
         question, {"outcome": "answered", "artifacts": [{"kind": "sql", "content": SQL}]}
     )
@@ -217,6 +216,6 @@ async def test_guidance_is_kept_in_the_lookup_follow_up_call(app_config: AppConf
         metric_config=builtin_metric_config(list(sql_tests.SQL_METRICS)),
         evaluation_guidance=guidance(),
     )
-    await evaluator.evaluate(EvaluationCase(question, scenario, pack, execution), product)
+    await evaluator.evaluate(EvaluationCase(question, scenario, execution), product)
     assert len(llm.calls) == 2
     assert all("## EVALUATION GUIDANCE" in c.user for c in llm.calls)

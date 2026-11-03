@@ -270,7 +270,7 @@ async def _execute(settings: AppConfig, product: HttpJsonAdapter, scenarios: Any
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {"expected_behavior": "b", "success_criteria": ["c"]},
+            "expectations": {"expected_behavior": "b", "success_criteria": {"general": ["c"]}},
         }
     )
     executor = ProductExecutor(product, settings, logging.getLogger("t"))

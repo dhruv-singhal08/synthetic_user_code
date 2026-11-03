@@ -568,3 +568,35 @@
   not_established although the usage instructions forbid the join); in the fresh run one bad
   join lowered three metrics (correctness, semantic, schema); SafeChain; the UI card in a
   browser.
+
+## Question semantic diversity (2026-11-03) - user request
+
+- Files: nodes/question/{diversity.py (new), generator.py, prompt.py, prompt.yaml},
+  pipeline.py (earlier questions as context on re-run), core/config.py (diversity_check,
+  max_question_similarity), tests (question generator, end-to-end, config); DECISIONS D239.
+- Commands + results: ruff OK, format OK, mypy (103 files) OK, `pytest -q -W error`
+  763 passed.
+- Live Gemini (scratch script; 2 scenarios x 3 questions, then the questions step re-run):
+  first pass 6/6 accepted with different periods, terminology and output types; re-run 6/6
+  new questions, none repeating the first batch (after restating the count in the context
+  block; before that Gemini returned 1 of 3).
+- NOT verified / open: same-structure questions in different words pass as terminology
+  variation; a batch with fewer questions than asked is not retried (pre-existing: logged as
+  "n of m usable"); ambiguity variation is limited by the persona (this sample persona allows
+  only precise, low-ambiguity questions).
+
+## Structured success_criteria (2026-11-03) - manager feedback
+
+- Files: models/question.py (SuccessCriteria, Expectations), models/metrics.py (reserved ids),
+  nodes/question/{expectations.py, generator.py} (collect after generation), nodes/evaluator/
+  {evaluator.py (EvaluationCase.pack from the question), applicability.py, general_prompt.py,
+  general_judge.py, retrieval_prompt.py, trace_tags.py, benchmark.py}, pipeline.py, cli.py
+  (`--reference-packs` removed), web/{results_csv.py, static/app.js, static/index.html}, README,
+  tests; DECISIONS D240.
+- Commands + results: ruff OK, format OK, mypy (103 files) OK, `pytest -q -W error`
+  767 passed.
+- Verified: generation prompts and judge prompts unchanged (same tests pass); each judge reads its
+  keys; grounded questions carry the cheat sheet; a grounded question without it is refused with
+  a clear message.
+- NOT verified: UI in a real browser (JS syntax-checked only); live LLM run. Old runs are not
+  migrated (user decision).

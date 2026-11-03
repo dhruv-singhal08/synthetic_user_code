@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -20,7 +21,7 @@ from synthetic_user.models.scenario import Scenario
 from synthetic_user.web.results_csv import build_rows, bullets, columns_for, to_csv
 
 
-def _question(scenario: Scenario) -> QuestionCase:
+def _question(scenario: Scenario, pack: ReferencePack | None = None) -> QuestionCase:
     return QuestionCase.model_validate(
         {
             "question_id": "Q_001",
@@ -38,7 +39,10 @@ def _question(scenario: Scenario) -> QuestionCase:
             },
             "expectations": {
                 "expected_behavior": "Rank the top spenders.",
-                "success_criteria": ["names the top spenders"],
+                "success_criteria": {
+                    "general": ["names the top spenders"],
+                    "cheat_sheet": pack.model_dump(mode="json") if pack else None,
+                },
             },
         }
     )
@@ -47,7 +51,7 @@ def _question(scenario: Scenario) -> QuestionCase:
 def test_rows_one_per_question_and_blank_for_unasked_scenarios(
     sample_scenarios: list[Scenario], sample_packs: list[ReferencePack]
 ) -> None:
-    question = _question(sample_scenarios[0])
+    question = _question(sample_scenarios[0], sample_packs[0])
     execution = ExecutionRecord.model_validate(
         {
             "execution_id": "EXE_001",
@@ -80,16 +84,21 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
         "12",
     )
     assert rows[0]["expected_behavior"] == "Rank the top spenders."
-    assert rows[0]["success_criteria"] == "names the top spenders"  # one item -> as is
-    assert rows[0]["cheat_sheet"] == (  # several items -> bullets
-        "• card_transactions (amount, currency_code)\n• employees (full_name)"
-    )
-    assert rows[0]["cheat_sheet_rules"].split("\n") == [
-        "• join card_transactions.employee_id -> employees.employee_id (verified)",
-        "• card_transactions: Amounts are in the transaction currency; amounts in different "
-        "currencies must not be summed directly.",
-        "• R1: Amounts in different currency_code values must not be summed directly.",
-    ]
+    # One structured JSON cell: general criteria + the cheat sheet copied into the question.
+    assert json.loads(rows[0]["success_criteria"]) == {
+        "general": ["names the top spenders"],
+        "cheat_sheet": {
+            "items": ["card_transactions (amount, currency_code)", "employees (full_name)"],
+            "rules": [
+                "join card_transactions.employee_id -> employees.employee_id (verified)",
+                "card_transactions: Amounts are in the transaction currency; amounts in "
+                "different currencies must not be summed directly.",
+                "R1: Amounts in different currency_code values must not be summed directly.",
+            ],
+        },
+    }
+    # A scenario without questions still shows its cheat sheet.
+    assert set(json.loads(rows[1]["success_criteria"])) == {"cheat_sheet"}
     assert rows[0]["answer_text"] == "Here are the top spenders."
     assert rows[1]["question_id"] == "" and rows[1]["scenario_id"] == "SCN_002"
     assert rows[0]["final_verdict"] == ""
@@ -112,9 +121,13 @@ def test_columns_follow_the_selected_metrics() -> None:
         "bug_ids",
         "evaluation_notes",
     ]
-    assert {"product_outcome", "response_classification", "metric_expectations"} <= set(columns)
+    assert {"product_outcome", "response_classification", "success_criteria"} <= set(columns)
     assert {"tool_calls", "retrieved_context"} <= set(columns)
     for removed in (
+        "metric_expectations",
+        "legacy_expectations",
+        "cheat_sheet",
+        "cheat_sheet_rules",
         "golden_case_id",
         "expected_behavior_contract",
         "expected_tools",
@@ -322,12 +335,17 @@ def test_no_sql_note_explains_every_metric(sample_scenarios: list[Scenario]) -> 
     assert row["final_verdict"] == "recorded_only"
 
 
-def test_metric_expectations_and_telemetry_columns(sample_scenarios: list[Scenario]) -> None:
+def test_metric_criteria_and_telemetry_columns(sample_scenarios: list[Scenario]) -> None:
     data = _question(sample_scenarios[0]).model_dump(mode="json")
-    data["expectations"]["metric_expectations"] = {
-        "context_recall": {"status": "generated", "value": {"required_information": ["Q1 spend"]}},
-        "tool_correctness": {"status": "cannot_generate", "reason": "no tools"},
-    }
+    data["expectations"]["success_criteria"].update(
+        {
+            "context_recall": {
+                "status": "generated",
+                "value": {"required_information": ["Q1 spend"]},
+            },
+            "tool_correctness": {"status": "cannot_generate", "reason": "no tools"},
+        }
+    )
     question = QuestionCase.model_validate(data)
     execution = _execution(
         {
@@ -350,9 +368,10 @@ def test_metric_expectations_and_telemetry_columns(sample_scenarios: list[Scenar
         }
     )
     row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution])[0]
-    assert row["metric_expectations"].split("\n") == [
-        '• context_recall [generated]: {"required_information": ["Q1 spend"]}',
-        "• tool_correctness [cannot_generate]: no tools",
-    ]
+    assert json.loads(row["success_criteria"]) == {
+        "general": ["names the top spenders"],
+        "context_recall": {"required_information": ["Q1 spend"]},
+        "tool_correctness": {"status": "cannot_generate", "reason": "no tools"},
+    }
     assert row["tool_calls"] == '1. aggregate({"source": "c"})'
     assert row["retrieved_context"] == "1 chunk(s) via context_api"

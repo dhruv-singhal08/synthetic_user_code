@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any, Self
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import ConfigDict, Field, JsonValue, model_validator
 
 from synthetic_user.models.base import AmbiguityLevel, NonEmptyStr, StrictModel
+from synthetic_user.models.metrics import METRIC_ID_PATTERN
+from synthetic_user.models.reference import ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import TaskType
 
@@ -108,49 +111,58 @@ class MetricExpectation(StrictModel):
         return self
 
 
-# Fields of the pre-metric-registry expectation schema (Agent profile / golden set). Old
-# artifacts keep them under ``legacy_expectations`` (labelled, never used by the new judges).
-LEGACY_EXPECTATION_FIELDS = (
-    "expected_tools",
-    "expected_journey",
-    "expected_time_period",
-    "expected_data_sources",
-    "expected_context",
-    "prohibited_behaviors",
-    "reference_context",
-    "golden_set_criteria",
-)
+class SuccessCriteria(StrictModel):
+    """Everything a question is judged against besides expected_behavior, in ONE structure
+    (D240). Assembled by code after generation - the generation contract is unchanged:
 
+    - ``general``: the question's must-haves (Relevance, Correctness and Completeness);
+    - ``cheat_sheet``: a code copy of the scenario's Reference Pack (grounded questions only;
+      editing a pack invalidates its questions, so the copy never goes stale);
+    - one key per selected metric that needs a question-specific expectation, keyed by metric
+      id (``RESERVED_METRIC_IDS`` keeps metric ids apart from the two keys above).
 
-class Expectations(StrictModel):
-    """What the evaluator judges against. Universal fields + selected-metric expectations only."""
+    Each judge reads only the keys of the metrics it scores.
+    """
 
-    expected_behavior: NonEmptyStr = Field(
-        description="1-3 sentences: what the product should do for this exact question"
-    )
-    success_criteria: list[NonEmptyStr] = Field(
+    model_config = ConfigDict(extra="allow")  # the metric-id keys, typed below
+    __pydantic_extra__: dict[str, MetricExpectation] = Field(init=False)
+
+    general: list[NonEmptyStr] = Field(
         min_length=1,
         max_length=MAX_SUCCESS_CRITERIA,
         description="observable, fair must-haves of a goal-complete answer",
     )
-    # Only metrics that need a question-specific value appear here (never empty placeholders).
-    metric_expectations: dict[NonEmptyStr, MetricExpectation] = Field(default_factory=dict)
-    # Read-only carrier for artifacts written before the metric registry (see module docs).
-    legacy_expectations: dict[NonEmptyStr, JsonValue] = Field(default_factory=dict)
+    cheat_sheet: ReferencePack | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _read_legacy(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or not any(k in value for k in LEGACY_EXPECTATION_FIELDS):
-            return value
-        data = dict(value)
-        legacy = dict(data.get("legacy_expectations") or {})
-        for key in LEGACY_EXPECTATION_FIELDS:
-            item = data.pop(key, None)
-            if item not in (None, "", [], {}):
-                legacy[key] = item
-        data["legacy_expectations"] = legacy
-        return data
+    @model_validator(mode="after")
+    def _metric_keys(self) -> Self:
+        if bad := [k for k in self.metrics if not re.fullmatch(METRIC_ID_PATTERN, k)]:
+            raise ValueError(f"success_criteria keys {bad} are not metric ids")
+        return self
+
+    @property
+    def metrics(self) -> dict[str, MetricExpectation]:
+        """The metric-id keys (selected metrics with a question-specific expectation)."""
+        return dict(self.__pydantic_extra__ or {})
+
+    def metric(self, metric_id: str) -> MetricExpectation | None:
+        return self.metrics.get(metric_id)
+
+    def generated(self, metric_id: str) -> dict[str, JsonValue] | None:
+        """The metric's value when it was generated, else None."""
+        entry = self.metric(metric_id)
+        if entry is None or entry.status is not MetricExpectationStatus.GENERATED:
+            return None
+        return dict(entry.value or {})
+
+
+class Expectations(StrictModel):
+    """What the evaluator judges against: expected_behavior + the structured success_criteria."""
+
+    expected_behavior: NonEmptyStr = Field(
+        description="1-3 sentences: what the product should do for this exact question"
+    )
+    success_criteria: SuccessCriteria
 
 
 class QuestionCase(StrictModel):

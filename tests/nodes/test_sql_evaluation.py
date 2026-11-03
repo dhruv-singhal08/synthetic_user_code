@@ -109,8 +109,10 @@ def make_case(
             },
             "expectations": {
                 "expected_behavior": "SQL summing net LPC per billing month for 2025.",
-                "success_criteria": [CRITERION],
-                "metric_expectations": {},
+                "success_criteria": {
+                    "general": [CRITERION],
+                    "cheat_sheet": pack.model_dump(mode="json"),
+                },
             },
         }
     )
@@ -206,7 +208,7 @@ async def evaluate(
     evaluator = Evaluator(
         llm, settings, logging.getLogger("t"), reference=reference, metric_config=config
     )
-    result = await evaluator.evaluate(EvaluationCase(question, scenario, pack, execution), product)
+    result = await evaluator.evaluate(EvaluationCase(question, scenario, execution), product)
     return result, llm
 
 
@@ -793,7 +795,11 @@ async def test_document_and_ungrounded_runs_have_no_catalog_step(
     scenario = scenario.model_copy(
         update={"mode": "ungrounded", "reference_id": None, "reference_pack_id": None}
     )
-    question = question.model_copy(update={"mode": "ungrounded", "reference_pack_id": None})
+    data = question.model_dump(mode="json")
+    data["expectations"]["success_criteria"]["cheat_sheet"] = None
+    question = QuestionCase.model_validate(
+        {**data, "mode": "ungrounded", "reference_pack_id": None}
+    )
     execution = execution_for(
         question, {"outcome": "answered", "artifacts": [{"kind": "sql", "content": NET_SQL}]}
     )
@@ -805,9 +811,7 @@ async def test_document_and_ungrounded_runs_have_no_catalog_step(
         reference=None,
         metric_config=builtin_metric_config(["semantic_correctness"]),
     )
-    result = await evaluator.evaluate(
-        EvaluationCase(question, scenario, None, execution), sample_product
-    )
+    result = await evaluator.evaluate(EvaluationCase(question, scenario, execution), sample_product)
     assert "SQL analysis" in llm.calls[0].user
     assert "Catalog reconciliation" not in llm.calls[0].user
     assert result.reference_checks is None

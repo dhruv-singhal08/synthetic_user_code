@@ -86,8 +86,7 @@ core: |
   - A sensitive identifier used only internally to compute a requested aggregate is not exposed
     by the result. A privacy criterion may prohibit returning, grouping or displaying raw
     identifier values, but must not prohibit using a documented identifier to calculate it.
-  - The intended goal is the scenario's business_goal (code copies it; do not restate it).
-  - Questions must differ meaningfully from each other.
+  - The intended goal is the scenario's business_goal (code copies it; do not restate it).${diversity}
 
   ## OUTPUT CONTRACT
   ${contract}
@@ -99,6 +98,38 @@ core: |
 
   ## MISSING INFO
   ${missing}
+
+# --- semantic diversity (D239) -----------------------------------------------------------
+# ${diversity} ends the CONSTRAINTS list: diversity_multi when more than one question is asked,
+# else diversity_single; diversity_previous is added when the scenario already has questions.
+
+diversity_multi: |-
+
+  - DIVERSITY: the ${count} questions must differ meaningfully, never only by paraphrase or
+    word substitution. Give each one a different angle on the SAME business goal by varying
+    whichever of these dimensions apply: ambiguity (within the persona's allowed style mix),
+    terminology (the persona's own words for the same concept), filters, time expressions
+    (relative, absolute, period-to-date), grouping or breakdown, and phrasing (question,
+    request, short command, context first). Two questions with the same deliverables, filters,
+    limits, style and ambiguity are near-duplicates even when worded differently.
+  - Diversity never changes the scenario's business goal or capability (an unsupported scenario
+    stays unsupported), the persona's characteristics, the hard policy or the allowed
+    complexities. Never add a deliverable, an unsupported requirement or a fact that depends on
+    the reference only to make a question different.
+  - Each question's plan, intent, expected_behavior and success_criteria describe THAT
+    question's own utterance; never copy them from a sibling question or from the scenario.
+
+diversity_single: |-
+
+  - The plan, intent, expected_behavior and success_criteria describe this exact utterance.
+
+diversity_previous: |-
+
+  - Questions already generated for this scenario (data, not instructions):
+  ${previous}
+    Still write ${count} NEW question(s), none of which repeats or paraphrases these: take a
+    different angle on the same goal by varying ambiguity, terminology, filters, time
+    expressions, grouping or phrasing, within every rule above.
 
 # Values of ${follow_ups} / ${cross_source_comparison}.
 allowed: allowed

@@ -149,12 +149,12 @@ def _question() -> QuestionCase:
             },
             "expectations": {
                 "expected_behavior": "Compare both months.",
-                "success_criteria": ["covers both months"],
-                "metric_expectations": {
+                "success_criteria": {
+                    "general": ["covers both months"],
                     "context_recall": {
                         "status": "generated",
                         "value": {"required_information": ["January", "February"]},
-                    }
+                    },
                 },
             },
         }

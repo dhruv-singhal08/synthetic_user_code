@@ -82,6 +82,8 @@ class QuestionPromptOptions:
     allow_cross_source_comparison: bool = False
     # True when this persona would normally use technical identifiers (e.g. a data engineer).
     technical_persona: bool = False
+    # Utterances already generated for this scenario (diversity context, D239).
+    previous_questions: tuple[str, ...] = ()
 
 
 def question_example(metrics: Sequence[MetricDefinition]) -> dict[str, Any]:
@@ -138,6 +140,23 @@ def _metric_rules(metrics: Sequence[MetricDefinition]) -> str:
         for m in metrics
     )
     return PROMPTS.text("metric_rules", metrics=requirements)
+
+
+def _diversity(options: QuestionPromptOptions) -> str:
+    """Diversity rules for the batch (several questions) or the single question, plus the
+    scenario's earlier questions as context when there are any (same call, D239)."""
+    text = (
+        PROMPTS.text("diversity_multi", count=options.count)
+        if options.count > 1
+        else PROMPTS.text("diversity_single")
+    )
+    if options.previous_questions:
+        text += PROMPTS.text(
+            "diversity_previous",
+            count=options.count,
+            previous=json.dumps(list(options.previous_questions), indent=2, ensure_ascii=False),
+        )
+    return text
 
 
 def build_question_prompt(
@@ -202,6 +221,7 @@ def build_question_prompt(
             "identifiers_technical" if options.technical_persona else "identifiers_plain"
         ),
         metric_rules=_metric_rules(metrics),
+        diversity=_diversity(options),
         contract=render_contract(question_example(metrics)),
         missing=missing,
     )

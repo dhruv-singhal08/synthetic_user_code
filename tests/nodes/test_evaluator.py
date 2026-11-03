@@ -140,8 +140,11 @@ def _question(
             },
             "expectations": {
                 "expected_behavior": "Return SQL ranking employees by card spend.",
-                "success_criteria": CRITERIA,
-                "metric_expectations": metric_expectations,
+                "success_criteria": {
+                    "general": CRITERIA,
+                    "cheat_sheet": pack.model_dump(mode="json") if pack else None,
+                    **metric_expectations,
+                },
             },
         }
     )
@@ -197,7 +200,7 @@ async def evaluate(
     metrics: tuple[str, ...] | ResolvedMetricConfig = SQL_METRICS,
     context: dict[str, Any] | None = None,
 ) -> tuple[EvaluationResult, FakeLLMClient]:
-    scenario, question, pack = case
+    scenario, question, _ = case  # the question carries its own cheat sheet (D240)
     config = (
         metrics
         if isinstance(metrics, ResolvedMetricConfig)
@@ -208,7 +211,7 @@ async def evaluate(
         llm, settings, logging.getLogger("t"), reference=reference, metric_config=config
     )
     result = await evaluator.evaluate(
-        EvaluationCase(question, scenario, pack, _execution(response, context)), product
+        EvaluationCase(question, scenario, _execution(response, context)), product
     )
     return result, llm
 

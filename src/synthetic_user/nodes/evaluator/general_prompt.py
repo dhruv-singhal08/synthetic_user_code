@@ -32,7 +32,7 @@ from synthetic_user.models.lookup import (
 )
 from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.question import MetricExpectationStatus, QuestionCase
+from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.nodes.evaluator.judge_common import (
     EvaluableResponse,
@@ -214,15 +214,12 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
             for t in data.conversation
         ],
         "expected_behavior": question.expectations.expected_behavior,
-        "success_criteria": question.expectations.success_criteria,
+        "success_criteria": question.expectations.success_criteria.general,
     }
     sections: list[str] = []
+    criteria = question.expectations.success_criteria
     expectations = {
-        d.metric_id: question.expectations.metric_expectations[d.metric_id].value
-        for d in definitions
-        if d.metric_id in question.expectations.metric_expectations
-        and question.expectations.metric_expectations[d.metric_id].status
-        is MetricExpectationStatus.GENERATED
+        d.metric_id: value for d in definitions if (value := criteria.generated(d.metric_id))
     }
     if expectations:
         sections.append(

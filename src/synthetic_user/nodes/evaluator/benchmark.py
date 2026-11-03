@@ -32,6 +32,7 @@ from synthetic_user.models.question import (
     QuestionComplexity,
     QuestionIntent,
     QuestionStyle,
+    SuccessCriteria,
 )
 from synthetic_user.models.reference import ReferencePack
 from synthetic_user.models.run import GenerationMode
@@ -190,7 +191,10 @@ def build_evaluation_cases(
             ),
             expectations=Expectations(
                 expected_behavior=case.expected_behavior,
-                success_criteria=list(scenario.success_criteria)[:MAX_SUCCESS_CRITERIA],
+                success_criteria=SuccessCriteria(
+                    general=list(scenario.success_criteria)[:MAX_SUCCESS_CRITERIA],
+                    cheat_sheet=pack,
+                ),
             ),
         )
         execution = ExecutionRecord.model_validate(
@@ -204,7 +208,7 @@ def build_evaluation_cases(
                 "response": case.response(),
             }
         )
-        built.append(EvaluationCase(question, scenario, pack, execution))
+        built.append(EvaluationCase(question, scenario, execution))
     return built
 
 

@@ -271,8 +271,9 @@ async def test_vague_rejected_when_not_allowed(env: Env) -> None:
 # --- dedupe -----------------------------------------------------------------------------------
 
 
-async def test_only_exact_duplicates_are_rejected(env: Env) -> None:
-    """Exact (case / punctuation / spacing normalized) duplicates only: no similarity score."""
+async def test_exact_duplicates_are_rejected(env: Env) -> None:
+    """Exact (case / punctuation / spacing normalized) duplicates, also across scenarios. The
+    similarity-based diversity check (D239) is switched off here: its own tests are below."""
     llm = FakeLLMClient(
         [
             batch(
@@ -285,7 +286,7 @@ async def test_only_exact_duplicates_are_rejected(env: Env) -> None:
             ),
         ]
     )
-    result = await env.run(llm, scenarios=2)
+    result = await env.run(llm, scenarios=2, diversity_check=False)
     assert [x.utterance for x in result.questions] == [
         "Who are our top card spenders this quarter?",
         "Who were our top card spenders over this quarter?",
@@ -408,7 +409,7 @@ def with_metric_expectations(question: dict[str, Any], entries: dict[str, Any]) 
 async def test_metrics_without_question_expectations_get_no_entries(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Who spends most?"))])
     result = await env.run(llm, count=1, metrics=("relevance", "correctness_completeness"))
-    assert result.questions[0].expectations.metric_expectations == {}
+    assert result.questions[0].expectations.success_criteria.metrics == {}
     prompt = llm.calls[0].user
     assert "metric_expectations must be {}" in prompt
     assert '"metric_expectations": {}' in prompt
@@ -423,7 +424,7 @@ async def test_context_recall_checklist_generated_and_stored(env: Env) -> None:
     }
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
     result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
-    stored = result.questions[0].expectations.metric_expectations["context_recall"]
+    stored = result.questions[0].expectations.success_criteria.metrics["context_recall"]
     assert stored.status == "generated"
     assert stored.value == {"required_information": ["card spend per employee", "the last quarter"]}
     prompt = llm.calls[0].user
@@ -443,7 +444,7 @@ async def test_cannot_generate_is_recorded_and_question_kept(env: Env) -> None:
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
     result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
     assert len(result.questions) == 1 and not result.rejected
-    stored = result.questions[0].expectations.metric_expectations["context_recall"]
+    stored = result.questions[0].expectations.success_criteria.metrics["context_recall"]
     assert (stored.status, stored.value, stored.reason) == (
         "cannot_generate",
         None,
@@ -496,7 +497,7 @@ async def test_tool_expectation_cannot_generate_without_tool_definitions(env: En
     """No agent_context in the reference: code records cannot_generate, the LLM is not asked."""
     llm = FakeLLMClient([batch(q("Who spends most?"))])
     result = await env.run(llm, count=1, metrics=("relevance", "tool_correctness"))
-    stored = result.questions[0].expectations.metric_expectations["tool_correctness"]
+    stored = result.questions[0].expectations.success_criteria.metrics["tool_correctness"]
     assert stored.status == "cannot_generate"
     assert "no authoritative tool definitions" in (stored.reason or "")
     assert "tool_correctness (" not in llm.calls[0].user
@@ -527,7 +528,7 @@ async def test_tool_expectation_canonical_names_and_unknown_tools(
     }
     llm = FakeLLMClient([batch(with_metric_expectations(q("Which complaints rank top?"), good))])
     result = await tools_env.run(llm, count=1, metrics=("tool_correctness",))
-    value = result.questions[0].expectations.metric_expectations["tool_correctness"].value
+    value = result.questions[0].expectations.success_criteria.metrics["tool_correctness"].value
     # aliases are stored as the canonical names of the authoritative tool definitions
     assert value == {"expected_tools": ["aggregate_feedback"], "expected_data_sources": ["csat"]}
     assert "aggregate_feedback" in llm.calls[0].user  # authoritative definitions are shown
@@ -537,7 +538,7 @@ async def test_tool_expectation_canonical_names_and_unknown_tools(
     assert len(llm.calls) == 3  # retried with the membership problem as feedback
     assert "unknown tool 'invented_tool'" in llm.calls[1].user
     # never fabricated or silently fixed: recorded as cannot_generate, the question is kept
-    stored = result.questions[0].expectations.metric_expectations["tool_correctness"]
+    stored = result.questions[0].expectations.success_criteria.metrics["tool_correctness"]
     assert stored.status == "cannot_generate" and "invented_tool" in (stored.reason or "")
 
 
@@ -548,7 +549,8 @@ async def test_surplus_recorded(env: Env) -> None:
     llm = FakeLLMClient(
         [batch(q("Who spends most?"), q("Which team spends most?"), q("Top merchants?"))]
     )
-    result = await env.run(llm, count=2)
+    # q() gives every question the same plan: not a diversity test (D239)
+    result = await env.run(llm, count=2, diversity_check=False)
     assert len(result.questions) == 2
     assert result.rejected[0].reasons == [SURPLUS]
 
@@ -615,11 +617,15 @@ async def test_question_owns_its_expectations(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Who are our biggest card spenders this quarter?"))])
     result = await env.run(llm, count=1)
     expectations = result.questions[0].expectations
-    assert expectations.success_criteria == [
+    assert expectations.success_criteria.general == [
         "names the spenders in ranked order",
         "if amounts use several currencies, keeps them separate",
     ]
-    assert expectations.success_criteria != env.scenarios[0].success_criteria
+    assert expectations.success_criteria.general != env.scenarios[0].success_criteria
+    # Collected after generation into one structure (D240): the scenario's cheat sheet is a
+    # code copy of its pack.
+    pack = next(p for p in env.packs if p.pack_id == env.scenarios[0].reference_pack_id)
+    assert expectations.success_criteria.cheat_sheet == pack
     assert expectations.expected_behavior.startswith("Rank the spenders")
 
 
@@ -773,6 +779,7 @@ async def test_mixed_complexity_accepts_any(env: Env) -> None:
         FakeLLMClient([batch(question, q("Which merchants?"))]),
         allowed_complexities=["simple", "medium", "complex"],
         max_deliverables=3,
+        diversity_check=False,  # q() copies one expected_behavior into every question
     )
     assert not result.rejected
     assert [x.question_characteristics.complexity for x in result.questions] == [
@@ -892,3 +899,192 @@ def test_prompt_guards_replace_the_former_regex_gates(env: Env) -> None:
     ):
         assert guard in user, guard
     assert "COUNT(DISTINCT" not in user  # no SQL wording in the generic question prompt
+
+
+# --- semantic diversity (D239) ----------------------------------------------------------------
+
+
+def _with(
+    question: dict[str, Any], *, filters: list[dict[str, str]] | None = None, **expect: Any
+) -> dict[str, Any]:
+    if filters is not None:
+        question["plan"]["filters"] = filters
+    if expect:
+        question["expectations"] = {**question["expectations"], **expect}
+    return question
+
+
+PERIOD = [{"name": "period", "value": "last quarter"}]
+
+
+async def test_paraphrase_is_a_near_duplicate_fixed_by_the_existing_retry(env: Env) -> None:
+    paraphrase = batch(
+        _with(q("Who were our top card spenders last quarter?"), filters=PERIOD),
+        _with(q("Who were the top card spenders for last quarter?"), filters=PERIOD),
+    )
+    diverse = batch(
+        _with(q("Who were our top card spenders last quarter?"), filters=PERIOD),
+        _with(
+            q("Which employees spent the most on cards so far this year?"),
+            filters=[{"name": "period", "value": "year to date"}],
+        ),
+    )
+    llm = FakeLLMClient([paraphrase, diverse])
+    result = await env.run(llm)
+    assert len(llm.calls) == 2  # one retry of the SAME call, no extra call
+    feedback = llm.calls[1].user
+    assert "question 2: near-duplicate of question 1" in feedback
+    assert (
+        "varying ambiguity, terminology, filters, time expression, grouping or phrasing" in feedback
+    )
+    assert len(result.questions) == 2 and not result.rejected
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        # a different time expression (filter value), nearly the same words
+        _with(
+            q("Who were our top card spenders last month?"),
+            filters=[{"name": "period", "value": "previous month"}],
+        ),
+        # a different ambiguity / style, nearly the same words
+        _with(
+            q("Why were those our top card spenders last quarter?", "investigative", "medium"),
+            filters=PERIOD,
+        ),
+        # a different result count (its own expected behaviour, as a real run writes it)
+        _with(
+            q("Who were our top 5 card spenders last quarter?", limit=5),
+            filters=PERIOD,
+            expected_behavior="Rank the five biggest card spenders of last quarter.",
+        ),
+        # the same request in clearly different terminology
+        _with(q("Show the biggest corporate-card users for Q3 please"), filters=PERIOD),
+    ],
+)
+async def test_real_variation_is_never_a_near_duplicate(env: Env, second: dict[str, Any]) -> None:
+    first = _with(q("Who were our top card spenders last quarter?"), filters=PERIOD)
+    llm = FakeLLMClient([batch(first, second)])
+    result = await env.run(llm)
+    assert len(llm.calls) == 1 and len(result.questions) == 2 and not result.rejected
+
+
+async def test_persistent_near_duplicate_is_rejected_with_its_reason(env: Env) -> None:
+    same = batch(
+        _with(q("Who were our top card spenders last quarter?"), filters=PERIOD),
+        _with(q("Who were the top card spenders last quarter?"), filters=PERIOD),
+    )
+    llm = FakeLLMClient([same, same, same])
+    result = await env.run(llm)
+    assert [x.utterance for x in result.questions] == [
+        "Who were our top card spenders last quarter?"
+    ]
+    (rejected,) = result.rejected
+    assert rejected.reasons[0].startswith("near-duplicate of question 1")
+
+
+async def test_expectations_copied_from_a_sibling_are_retried(env: Env) -> None:
+    copied = batch(
+        q("Who spent most last quarter?"),
+        q("How did monthly card spend move?", complexity="medium"),  # same expected_behavior
+    )
+    fixed = batch(
+        q("Who spent most last quarter?"),
+        _with(
+            q("How did monthly card spend move?", complexity="medium"),
+            expected_behavior="Show the monthly card spend trend and rank the spenders.",
+        ),
+    )
+    llm = FakeLLMClient([copied, fixed])
+    result = await env.run(llm)
+    assert "expected_behavior is copied word for word from question 1" in llm.calls[1].user
+    assert len(result.questions) == 2
+
+
+async def test_previous_questions_are_diversity_context_in_the_same_call(env: Env) -> None:
+    first = await env.run(
+        FakeLLMClient(
+            [batch(_with(q("Who were our top card spenders last quarter?"), filters=PERIOD))]
+        ),
+        count=1,
+    )
+    previous = {"SCN_001": first.questions}
+    repeat = batch(_with(q("Who were the top card spenders for last quarter?"), filters=PERIOD))
+    new = batch(
+        _with(
+            q("Which employees spent most on cards this year?"),
+            filters=[{"name": "period", "value": "year to date"}],
+        )
+    )
+    llm = FakeLLMClient([repeat, new])
+    generator = QuestionGenerator(
+        llm, env.settings, logging.getLogger("test"), id_generator=SequentialIdGenerator()
+    )
+    result = await generator.generate(
+        env.persona,
+        env.product,
+        env.scenarios[:1],
+        env.reference,
+        env.packs,
+        count=1,
+        previous=previous,
+    )
+    prompt = llm.calls[0].user
+    assert "Questions already generated for this scenario" in prompt
+    assert "Who were our top card spenders last quarter?" in prompt
+    assert "Still write 1 NEW question(s)" in " ".join(prompt.split())
+    assert "near-duplicate of earlier question Q_001" in llm.calls[1].user
+    assert [x.utterance for x in result.questions] == [
+        "Which employees spent most on cards this year?"
+    ]
+
+
+def test_diversity_rules_in_the_prompt(
+    sample_persona: Persona,
+    sample_product: ProductDescription,
+    sample_scenarios: list[Scenario],
+    sample_reference: Reference,
+    sample_packs: list[ReferencePack],
+) -> None:
+    def prompt(count: int) -> str:
+        options = QuestionPromptOptions(
+            count=count,
+            ambiguity_level=AmbiguityLevel.LOW,
+            language="en",
+            allow_vague_questions=False,
+        )
+        _system, user = build_question_prompt(
+            sample_persona,
+            sample_product,
+            sample_scenarios[0],
+            (sample_packs[0], sample_reference),
+            options,
+        )
+        return " ".join(user.split())
+
+    several = prompt(3)
+    for text in (
+        "the 3 questions must differ meaningfully, never only by paraphrase or word substitution",
+        "ambiguity (within the persona's allowed style mix), terminology",
+        "filters, time expressions",
+        "grouping or breakdown, and phrasing",
+        "Diversity never changes the scenario's business goal or capability",
+        "the persona's characteristics, the hard policy or the allowed complexities",
+        "Never add a deliverable, an unsupported requirement or a fact that depends on the",
+        "describe THAT question's own utterance",
+    ):
+        assert text in several, text
+    single = prompt(1)
+    assert "DIVERSITY" not in single and "Questions already generated" not in single
+    assert "describe this exact utterance" in single
+
+
+async def test_diversity_check_can_be_switched_off(env: Env) -> None:
+    same = batch(
+        _with(q("Who were our top card spenders last quarter?"), filters=PERIOD),
+        _with(q("Who were the top card spenders last quarter?"), filters=PERIOD),
+    )
+    llm = FakeLLMClient([same])
+    result = await env.run(llm, diversity_check=False)
+    assert len(llm.calls) == 1 and len(result.questions) == 2

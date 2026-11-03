@@ -66,7 +66,10 @@ def _question(scenario: Scenario) -> QuestionCase:
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {"expected_behavior": "ranks", "success_criteria": ["ranks"]},
+            "expectations": {
+                "expected_behavior": "ranks",
+                "success_criteria": {"general": ["ranks"]},
+            },
         }
     )
 

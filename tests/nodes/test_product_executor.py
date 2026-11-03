@@ -47,7 +47,7 @@ def _questions(scenario: Scenario, *texts: str) -> list[QuestionCase]:
                 },
                 "expectations": {
                     "expected_behavior": "answers the question",
-                    "success_criteria": ["answers the question"],
+                    "success_criteria": {"general": ["answers the question"]},
                 },
             }
         )

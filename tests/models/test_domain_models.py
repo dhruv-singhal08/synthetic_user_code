@@ -118,7 +118,7 @@ def _question(**overrides: Any) -> dict[str, Any]:
         },
         "expectations": {
             "expected_behavior": "Rank employees by card spend, per currency.",
-            "success_criteria": ["ranks employees by spend"],
+            "success_criteria": {"general": ["ranks employees by spend"]},
         },
         **overrides,
     }
@@ -444,47 +444,71 @@ def test_profile_era_artifacts_stay_readable() -> None:
             reference_pack_id=None,
             evaluation_profile="agent",
             golden_case_id="GOLD_001",
-            expectations={
-                "expected_behavior": "b",
-                "success_criteria": ["c"],
-                "expected_tools": ["aggregate_feedback"],
-                "golden_set_criteria": {"Journey": "card"},
-                "expected_context": [],
-            },
         )
     )
-    # old fields are kept, labelled legacy, never used as metric expectations
-    assert question.expectations.metric_expectations == {}
-    assert question.expectations.legacy_expectations == {
-        "expected_tools": ["aggregate_feedback"],
-        "golden_set_criteria": {"Journey": "card"},
-    }
+    assert question.reference_pack_id is None
+
+
+def test_success_criteria_is_one_structure_keyed_by_metric() -> None:
+    """D240: general criteria, the cheat sheet and one key per metric expectation."""
+    question = QuestionCase.model_validate(
+        _question(
+            expectations={
+                "expected_behavior": "b",
+                "success_criteria": {
+                    "general": ["c"],
+                    "context_recall": {
+                        "status": "generated",
+                        "value": {"required_information": ["Q1"]},
+                    },
+                    "tool_correctness": {"status": "not_applicable", "reason": "no tools"},
+                },
+            }
+        )
+    )
+    criteria = question.expectations.success_criteria
+    assert criteria.general == ["c"] and criteria.cheat_sheet is None
+    assert set(criteria.metrics) == {"context_recall", "tool_correctness"}
+    assert criteria.generated("context_recall") == {"required_information": ["Q1"]}
+    assert criteria.generated("tool_correctness") is None
+    dumped = question.model_dump(mode="json")["expectations"]["success_criteria"]
+    assert list(dumped) == ["general", "cheat_sheet", "context_recall", "tool_correctness"]
 
 
 @pytest.mark.parametrize(
     "expectations",
     [
         {"expected_behavior": "answers"},  # criteria required
-        {"expected_behavior": "answers", "success_criteria": []},
-        {"expected_behavior": "answers", "success_criteria": ["a", "b", "c", "d", "e"]},  # max 4
-        {"success_criteria": ["a"]},  # expected_behavior required
-        {"expected_behavior": "answers", "success_criteria": ["a"], "clarification": "x"},
-        {"expected_behavior": "a", "success_criteria": ["a"], "unacceptable_behaviors": ["b"]},
+        {"expected_behavior": "answers", "success_criteria": ["a"]},  # a structure, not a list
+        {"expected_behavior": "answers", "success_criteria": {"general": []}},
+        {"expected_behavior": "answers", "success_criteria": {"general": list("abcde")}},  # max 4
+        {"success_criteria": {"general": ["a"]}},  # expected_behavior required
+        {"expected_behavior": "a", "success_criteria": {"general": ["a"]}, "clarification": "x"},
+        {"expected_behavior": "a", "success_criteria": {"context_recall": {"status": "x"}}},
         {
             "expected_behavior": "a",
-            "success_criteria": ["a"],
-            "metric_expectations": {"context_recall": {"status": "generated", "value": None}},
+            "success_criteria": {"general": ["a"], "metric_expectations": {}},  # not a metric
         },
         {
             "expected_behavior": "a",
-            "success_criteria": ["a"],
-            "metric_expectations": {"context_recall": {"status": "cannot_generate"}},
+            "success_criteria": {"general": ["a"], "Bad Key": {"status": "not_applicable"}},
         },
         {
             "expected_behavior": "a",
-            "success_criteria": ["a"],
-            "metric_expectations": {
-                "context_recall": {"status": "not_applicable", "value": {"x": 1}}
+            "success_criteria": {
+                "general": ["a"],
+                "context_recall": {"status": "generated", "value": None},
+            },
+        },
+        {
+            "expected_behavior": "a",
+            "success_criteria": {"general": ["a"], "context_recall": {"status": "cannot_generate"}},
+        },
+        {
+            "expected_behavior": "a",
+            "success_criteria": {
+                "general": ["a"],
+                "context_recall": {"status": "not_applicable", "value": {"x": 1}},
             },
         },
     ],

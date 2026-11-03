@@ -256,6 +256,11 @@ class QuestionGenerationSettings(_Section):
     language: str = Field(default="en", min_length=1)
     allow_vague_questions: bool = False
     reject_reference_leaks: bool = True
+    # Lightweight diversity check of one scenario's questions (D239): a near-duplicate has the
+    # same structure (task type, deliverables, limits, filters, style, ambiguity) AND a
+    # content-word similarity >= max_question_similarity. Uses the existing bounded retry.
+    diversity_check: bool = True
+    max_question_similarity: float = Field(default=0.6, gt=0.0, le=1.0)
 
     @model_validator(mode="before")
     @classmethod
@@ -268,8 +273,8 @@ class QuestionGenerationSettings(_Section):
                 "agent_golden_examples": golden,
                 "agent_min_tool_calls": "tool expectations come from the selected metrics",
                 "agent_min_data_sources": "tool expectations come from the selected metrics",
-                "near_duplicate_threshold": "only exact duplicates are rejected (no similarity "
-                "heuristics)",
+                "near_duplicate_threshold": "replaced by diversity_check / "
+                "max_question_similarity (structure + content words, D239)",
             },
             "generation.question",
         )

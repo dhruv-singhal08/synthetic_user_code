@@ -42,7 +42,7 @@ def trace_catalog(question: QuestionCase, pack: ReferencePack | None) -> list[Tr
 
     items = [
         TraceItem(criterion_tag(index), "criterion", "Expected criterion", criterion)
-        for index, criterion in enumerate(question.expectations.success_criteria, start=1)
+        for index, criterion in enumerate(question.expectations.success_criteria.general, start=1)
     ]
     if pack is None:
         return items

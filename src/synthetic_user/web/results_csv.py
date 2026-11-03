@@ -4,7 +4,8 @@ Scenarios without an accepted question still get one row (question columns blank
 evaluation uses is shown (design v3); the full detail stays in the JSON artifacts.
 
 Cell format (readable in Excel): a cell holding several items lists them as bullet points,
-one per line ("• item"); a single item is written as is. Each selected metric has three
+one per line ("• item"); a single item is written as is. success_criteria is one JSON cell
+(D240). Each selected metric has three
 columns: ``<id>`` (score 0..1, or empty when not scored), ``<id>_status`` (scored /
 not_applicable / cannot_generate / evidence_unavailable / inconclusive / evaluation_error /
 unavailable) and ``<id>_reason``. Metric columns follow the run's frozen metric selection
@@ -17,6 +18,7 @@ import csv
 import io
 import json
 from collections.abc import Sequence
+from typing import Any
 
 from synthetic_user.models.evaluation import (
     EvaluationResult,
@@ -31,7 +33,12 @@ from synthetic_user.models.execution import (
     ExecutionRecord,
     ResponseArtifact,
 )
-from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.metrics import CHEAT_SHEET_KEY, GENERAL_CRITERIA_KEY
+from synthetic_user.models.question import (
+    MetricExpectationStatus,
+    QuestionCase,
+    SuccessCriteria,
+)
 from synthetic_user.models.reference import ReferencePack, render_join
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
@@ -39,16 +46,10 @@ from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 BULLET = "• "
 
 SCENARIO_COLUMNS = ["scenario_id", "mode", "scenario_title", "business_goal", "capability"]
-QUESTION_COLUMNS = [
-    "question_id",
-    "question",
-    "expected_behavior",
-    "success_criteria",
-    "metric_expectations",
-    "legacy_expectations",
-]
-# The scenario's cheat sheet: tables (with columns) or documents; joins and rules.
-REFERENCE_COLUMNS = ["cheat_sheet", "cheat_sheet_rules"]
+# success_criteria is ONE structured (JSON) cell (D240): "general" (the question's criteria),
+# one key per metric with a question-specific expectation and "cheat_sheet" (the scenario's
+# tables (with columns) or documents, and its joins and rules).
+QUESTION_COLUMNS = ["question_id", "question", "expected_behavior", "success_criteria"]
 EXECUTION_COLUMNS = [
     "product_outcome",
     "response_classification",
@@ -71,7 +72,6 @@ def columns_for(metric_ids: Sequence[str]) -> list[str]:
         "run_id",
         *SCENARIO_COLUMNS,
         *QUESTION_COLUMNS,
-        *REFERENCE_COLUMNS,
         *EXECUTION_COLUMNS,
         *metric_columns(metric_ids),
         *VERDICT_COLUMNS,
@@ -106,10 +106,12 @@ def build_rows(
     rows: list[dict[str, str]] = []
     for scenario in scenarios:
         pack = pack_by_id.get(scenario.reference_pack_id or "")
-        base = {"run_id": run_id, **_scenario_cells(scenario), **_pack_cells(pack)}
+        base = {"run_id": run_id, **_scenario_cells(scenario)}
         scenario_questions = [q for q in questions if q.scenario_id == scenario.id]
         if not scenario_questions:
-            rows.append(_complete(base, columns))
+            # Before questions exist the row still shows the scenario's cheat sheet.
+            cheat_sheet = {CHEAT_SHEET_KEY: _pack_view(pack)} if pack is not None else {}
+            rows.append(_complete({**base, "success_criteria": _json(cheat_sheet)}, columns))
             continue
         for question in scenario_questions:
             row = {**base, **_question_cells(question)}
@@ -146,9 +148,7 @@ def _scenario_cells(s: Scenario) -> dict[str, str]:
     }
 
 
-def _pack_cells(pack: ReferencePack | None) -> dict[str, str]:
-    if pack is None:
-        return {}
+def _pack_view(pack: ReferencePack) -> dict[str, list[str]]:
     items = [
         f"{t.name} ({', '.join(c.name for c in t.columns)})" if t.columns else t.name
         for t in pack.tables
@@ -158,7 +158,26 @@ def _pack_cells(pack: ReferencePack | None) -> dict[str, str]:
         *(f"{t.name}: {rule}" for t in pack.tables for rule in t.rules),
         *(f"{r.id}: {r.rule}" for r in pack.rules),
     ]
-    return {"cheat_sheet": bullets(items), "cheat_sheet_rules": bullets(rules)}
+    return {"items": items, "rules": rules}
+
+
+def _criteria_view(criteria: SuccessCriteria) -> dict[str, Any]:
+    """The structured success_criteria as shown: a generated metric expectation shows its value,
+    any other its status and reason; the cheat sheet shows its items and rules."""
+    view: dict[str, Any] = {GENERAL_CRITERIA_KEY: list(criteria.general)}
+    for metric_id, x in criteria.metrics.items():
+        view[metric_id] = (
+            x.value
+            if x.status is MetricExpectationStatus.GENERATED
+            else {"status": x.status.value, "reason": x.reason}
+        )
+    if criteria.cheat_sheet is not None:
+        view[CHEAT_SHEET_KEY] = _pack_view(criteria.cheat_sheet)
+    return view
+
+
+def _json(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=1) if value else ""
 
 
 def _question_cells(q: QuestionCase) -> dict[str, str]:
@@ -167,20 +186,7 @@ def _question_cells(q: QuestionCase) -> dict[str, str]:
         "question_id": q.question_id,
         "question": q.utterance,
         "expected_behavior": e.expected_behavior,
-        "success_criteria": bullets(e.success_criteria),
-        "metric_expectations": bullets(
-            [
-                f"{metric_id} [{x.status.value}]: "
-                + (json.dumps(x.value, ensure_ascii=False) if x.value else (x.reason or ""))
-                for metric_id, x in e.metric_expectations.items()
-            ]
-        ),
-        "legacy_expectations": bullets(
-            [
-                f"{name}: {json.dumps(value, ensure_ascii=False)}"
-                for name, value in e.legacy_expectations.items()
-            ]
-        ),
+        "success_criteria": _json(_criteria_view(e.success_criteria)),
     }
 
 

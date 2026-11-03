@@ -439,6 +439,12 @@ class SyntheticUserPipeline:
         generator = QuestionGenerator(
             self._llm, self._settings, self._log, id_generator=self._ids()
         )
+        # Re-running the step: the questions stored for these same scenarios (regenerating
+        # scenarios deletes them) are diversity context for the new call (D239).
+        previous: dict[str, list[QuestionCase]] = {}
+        if self._has(run_id, Step.QUESTIONS):
+            for question in self._load_questions(run_id):
+                previous.setdefault(question.scenario_id, []).append(question)
         with self._trace(run_id, Step.QUESTIONS):
             result = await generator.generate(
                 inputs.persona,
@@ -448,6 +454,7 @@ class SyntheticUserPipeline:
                 packs,
                 count=count,
                 metrics=metric_config.active(),
+                previous=previous,
             )
         self._store.write_models(self._file(run_id, "questions"), result.questions, QuestionCase)
         self._store.write_models(
@@ -575,19 +582,10 @@ class SyntheticUserPipeline:
 
         scenario_by_id = {s.id: s for s in scenarios}
         question_by_id = {q.question_id: q for q in questions}
-        pack_by_id = {p.pack_id: p for p in packs}
         cases = []
         for e in executions:
             question = question_by_id[e.question_id]
-            pack_id = question.reference_pack_id
-            cases.append(
-                EvaluationCase(
-                    question,
-                    scenario_by_id[question.scenario_id],
-                    pack_by_id[pack_id] if pack_id is not None else None,
-                    e,
-                )
-            )
+            cases.append(EvaluationCase(question, scenario_by_id[question.scenario_id], e))
         metric_config = self.load_metric_config(run_id)
         evaluator = Evaluator(
             self._llm,

@@ -207,7 +207,7 @@ def _plan_one(
             )
             preset(status, ASSET_TEXT[asset], missing_requirement=f"reference: {asset.value}")
             return
-    expectation = question.expectations.metric_expectations.get(metric_id)
+    expectation = question.expectations.success_criteria.metric(metric_id)
     if definition.needs_expectations:
         if expectation is None:
             preset(

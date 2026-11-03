@@ -79,7 +79,7 @@ def _question(pack: ReferencePack) -> QuestionCase:
             },
             "expectations": {
                 "expected_behavior": "Rank employees.",
-                "success_criteria": ["names the employees ranked by spend"],
+                "success_criteria": {"general": ["names the employees ranked by spend"]},
             },
         }
     )

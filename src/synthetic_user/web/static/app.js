@@ -70,6 +70,22 @@ const split = (value) => {
   if (!text.startsWith("• ")) return [text];
   return text.slice(2).split(/\n• /).map((item) => item.trim()).filter(Boolean);
 };
+// The structured success_criteria cell (JSON, D240): "general" (the question's criteria), one key
+// per metric with a question-specific expectation and "cheat_sheet" ({items, rules}).
+const criteriaOf = (row) => {
+  try { return JSON.parse(row.success_criteria || "{}") || {}; } catch (err) { return {}; }
+};
+const metricCriteria = (criteria) => Object.entries(criteria)
+  .filter(([key]) => key !== "general" && key !== "cheat_sheet")
+  .map(([id, value]) => {
+    // Not generated: {status, reason}; generated: the metric's own fields.
+    const notGenerated = value && Object.keys(value).sort().join() === "reason,status";
+    return `${metricLabel(id)}: ${notGenerated ? `${human(value.status)}${value.reason ? ` (${value.reason})` : ""}` : JSON.stringify(value)}`;
+  });
+const cheatSheetItems = (criteria) => {
+  const sheet = criteria.cheat_sheet;
+  return sheet ? [...(sheet.items || []), ...(sheet.rules || [])] : [];
+};
 function kvList(entries) {
   const dl = el("dl", { class: "kv-list" });
   for (const [k, v] of entries) {
@@ -765,16 +781,25 @@ async function runAll() {
 function renderContracts() {
   const rows = questionRows();
   $("#contracts-card").classList.toggle("hidden", !rows.length);
-  $("#contracts-table thead").replaceChildren(el("tr", {}, ["Question", "Expected behaviour", "Success criteria", "Metric expectations"].map((h) => el("th", { text: h }))));
+  $("#contracts-table thead").replaceChildren(el("tr", {}, ["Question", "Expected behaviour", "Success criteria"].map((h) => el("th", { text: h }))));
   $("#contracts-table tbody").replaceChildren(...rows.map((row) => {
     const tr = el("tr", { tabindex: "0" },
       el("td", { class: "q" }, el("b", { text: row.question }), el("small", { text: row.question_id })),
       el("td", { class: "wide" }, el("div", { class: "clamp", text: row.expected_behavior })),
-      el("td", {}, list(split(row.success_criteria))), el("td", {}, list(split(row.metric_expectations))));
+      el("td", {}, criteriaCell(criteriaOf(row))));
     tr.addEventListener("click", () => openDrawer(row));
     tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(row); } });
     return tr;
   }));
+}
+
+function criteriaCell(criteria) {
+  const sheet = cheatSheetItems(criteria);
+  return list([
+    ...(criteria.general || []),
+    ...metricCriteria(criteria),
+    ...(sheet.length ? [`Cheat sheet: ${sheet.length} item(s) · see details`] : []),
+  ]);
 }
 
 // --- report -----------------------------------------------------------------------------------
@@ -1126,22 +1151,23 @@ const tagChips = (tags) => (tags && tags.length ? el("span", { class: "tags" }, 
 
 function openDrawer(row) {
   const scenario = state.scenarios.find((s) => s.id === row.scenario_id);
-  const pack = scenario && state.packs.find((p) => p.pack_id === scenario.reference_pack_id);
+  const question = state.questions.find((q) => q.question_id === row.question_id);
+  // A question carries the cheat sheet it was generated with (success_criteria.cheat_sheet).
+  const pack = (question && question.expectations.success_criteria.cheat_sheet)
+    || (scenario && state.packs.find((p) => p.pack_id === scenario.reference_pack_id));
   const evaluation = state.evaluations.find((e) => e.question_id === row.question_id);
   const execution = state.executions.find((e) => e.question_id === row.question_id);
-  const question = state.questions.find((q) => q.question_id === row.question_id);
   $("#drawer-eyebrow").textContent = [row.question_id, row.scenario_id, row.mode, evaluation && evaluation.legacy_evaluation_profile ? `legacy ${evaluation.legacy_evaluation_profile}` : ""].filter(Boolean).join("  ·  ");
   $("#drawer-title").textContent = row.question || row.scenario_title;
   $("#drawer-verdict").replaceChildren(...(row.final_verdict ? [verdictPill(row.final_verdict)] : []));
   const parts = [];
   if (evaluation) parts.push(...evaluationSections(evaluation));
   if (row.question_id) {
-    const criteria = split(row.success_criteria).map((c, i) => el("span", {}, el("code", { class: "tag", text: `CRIT-${String(i + 1).padStart(2, "0")}` }), " ", c));
-    const expectations = question ? Object.entries(question.expectations.metric_expectations || {}).map(([id, x]) =>
-      `${metricLabel(id)} [${human(x.status)}]: ${x.value ? JSON.stringify(x.value) : x.reason || ""}`) : split(row.metric_expectations);
+    const structured = criteriaOf(row);
+    const criteria = (structured.general || []).map((c, i) => el("span", {}, el("code", { class: "tag", text: `CRIT-${String(i + 1).padStart(2, "0")}` }), " ", c));
     parts.push(section("Question and expected behaviour", kvList([
       ["Asked", row.question], ["Expected behaviour", row.expected_behavior], ["Success criteria", criteria],
-      ["Metric expectations", expectations], ["Legacy expectations", split(row.legacy_expectations)],
+      ["Metric criteria", metricCriteria(structured)],
     ])));
   }
   if (execution && execution.turns && execution.turns.length > 2) {

@@ -57,7 +57,8 @@ def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-def _questions(scenarios: list[Scenario]) -> list[QuestionCase]:
+def _questions(scenarios: list[Scenario], pack: ReferencePack | None = None) -> list[QuestionCase]:
+    """Grounded questions; ``pack`` is the cheat sheet copied into success_criteria (D240)."""
     return [
         QuestionCase.model_validate(
             {
@@ -76,7 +77,10 @@ def _questions(scenarios: list[Scenario]) -> list[QuestionCase]:
                 },
                 "expectations": {
                     "expected_behavior": "Return a query ranking the top spenders.",
-                    "success_criteria": ["names the top spenders"],
+                    "success_criteria": {
+                        "general": ["names the top spenders"],
+                        "cheat_sheet": pack.model_dump(mode="json") if pack else None,
+                    },
                 },
             }
         )
@@ -148,14 +152,13 @@ def test_evaluate_file_mode(
     llm = _llm(monkeypatch, judge)
     q = _write(
         tmp_path / "questions.json",
-        [x.model_dump(mode="json") for x in _questions(sample_scenarios)],
+        [x.model_dump(mode="json") for x in _questions(sample_scenarios, sample_packs[0])],
     )
     e = _write(
         tmp_path / "executions.json",
         TypeAdapter(list[ExecutionRecord]).dump_python(_executions(), mode="json"),
     )
     s = _write(tmp_path / "scenarios.json", [x.model_dump(mode="json") for x in sample_scenarios])
-    p = _write(tmp_path / "packs.json", [x.model_dump(mode="json") for x in sample_packs])
     out = tmp_path / "out"
 
     result = CliRunner().invoke(
@@ -170,8 +173,6 @@ def test_evaluate_file_mode(
             str(e),
             "--scenarios",
             str(s),
-            "--reference-packs",
-            str(p),
             "--out-dir",
             str(out),
         ],
@@ -204,7 +205,7 @@ def test_evaluate_file_mode(
     assert config["selected_metric_ids"] == list(TEST_METRICS)
 
 
-def test_grounded_file_mode_needs_the_packs(
+def test_grounded_question_without_its_cheat_sheet_is_refused(
     config_path: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -231,7 +232,7 @@ def test_grounded_file_mode_needs_the_packs(
         ],
     )
     assert result.exit_code == 1
-    assert "--reference-packs" in result.output
+    assert "success_criteria has no cheat_sheet" in result.output
 
 
 def test_evaluate_run_mode_updates_manifest(
@@ -249,7 +250,9 @@ def test_evaluate_run_mode_updates_manifest(
     store.write_models(run_artifact(RUN_ID, "scenarios.json"), sample_scenarios, Scenario)
     store.write_models(run_artifact(RUN_ID, "reference_packs.json"), sample_packs, ReferencePack)
     store.write_models(
-        run_artifact(RUN_ID, "questions.json"), _questions(sample_scenarios), QuestionCase
+        run_artifact(RUN_ID, "questions.json"),
+        _questions(sample_scenarios, sample_packs[0]),
+        QuestionCase,
     )
     store.write_with(
         run_artifact(RUN_ID, "executions.json"), _executions(), TypeAdapter(list[ExecutionRecord])
@@ -290,7 +293,9 @@ def test_evaluate_legacy_run_without_metric_config_explains_migration(
     store.write_models(run_artifact(RUN_ID, "scenarios.json"), sample_scenarios, Scenario)
     store.write_models(run_artifact(RUN_ID, "reference_packs.json"), sample_packs, ReferencePack)
     store.write_models(
-        run_artifact(RUN_ID, "questions.json"), _questions(sample_scenarios), QuestionCase
+        run_artifact(RUN_ID, "questions.json"),
+        _questions(sample_scenarios, sample_packs[0]),
+        QuestionCase,
     )
     store.write_with(
         run_artifact(RUN_ID, "executions.json"), _executions(), TypeAdapter(list[ExecutionRecord])

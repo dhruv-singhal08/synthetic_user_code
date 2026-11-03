@@ -20,6 +20,11 @@ from synthetic_user.models.base import NonEmptyStr, StrictModel, find_duplicates
 
 METRIC_ID_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
 EXPECTATION_FIELD_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
+# Keys of a question's success_criteria that are not metric ids (D240): a metric never takes
+# one of these ids, so every other key of success_criteria is a metric id.
+GENERAL_CRITERIA_KEY = "general"
+CHEAT_SHEET_KEY = "cheat_sheet"
+RESERVED_METRIC_IDS = frozenset({GENERAL_CRITERIA_KEY, CHEAT_SHEET_KEY})
 # The 0 / 0.5 / 1 scale shared by every judged metric.
 JUDGED_SCALE = (0.0, 0.5, 1.0)
 METRIC_CONFIG_SCHEMA_VERSION = 1
@@ -162,6 +167,10 @@ class MetricDefinition(StrictModel):
     @model_validator(mode="after")
     def _consistent(self) -> Self:
         problems: list[str] = []
+        if self.metric_id in RESERVED_METRIC_IDS:
+            problems.append(
+                f"the id is reserved for a success_criteria key ({sorted(RESERVED_METRIC_IDS)})"
+            )
         if dupes := find_duplicates([f.name for f in self.question_expectation_schema]):
             problems.append(f"duplicate expectation fields {dupes}")
         if self.question_expectation_schema and self.generation_instructions is None:

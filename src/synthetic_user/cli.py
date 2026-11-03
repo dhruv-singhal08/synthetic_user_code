@@ -61,7 +61,7 @@ from synthetic_user.models.execution import ExecutionRecord, ProductOutcome
 from synthetic_user.models.kpi import RunKpis
 from synthetic_user.models.metrics import MetricSelection, ResolvedMetricConfig
 from synthetic_user.models.question import QuestionCase
-from synthetic_user.models.reference import DataCatalog, Reference, ReferencePack
+from synthetic_user.models.reference import DataCatalog, Reference
 from synthetic_user.models.run import EvaluationGuidance, GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
@@ -508,10 +508,6 @@ def evaluate(
     questions: Annotated[Path | None, typer.Option("--questions", help="questions.json")] = None,
     executions: Annotated[Path | None, typer.Option("--executions", help="executions.json")] = None,
     scenarios: Annotated[Path | None, typer.Option("--scenarios", help="scenarios.json")] = None,
-    reference_packs: Annotated[
-        Path | None,
-        typer.Option("--reference-packs", help="reference_packs.json (grounded file mode)"),
-    ] = None,
     out_dir: Annotated[
         Path | None,
         typer.Option("--out-dir", help="File mode output dir. Default: the executions file's dir."),
@@ -531,9 +527,7 @@ def evaluate(
     """Evaluate executions with the run's frozen metric configuration; writes
     evaluations.json, bug_candidates.json and the KPIs."""
     state = _state(ctx, config, log_level)
-    files = _EvaluateFiles(
-        questions, executions, scenarios, reference_packs, out_dir, metric_config
-    )
+    files = _EvaluateFiles(questions, executions, scenarios, out_dir, metric_config)
     _guard(lambda: asyncio.run(_evaluate(state, run_id, files, reference, guide, guidance)))
 
 
@@ -542,7 +536,6 @@ class _EvaluateFiles:
     questions: Path | None
     executions: Path | None
     scenarios: Path | None
-    reference_packs: Path | None
     out_dir: Path | None
     metric_config: Path | None
 
@@ -585,14 +578,9 @@ async def _evaluate(
     question_list = _read_file(questions_path, TypeAdapter(list[QuestionCase]))
     execution_items = _read_file(executions_path, TypeAdapter(list[ExecutionRecord]))
     scenario_list = _read_file(scenarios_path, TypeAdapter(list[Scenario]))
-    packs = (
-        _read_file(files.reference_packs, TypeAdapter(list[ReferencePack]))
-        if files.reference_packs is not None
-        else []
-    )
     out_store = JsonArtifactStore(files.out_dir or executions_path.parent)
 
-    cases = _pair_cases(question_list, execution_items, scenario_list, packs)
+    cases = _pair_cases(question_list, execution_items, scenario_list)
     llm = create_llm_client(settings)
     logger = get_run_logger("synthetic_user.nodes.evaluator", new_run_id())
     frozen = (
@@ -1079,11 +1067,9 @@ def _pair_cases(
     questions: list[QuestionCase],
     executions: list[ExecutionRecord],
     scenarios: list[Scenario],
-    packs: list[ReferencePack],
 ) -> list[EvaluationCase]:
     by_question = {q.question_id: q for q in questions}
     by_scenario = {s.id: s for s in scenarios}
-    by_pack = {p.pack_id: p for p in packs}
     cases: list[EvaluationCase] = []
     for execution in executions:
         question = by_question.get(execution.question_id)
@@ -1096,15 +1082,7 @@ def _pair_cases(
             raise ArtifactIntegrityError(
                 f"{question.question_id} refers to unknown scenario {question.scenario_id}"
             )
-        pack = None
-        if question.reference_pack_id is not None:
-            pack = by_pack.get(question.reference_pack_id)
-            if pack is None:
-                raise ArtifactIntegrityError(
-                    f"{question.question_id} is grounded: pass the reference_packs.json of its "
-                    "run (--reference-packs) and the reference (--reference)"
-                )
-        cases.append(EvaluationCase(question, scenario, pack, execution))
+        cases.append(EvaluationCase(question, scenario, execution))
     return cases
 
 

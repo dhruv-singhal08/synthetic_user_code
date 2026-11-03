@@ -135,8 +135,13 @@ UNKNOWN_CLASSIFICATION_NOTE = (
 class EvaluationCase:
     question: QuestionCase
     scenario: Scenario
-    pack: ReferencePack | None  # grounded questions only
     execution: ExecutionRecord
+
+    @property
+    def pack(self) -> ReferencePack | None:
+        """The cheat sheet the question was generated with (its success_criteria key, D240);
+        grounded questions only."""
+        return self.question.expectations.success_criteria.cheat_sheet
 
 
 @dataclass
@@ -756,7 +761,12 @@ def _check_links(case: EvaluationCase, reference: Reference | None) -> None:
     if question.scenario_id != scenario.id:
         problems.append(f"question belongs to {question.scenario_id}, not {scenario.id}")
     pack_id = pack.pack_id if pack else None
-    if question.reference_pack_id != pack_id:
+    if pack is None and question.reference_pack_id is not None:
+        problems.append(
+            f"{question.question_id} uses reference pack {question.reference_pack_id} but its "
+            "success_criteria has no cheat_sheet (regenerate the questions)"
+        )
+    elif question.reference_pack_id != pack_id:
         problems.append(f"question uses reference pack {question.reference_pack_id}, not {pack_id}")
     if question.mode is GenerationMode.GROUNDED:
         if reference is None:

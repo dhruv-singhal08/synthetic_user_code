@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from synthetic_user.models.metrics import (
+    CHEAT_SHEET_KEY,
+    GENERAL_CRITERIA_KEY,
     ExpectationFieldType,
     MetricDefinition,
     ReferenceAsset,
@@ -30,6 +32,7 @@ from synthetic_user.models.question import (
     MetricExpectation,
     MetricExpectationDraft,
     MetricExpectationStatus,
+    SuccessCriteria,
 )
 from synthetic_user.models.reference import Reference, ReferenceKind, ReferencePack
 
@@ -175,10 +178,16 @@ def canonical_problems(
 
 
 def build_expectations(
-    draft: ExpectationsDraft, request: ExpectationRequest, reference: Reference | None
+    draft: ExpectationsDraft,
+    request: ExpectationRequest,
+    reference: Reference | None,
+    pack: ReferencePack | None,
 ) -> Expectations:
     """The stored expectations: canonical names applied, invalid generated values recorded as
-    cannot_generate with the reason, code-decided entries added."""
+    cannot_generate with the reason, code-decided entries added. Everything except
+    expected_behavior is collected into one structured success_criteria (D240): the draft's
+    criteria under ``general``, a copy of the scenario's pack under ``cheat_sheet`` and the
+    metric expectations under their metric ids."""
     invalid = canonical_problems(draft, request, reference)
     context = reference.agent_context if reference is not None else None
     entries: dict[str, MetricExpectation] = {}
@@ -211,11 +220,14 @@ def build_expectations(
             status=entry.status, value=value, reason=entry.reason
         )
     entries.update(request.preset)
-    return Expectations(
-        expected_behavior=draft.expected_behavior,
-        success_criteria=draft.success_criteria,
-        metric_expectations=entries,
+    criteria = SuccessCriteria.model_validate(
+        {
+            GENERAL_CRITERIA_KEY: draft.success_criteria,
+            CHEAT_SHEET_KEY: pack,
+            **entries,
+        }
     )
+    return Expectations(expected_behavior=draft.expected_behavior, success_criteria=criteria)
 
 
 def _strings(value: Any) -> list[str]:

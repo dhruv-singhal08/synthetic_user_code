@@ -15,7 +15,7 @@ from synthetic_user.models.evaluation import CoverageStatus, SupportStatus
 from synthetic_user.models.execution import RetrievedContext, ToolCall
 from synthetic_user.models.metrics import EvidenceKind, MetricDefinition
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.question import MetricExpectationStatus, QuestionCase
+from synthetic_user.models.question import QuestionCase
 from synthetic_user.nodes.evaluator.judge_common import (
     EvaluableResponse,
     bounded,
@@ -59,10 +59,7 @@ class RetrievalJudgeInput:
         return list(dict.fromkeys(items))
 
     def generated(self, metric_id: str) -> dict[str, Any] | None:
-        expectation = self.question.expectations.metric_expectations.get(metric_id)
-        if expectation is None or expectation.status is not MetricExpectationStatus.GENERATED:
-            return None
-        return dict(expectation.value or {})
+        return self.question.expectations.success_criteria.generated(metric_id)
 
     @property
     def checks_citations(self) -> bool:
@@ -137,7 +134,7 @@ def build_retrieval_prompt(data: RetrievalJudgeInput) -> tuple[str, str]:
     expected = {
         "question": question.utterance,
         "expected_behavior": question.expectations.expected_behavior,
-        "success_criteria": question.expectations.success_criteria,
+        "success_criteria": question.expectations.success_criteria.general,
     }
     user = PROMPTS.text(
         "user",

@@ -87,7 +87,7 @@ def check_general(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: s
             continue
         if definition.asks_factual_verification and judged.factual_verification is None:
             errors.append(f"{definition.metric_id}: factual_verification is required")
-    wanted = {_criterion_key(c): c for c in data.question.expectations.success_criteria}
+    wanted = {_criterion_key(c): c for c in data.question.expectations.success_criteria.general}
     got = [_criterion_key(r.criterion) for r in draft.criteria]
     missing = [c for key, c in wanted.items() if key not in got]
     extra = [r.criterion for r in draft.criteria if _criterion_key(r.criterion) not in wanted]

@@ -224,3 +224,57 @@ def test_unsupported_dialect_construct_is_an_explicit_parse_failure(
     rec = run(sql, index, pack, dialect="postgres")
     assert not rec.parsed and "parse error" in rec.diagnostics[0]
     assert rec.identifiers == []  # never fabricated
+
+
+def test_schema_qualified_catalog_tables_resolve_by_exact_name_parts() -> None:
+    """A catalog may name its tables schema.table (user report): the SQL may write the same
+    name, a more qualified one or the bare table; a different qualifier is a catalog mismatch,
+    never assumed to be the same table."""
+    from synthetic_user.references.loader import parse_reference
+
+    catalog = (
+        "kind: data_catalog\nname: Insights\ntables:\n"
+        "  - name: gcsinsight.cf_lodging_final_cdh\n"
+        "    columns: [{name: spend_am}, {name: yr_mo}]\n"
+        "  - name: gcsinsight.exch_rt_v2\n    columns: [{name: yr_mo}, {name: rate}]\n"
+        "  - name: other.exch_rt_v2\n    columns: [{name: yr_mo}]\n"
+        "relationships:\n"
+        "  - {from: gcsinsight.cf_lodging_final_cdh.yr_mo, to: gcsinsight.exch_rt_v2.yr_mo}\n"
+    )
+    reference = parse_reference(catalog, source_name="c.yaml", max_chars=10_000)
+    index = CatalogIndex.for_reference(reference)
+    assert index is not None
+    for written in (
+        "gcsinsight.cf_lodging_final_cdh",
+        "`GCSINSIGHT`.cf_lodging_final_cdh",
+        "proj.gcsinsight.cf_lodging_final_cdh",
+        "cf_lodging_final_cdh",
+    ):
+        table, reason = index.resolve_table(written)
+        assert table is not None and table.name == "gcsinsight.cf_lodging_final_cdh", reason
+    missing, reason = index.resolve_table("acsinsight.cf_lodging_final_cdh")
+    assert missing is None and "is not in the catalog" in (reason or "")
+    ambiguous, reason = index.resolve_table("exch_rt_v2")
+    assert ambiguous is None and "several catalog tables" in (reason or "")
+
+    sql = (
+        "SELECT l.yr_mo, SUM(l.spend_am * r.rate) FROM gcsinsight.cf_lodging_final_cdh l "
+        "JOIN gcsinsight.exch_rt_v2 r ON l.yr_mo = r.yr_mo GROUP BY l.yr_mo"
+    )
+    rec = reconcile(PARSER.parse(sql, dialect=None), artifact=1, index=index, pack=None)
+    assert {i.identifier: i.status for i in rec.identifiers} == {
+        "gcsinsight.cf_lodging_final_cdh": IdentifierStatus.VALID_EXTRA,
+        "gcsinsight.exch_rt_v2": IdentifierStatus.VALID_EXTRA,
+        "gcsinsight.cf_lodging_final_cdh.yr_mo": IdentifierStatus.VALID_EXTRA,
+        "gcsinsight.cf_lodging_final_cdh.spend_am": IdentifierStatus.VALID_EXTRA,
+        "gcsinsight.exch_rt_v2.rate": IdentifierStatus.VALID_EXTRA,
+        "gcsinsight.exch_rt_v2.yr_mo": IdentifierStatus.VALID_EXTRA,
+    }
+    assert [j.status for j in rec.joins] == [JoinStatus.DOCUMENTED_UNVERIFIED]  # not set verified
+    unclear = reconcile(
+        PARSER.parse("SELECT yr_mo FROM exch_rt_v2", dialect=None),
+        artifact=1,
+        index=index,
+        pack=None,
+    )
+    assert unclear.identifiers[0].status is IdentifierStatus.UNRESOLVED

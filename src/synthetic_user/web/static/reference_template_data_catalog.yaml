@@ -1,5 +1,5 @@
 # Reference format 1: data catalog (tables, columns, relationships, rules).
-# Fields marked (optional) can be left out. Names: no dots or spaces.
+# Fields marked (optional) can be left out. Names: no spaces; column names no dots; a table name may be schema-qualified (schema.table).
 kind: data_catalog
 name: My product's data                       # what this catalog covers
 description: Tables the product answers from   # (optional)

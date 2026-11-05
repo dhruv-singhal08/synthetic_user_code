@@ -700,3 +700,12 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   observed_in quality, the 24-rule lodging case); the drawer changes in a browser (JS
   syntax-checked with JavaScriptCore).
 - Next: re-run questions + evaluate on the failing lodging-spend scenario.
+
+## Schema-qualified table names (2026-11-05) - user report (D255)
+
+- Files: models/reference.py (table-name rule, endpoint split at the last dot),
+  references/catalog_index.py (resolve_table by exact name parts; relationship lookup),
+  sql/reconcile.py (last-dot split; ambiguous table = unresolved), web/static/
+  reference_template_data_catalog.yaml (naming note); tests (reference + reconcile).
+- Commands: ruff / format / mypy / pytest: all pass, 850 passed.
+- NOT verified: the user's insights_data_catalog_v2.yaml itself (not in the repo).

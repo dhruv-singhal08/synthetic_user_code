@@ -59,12 +59,24 @@ DEFAULT_INSTRUCTIONS = {
     ),
 }
 
-_NAME = re.compile(r"^[^.\s]+$")  # table / column names: no dots, no spaces
+# Column names: no dots, no spaces. Table names may be qualified (schema.table, e.g.
+# "gcsinsight.cf_airline_final_cdh"): dot-separated non-empty parts, no spaces. A relationship
+# endpoint "table.column" therefore splits at its LAST dot.
+_NAME = re.compile(r"^[^.\s]+$")
+_TABLE_NAME = re.compile(r"^[^.\s]+(\.[^.\s]+)*$")
 
 
 def _check_name(name: str, what: str) -> str:
     if not _NAME.fullmatch(name):
         raise ValueError(f"{what} name {name!r} must not contain dots or spaces")
+    return name
+
+
+def _check_table_name(name: str) -> str:
+    if not _TABLE_NAME.fullmatch(name):
+        raise ValueError(
+            f"table name {name!r} must not contain spaces or empty parts (schema.table is allowed)"
+        )
     return name
 
 
@@ -245,7 +257,7 @@ class DataCatalog(StrictModel):
             problems.append(f"duplicate table names: {dupes}")
         for table in self.tables:
             try:
-                _check_name(table.name, "table")
+                _check_table_name(table.name)
                 for column in table.columns:
                     _check_name(column.name, f"{table.name} column")
             except ValueError as exc:
@@ -265,8 +277,8 @@ class DataCatalog(StrictModel):
         return next((t for t in self.tables if t.name.casefold() == name.casefold()), None)
 
     def endpoint_problem(self, endpoint: str) -> str | None:
-        table_name, dot, column_name = endpoint.partition(".")
-        if not dot or not column_name:
+        table_name, dot, column_name = endpoint.rpartition(".")
+        if not dot or not table_name or not column_name:
             return f"{endpoint!r} is not written table.column"
         table = self.table(table_name)
         if table is None:

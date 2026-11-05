@@ -64,7 +64,8 @@ def reconcile(
         table, reason = index.resolve_table(name)
         if table is None:
             assert reason is not None
-            namespace = "namespace" in reason
+            # Not permitted namespace / several catalog tables match: cannot be checked.
+            namespace = "namespace" in reason or "several catalog tables" in reason
             unresolved_tables = True
             checks.append(
                 IdentifierCheck(
@@ -96,7 +97,7 @@ def reconcile(
         check = _column_check(ref, index, sql_tables, pack_columns, unresolved=unresolved_tables)
         checks.append(check)
         if check.canonical is not None:
-            table_name, _, column_name = check.canonical.partition(".")
+            table_name, _, column_name = check.canonical.rpartition(".")
             used_columns.add((table_name.casefold(), column_name.casefold()))
     not_used = [name for key, name in pack_tables.items() if key not in sql_tables] + [
         f"{table}.{column}"
@@ -139,7 +140,7 @@ def evidence_requests(
     for rec in reconciliations:
         for check in rec.with_status(IdentifierStatus.VALID_EXTRA):
             if check.kind == "column" and check.canonical is not None:
-                table, _, column = check.canonical.partition(".")
+                table, _, column = check.canonical.rpartition(".")
                 requests.append(
                     LookupRequest(
                         tool=LookupTool.LOOKUP_SCHEMA,

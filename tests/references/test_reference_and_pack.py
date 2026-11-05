@@ -13,6 +13,7 @@ from synthetic_user.core.exceptions import InputAssetError
 from synthetic_user.models.reference import (
     DEFAULT_INSTRUCTIONS,
     CatalogPackDraft,
+    DataCatalog,
     DocumentPackDraft,
     DocumentPick,
     Join,
@@ -103,7 +104,9 @@ def test_bad_references_are_refused(name: str, content: str, match: str) -> None
     ("change", "match"),
     [
         (lambda d: d["tables"].append({"name": "TX"}), "duplicate table names"),
-        (lambda d: d["tables"][0].update(name="t.x"), "must not contain dots"),
+        (lambda d: d["tables"][0].update(name="t..x"), "must not contain spaces or empty"),
+        (lambda d: d["tables"][0].update(name="my tx"), "must not contain spaces or empty"),
+        (lambda d: d["tables"][1]["columns"].append({"name": "a.b"}), "must not contain dots"),
         (lambda d: d["tables"][1]["columns"].append({"name": "name"}), "duplicate columns"),
         (lambda d: d["relationships"].append({"from": "tx.amount", "to": "x.y"}), "unknown table"),
         (lambda d: d["relationships"].append({"from": "tx.zz", "to": "emp.name"}), "not listed"),
@@ -115,6 +118,23 @@ def test_catalog_consistency_is_checked(change: object, match: str) -> None:
     change(data)  # type: ignore[operator]
     with pytest.raises(InputAssetError, match=match):
         parse_reference(_yaml(data), source_name="c.yaml", max_chars=10_000)
+
+
+def test_schema_qualified_table_names_are_accepted() -> None:
+    """User report: a catalog whose tables are named schema.table was refused."""
+    data = json.loads(json.dumps(CATALOG))
+    data["tables"][0]["name"] = "gcsinsight.tx"
+    data["tables"][1]["name"] = "gcsinsight.emp"
+    data["relationships"] = [{"from": "gcsinsight.tx.emp_id", "to": "gcsinsight.emp.emp_id"}]
+    reference = parse_reference(_yaml(data), source_name="c.yaml", max_chars=10_000)
+    catalog = reference.content
+    assert isinstance(catalog, DataCatalog)
+    assert [t.name for t in catalog.tables] == ["gcsinsight.tx", "gcsinsight.emp"]
+    assert catalog.relationship("gcsinsight.emp.emp_id", "gcsinsight.tx.emp_id") is not None
+    bad = json.loads(json.dumps(data))
+    bad["relationships"] = [{"from": "gcsinsight.tx.zz", "to": "gcsinsight.emp.emp_id"}]
+    with pytest.raises(InputAssetError, match="column 'zz' is not listed in table gcsinsight.tx"):
+        parse_reference(_yaml(bad), source_name="c.yaml", max_chars=10_000)
 
 
 def test_duplicate_documents_and_size_limit_are_refused() -> None:

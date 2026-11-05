@@ -93,21 +93,39 @@ class CatalogIndex:
     # --- resolution ------------------------------------------------------------------------
 
     def resolve_table(self, name: str) -> tuple[CatalogTable | None, str | None]:
-        """(table, None) or (None, reason). A permitted qualifier is dropped; the last name
-        part must then match a catalog table exactly (case-insensitive)."""
+        """(table, None) or (None, reason). Name parts are compared exactly (case-insensitive,
+        quotes dropped); a catalog table name may itself be qualified (schema.table).
+
+        The written name matches a catalog table when one is a dot-part suffix of the other:
+        ``proj.gcsinsight.t`` (extra qualifier, which must be permitted when
+        ``evaluation.catalog_namespaces`` is set) or ``t`` (unqualified) both match catalog
+        ``gcsinsight.t``; ``acsinsight.t`` does not (a different qualifier is never assumed to be
+        the same table). Several catalog tables matching an unqualified name -> unresolved."""
         parts = [p for p in (normal_name(x) for x in name.split(".")) if p]
         if not parts:
             return None, f"{name!r} is not a table name"
-        *qualifiers, base = parts
+        exact = self._tables.get(".".join(parts))
+        if exact is not None:
+            return exact, None
+        candidates: list[tuple[CatalogTable, list[str]]] = []
+        for key, table in self._tables.items():
+            own = key.split(".")
+            if len(parts) > len(own) and parts[-len(own) :] == own:
+                candidates.append((table, parts[: -len(own)]))  # extra qualifiers written
+            elif len(parts) < len(own) and own[-len(parts) :] == parts:
+                candidates.append((table, []))  # written less qualified
+        if not candidates:
+            return None, f"table {'.'.join(parts)!r} is not in the catalog"
+        if len(candidates) > 1:
+            names = ", ".join(t.name for t, _ in candidates)
+            return None, f"table {'.'.join(parts)!r} matches several catalog tables: {names}"
+        table, qualifiers = candidates[0]
         if qualifiers and self._namespaces is not None:
             qualifier = ".".join(qualifiers)
             if qualifier not in self._namespaces and qualifiers[-1] not in self._namespaces:
                 return None, (
                     f"namespace {qualifier!r} is not permitted by evaluation.catalog_namespaces"
                 )
-        table = self._tables.get(base)
-        if table is None:
-            return None, f"table {base!r} is not in the catalog"
         return table, None
 
     def column(self, table: CatalogTable, name: str) -> CatalogColumn | None:
@@ -212,7 +230,7 @@ class CatalogIndex:
         pair_set = {resolved[n] for n in (pair or []) if n in resolved}
         facts: list[RelationshipFact] = []
         for index, rel in enumerate(self.catalog.relationships, start=1):
-            ends = {rel.from_.split(".", 1)[0].casefold(), rel.to.split(".", 1)[0].casefold()}
+            ends = {rel.from_.rsplit(".", 1)[0].casefold(), rel.to.rsplit(".", 1)[0].casefold()}
             if pair is not None:
                 if len(pair_set) != 2 or ends != pair_set:
                     continue

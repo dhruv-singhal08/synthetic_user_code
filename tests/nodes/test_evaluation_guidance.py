@@ -90,8 +90,8 @@ def _general(user: str) -> dict[str, Any]:
 
     line = user.split("on exactly these metric(s): ", 1)[1].split("\n", 1)[0]
     metrics = {m.strip().rstrip("."): score(1) for m in line.split(",")}
-    if "correctness_completeness" in metrics:
-        metrics["correctness_completeness"]["factual_verification"] = "unverified"
+    if "correctness" in metrics:
+        metrics["correctness"]["factual_verification"] = "unverified"
     for metric_id, judged in metrics.items():
         judged["checks"] = checks_for(user, metric_id)
     return general(metrics, response_classification="answered")

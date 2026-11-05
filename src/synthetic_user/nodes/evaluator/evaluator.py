@@ -423,7 +423,14 @@ class Evaluator:
         """Parser output (+ catalog reconciliation when the run has a data catalog) for each
         SQL artifact, only when a general metric needs SQL. Each artifact is parsed once and
         judged exactly as generated."""
-        needs_sql = any(EvidenceKind.SQL in d.required_execution_evidence for d in plan.general)
+        # SQL metrics, and metrics that check the Reference Spec's schema / rules (the
+        # reconciliation is their evidence, D256).
+        catalog_assets = {ReferenceAsset.CATALOG_SCHEMA, ReferenceAsset.CATALOG_RULES}
+        needs_sql = any(
+            EvidenceKind.SQL in d.required_execution_evidence
+            or catalog_assets & set(d.checked_reference_assets)
+            for d in plan.general
+        )
         if not needs_sql or not isinstance(response, AnsweredResponse):
             return []
         dialect = self._settings.evaluation.sql_dialect

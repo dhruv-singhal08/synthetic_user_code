@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -61,7 +62,7 @@ def _close_leftover_event_loop(request: pytest.FixtureRequest) -> None:
         asyncio.set_event_loop(None)
 
 
-DEFAULT_TEST_METRICS = ("relevance", "correctness_completeness")
+DEFAULT_TEST_METRICS = ("relevance", "correctness")
 
 
 def seed_metric_config(
@@ -258,7 +259,7 @@ def scripted_judge(
     General Judge: every requested metric scores 1 (a passed check for every requirement its
     evaluation contract assigns), except
     answers containing ``fail_on``: then ``failing`` (default: semantic_correctness when
-    requested, else correctness_completeness, else the first metric) scores 0 with a supported
+    requested, else correctness, else the first metric) scores 0 with a supported
     finding and a failed derived check. The response classification is returned when the
     prompt asks for it.
     Retrieval Judge: every requested metric 1, every chunk relevant, checklist covered.
@@ -271,7 +272,7 @@ def scripted_judge(
         answer = user.split("Product response (", 1)[1]
         bad = fail_on is not None and fail_on in answer
         target = failing or next(
-            (m for m in ("semantic_correctness", "correctness_completeness") if m in metrics),
+            (m for m in ("semantic_correctness", "correctness") if m in metrics),
             metrics[0],
         )
         failed = {"score": 0, "rationale": "wrong", "evidence": fail_on, "what_didnt": ["wrong"]}
@@ -311,6 +312,15 @@ def scripted_judge(
         if asked:
             reply["response_classification"] = classification
         reply["goal_completion"] = goal_for(user, classification if asked else None)
+        if "For EVERY undocumented join add one" in user:
+            # Undocumented joins of the reconciliation: decided as not established.
+            joins = re.findall(
+                r'"left": "([^"]+)",\s*"right": "([^"]+)",\s*"status": "undocumented"', user
+            )
+            reply["join_decisions"] = [
+                {"join": f"{a} = {b}", "allowed": False, "basis": "not_established", "reason": "r"}
+                for a, b in dict.fromkeys(joins)
+            ]
         return reply
 
     return judge

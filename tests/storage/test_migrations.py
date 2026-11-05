@@ -49,11 +49,11 @@ def _legacy(**overrides: Any) -> EvaluationResult:
 def test_completion_is_mapped_only_explicitly_and_marked() -> None:
     old = _legacy()
     assert "completion" in old.metrics  # reading never relabels
-    (migrated,), changed = map_legacy_metric([old], "completion", "correctness_completeness")
+    (migrated,), changed = map_legacy_metric([old], "completion", "correctness")
     assert changed == 1
-    assert set(migrated.metrics) == {"relevance", "correctness_completeness", "tool_selection"}
-    assert migrated.metrics["correctness_completeness"].score == 0.5  # not re-evaluated
-    assert migrated.findings[0].category == "correctness_completeness"
+    assert set(migrated.metrics) == {"relevance", "correctness", "tool_selection"}
+    assert migrated.metrics["correctness"].score == 0.5  # not re-evaluated
+    assert migrated.findings[0].category == "correctness"
     assert "judged under the legacy completion rubric" in migrated.notes[-1]
     assert migrated.legacy_evaluation_profile == "agent" and migrated.schema_version == 1
 
@@ -66,7 +66,7 @@ def test_tool_selection_is_never_relabelled() -> None:
 def test_current_evaluations_are_never_rewritten() -> None:
     current = _legacy().model_copy(update={"schema_version": 2})
     with pytest.raises(ArtifactIntegrityError, match="only legacy"):
-        map_legacy_metric([current], "completion", "correctness_completeness")
+        map_legacy_metric([current], "completion", "correctness")
 
 
 def test_profile_era_ui_state_reads_with_labels_only() -> None:

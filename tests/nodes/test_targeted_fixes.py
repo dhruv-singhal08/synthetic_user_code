@@ -431,9 +431,9 @@ async def test_criteria_observed_in_is_required_when_criteria_are_mapped(env: En
     for criterion in question["evaluation_context"]["success_criteria"]:
         criterion.pop("observed_in")
     llm = FakeLLMClient([batch(question)] * attempts(env.settings))
-    result = await env.run(llm, count=1, metrics=("correctness_completeness",))
+    result = await env.run(llm, count=1, metrics=("semantic_correctness",))
     assert not result.questions
-    assert "C1: observed_in is required (answer)" in result.rejected[0].reasons
+    assert "C1: observed_in is required (answer | sql)" in result.rejected[0].reasons
 
 
 # --- FIX 7: time windows ----------------------------------------------------------------------
@@ -541,3 +541,59 @@ async def test_run_log_structured_output_and_report_agree(
     assert verdict["verdict"] == result.verdict.value if result.verdict else True
     assert verdict["limitations"] == result.limitations
     assert cells["final_verdict"] == verdict["verdict"]
+
+
+# --- live report: SQL:1 refused when no SQL metric was selected ---------------------------------
+
+
+async def test_sql_artifact_id_is_citable_without_sql_metrics(
+    app_config: AppConfig,
+    sample_product: ProductDescription,
+    sample_reference: Reference,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+) -> None:
+    """Live report: with only relevance + correctness selected, the response view
+    labelled the SQL artifact SQL:1 but validation refused SQL:1 (it was registered only for
+    parsed SQL), so both metrics ended in evaluation_error after 3 attempts."""
+    from nodes.test_evaluator import ANSWER, _execution, _question, all_pass
+    from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+
+    scenario, pack = sample_scenarios[0], sample_packs[0]
+    metrics = ("relevance", "correctness")
+    out = all_pass(*metrics)
+    out["metrics"]["relevance"]["checks"] = []
+    out["metrics"]["correctness"]["checks"] = [
+        {
+            "requirement_ids": ["C1"],
+            "source": "success_criteria",
+            "status": "passed",
+            "evidence_ids": ["SQL:1", "RESPONSE"],
+            "reason": "the SQL ranks the employees",
+        }
+    ]
+    llm = FakeLLMClient([out])
+    evaluator = Evaluator(
+        llm,
+        app_config,
+        logging.getLogger("t"),
+        reference=sample_reference,
+        metric_config=builtin_metric_config(list(metrics)),
+    )
+    question = _question(scenario, pack)
+    data = question.model_dump(mode="json", by_alias=True)
+    data["evaluation_context"]["metric_mapping"] = {
+        "relevance": {"criteria": [], "comparison_basis": "question_vs_response"},
+        "correctness": {
+            "criteria": ["C1"],
+            "comparison_basis": "criteria_vs_response",
+        },
+    }
+    question = type(question).model_validate(data)
+    result = await evaluator.evaluate(
+        EvaluationCase(question, scenario, _execution(ANSWER)), sample_product
+    )
+    assert len(llm.calls) == 1, llm.calls[-1].user[-600:]
+    assert '"evidence_id": "SQL:1"' in llm.calls[0].user  # what the judge is shown ...
+    assert result.metrics["correctness"].status is MetricStatus.SCORED  # ... resolves
+    assert "SQL:1" in result.metrics["correctness"].observed_evidence_ids

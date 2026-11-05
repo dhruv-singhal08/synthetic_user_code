@@ -709,3 +709,14 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   reference_template_data_catalog.yaml (naming note); tests (reference + reconcile).
 - Commands: ruff / format / mypy / pytest: all pass, 850 passed.
 - NOT verified: the user's insights_data_catalog_v2.yaml itself (not in the repo).
+
+## Correctness metric + SQL:1 evidence-id bug (2026-11-05) - user report and decision (D256, D257)
+
+- Files: metrics/catalog.yaml (correctness entry, 2026.11-6), models/metrics.py
+  (all_success_criteria, checked_reference_assets, reference_assets), models/evaluation.py
+  (legacy alias removed), nodes/question/context.py, nodes/evaluator/{evaluator.py (SQL evidence
+  for spec-checking metrics), evidence.py (SQL ids)}, metrics/registry.py, renamed id in cli.py,
+  core/config.py, kpis.py, storage/migrations.py, config/app*.yaml, README.md; tests, conftest
+  (scripted judge answers undocumented joins), fake_llm_script.json.
+- Commands: ruff / format / mypy / pytest: all pass, 851 passed.
+- NOT verified: a live run with only relevance + correctness on the commercial-card question.

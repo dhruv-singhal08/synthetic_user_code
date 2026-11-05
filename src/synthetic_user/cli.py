@@ -811,7 +811,7 @@ def migrate_run(
         bool,
         typer.Option(
             "--map-completion",
-            help="Relabel legacy 'completion' results as 'correctness_completeness' (marked in "
+            help="Relabel legacy 'completion' results as 'correctness' (marked in "
             "each evaluation's notes; scores are not re-evaluated).",
         ),
     ] = False,
@@ -835,7 +835,7 @@ def _migrate_run(state: CliState, run_id: str, map_completion: bool) -> None:
     store.write_models(
         run_artifact(run_id, "evaluations.legacy.json"), evaluations, EvaluationResult
     )
-    migrated, changed = map_legacy_metric(evaluations, "completion", "correctness_completeness")
+    migrated, changed = map_legacy_metric(evaluations, "completion", "correctness")
     manifest = store.read_model(run_artifact(run_id, "manifest.json"), RunManifest)
     kpis = compute_kpis(
         run_id=run_id,
@@ -849,7 +849,7 @@ def _migrate_run(state: CliState, run_id: str, map_completion: bool) -> None:
     store.write_model(run_artifact(run_id, "kpis.json"), kpis)
     store.write_text(run_artifact(run_id, "kpis.csv"), kpis_csv(kpis))
     typer.echo(
-        f"migrated completion -> correctness_completeness in {changed} evaluation(s); "
+        f"migrated completion -> correctness in {changed} evaluation(s); "
         "original saved as evaluations.legacy.json"
     )
 

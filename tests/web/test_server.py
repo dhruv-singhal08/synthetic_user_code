@@ -157,7 +157,7 @@ def test_config_and_samples(client: TestClient) -> None:
         "citation_correctness",
     }
     assert config["metric_categories"]["sql_quality"] == "SQL Quality"
-    assert config["default_metrics"][:2] == ["relevance", "correctness_completeness"]
+    assert config["default_metrics"][:2] == ["relevance", "correctness"]
     assert "max_parallel_scenarios" not in json.dumps(config)  # internal, not a UI control
     assert config["web"]["max_step_count"] == 100 and config["execution_resume"] is True
     samples = client.get("/api/samples").json()
@@ -593,7 +593,7 @@ def test_evaluation_is_a_draft_until_locked_and_editable_until_scenarios(
     draft = _lock(
         client,
         run_id,
-        selected_metrics=["relevance", "correctness_completeness"],
+        selected_metrics=["relevance", "correctness"],
         custom_metrics_text="- Brevity: answers in at most three sentences",
         scenario_count="1",
         questions_per_scenario="1",
@@ -603,7 +603,7 @@ def test_evaluation_is_a_draft_until_locked_and_editable_until_scenarios(
     assert draft["evaluation_locked"] is False
     assert draft["metric_selection"]["selected_metrics"] == [
         "relevance",
-        "correctness_completeness",
+        "correctness",
     ]
     assert [c["provenance"] for c in draft["metric_selection"]["custom_inputs"]] == [
         "free text item 1",
@@ -643,7 +643,7 @@ def test_runs_saved_before_the_lock_button_stay_locked(
 @pytest.mark.parametrize(
     ("metric", "message"),
     [
-        ("completion", "'completion' was replaced by correctness_completeness"),
+        ("completion", "'completion' was replaced by correctness"),
         ("tool_selection", "'tool_selection' was replaced by tool_correctness"),
         ("bleu", "unknown built-in metric 'bleu'"),
     ],

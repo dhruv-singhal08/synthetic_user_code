@@ -24,7 +24,7 @@ product_adapter:           # or a file: ./config/products/sample_nl2sql.adapter.
 reference:
   max_chars: 200000          # the whole reference goes into prompts; larger files are refused
 evaluation:
-  default_metrics: [relevance, correctness_completeness]  # CLI default; the UI selects per run
+  default_metrics: [relevance, correctness]  # CLI default; the UI selects per run
   sql_dialect: null          # explicit sqlglot dialect for the SQL parser; never guessed
   # Qualified table names in generated SQL (ns.table): null = any qualifier is dropped before
   # the exact catalog lookup; a list (e.g. [my_schema]) = only these qualifiers are accepted.

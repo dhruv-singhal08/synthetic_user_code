@@ -2,7 +2,7 @@
 
 Reading old runs never rewrites them: metric ids stay as judged (``completion``,
 ``tool_selection``, ...). The only relabelling offered is the one the metric catalog allows:
-``completion`` -> ``correctness_completeness`` (the merged definition), and only when the user
+``completion`` -> ``correctness`` (the merged definition), and only when the user
 asks for it. Every migrated result is marked in its notes; ``tool_selection`` is never mapped
 to ``tool_correctness`` because the new definition is broader than what was judged.
 """
@@ -15,7 +15,7 @@ from synthetic_user.core.exceptions import ArtifactIntegrityError
 from synthetic_user.models.evaluation import EvaluationResult, Finding
 
 # old id -> new id; the only mapping the catalog allows (instruction section 11).
-ALLOWED_MAPPINGS = {"completion": "correctness_completeness"}
+ALLOWED_MAPPINGS = {"completion": "correctness"}
 REFUSED_MAPPINGS = {
     "tool_selection": "tool_correctness is an expanded definition: historical tool_selection "
     "scores are not relabelled",

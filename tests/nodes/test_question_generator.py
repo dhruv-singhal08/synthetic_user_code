@@ -59,7 +59,7 @@ def q(
         "question_characteristics": {"style": style, "ambiguity_level": ambiguity},
         "evaluation_context": {
             "success_criteria": [
-                {"id": f"C{i}", "requirement": text, "observed_in": "answer"}
+                {"id": f"C{i}", "requirement": text, "observed_in": "sql"}
                 for i, text in enumerate(criteria or CRITERIA, start=1)
             ],
             "metric_mapping": mapping or {},
@@ -423,8 +423,8 @@ async def test_failed_scenario_call_is_isolated(env: Env) -> None:
 def with_metric_expectations(
     question: dict[str, Any],
     entries: dict[str, Any],
-    criteria_metrics: tuple[str, ...] = ("correctness_completeness",),
-    observed_in: str = "answer",
+    criteria_metrics: tuple[str, ...] = ("semantic_correctness",),
+    observed_in: str = "sql",
 ) -> dict[str, Any]:
     """The question with a metric_mapping: every criterion (observed in ``observed_in``) mapped
     to ``criteria_metrics`` and ``entries`` (metric id -> expectation) as the expectations."""
@@ -442,13 +442,22 @@ def with_metric_expectations(
 
 async def test_criteria_metrics_are_mapped_and_code_completes_the_mapping(env: Env) -> None:
     mapped = with_metric_expectations(q("Who spends most?"), {})
+    mapped["evaluation_context"]["metric_mapping"]["semantic_correctness"]["criteria"] = ["C1"]
     llm = FakeLLMClient([batch(mapped)])
-    result = await env.run(
-        llm, count=1, metrics=("relevance", "correctness_completeness", "schema_faithfulness")
-    )
+    metrics = ("relevance", "correctness", "semantic_correctness", "schema_faithfulness")
+    result = await env.run(llm, count=1, metrics=metrics)
     context = result.questions[0].context
-    correctness = context.metric_mapping["correctness_completeness"]
-    assert (correctness.criteria, correctness.expectation) == (["C1", "C2"], None)
+    semantic = context.metric_mapping["semantic_correctness"]
+    assert (semantic.criteria, semantic.expectation) == (["C1"], None)
+    # correctness: EVERY criterion and the Reference Spec (schema + available rules), by code
+    correctness = context.metric_mapping["correctness"]
+    assert (correctness.criteria, correctness.reference_requirements) == (
+        ["C1", "C2"],
+        ["reference_spec.schema"],
+    )
+    assert correctness.available_rules == ["TABLE-RULE-01.01", "RULE-R1"]
+    assert correctness.comparison_basis == "criteria_and_reference_spec_vs_response"
+    assert context.unmapped_criteria() == []  # no coverage gap while correctness is selected
     # relevance compares the question with the response only: never success criteria
     relevance = context.metric_mapping["relevance"]
     assert (relevance.criteria, relevance.reference_requirements) == ([], [])
@@ -458,18 +467,19 @@ async def test_criteria_metrics_are_mapped_and_code_completes_the_mapping(env: E
     assert (schema.criteria, schema.reference_requirements) == ([], ["reference_spec.schema"])
     assert schema.comparison_basis == "schema_vs_sql" and schema.evidence_types == ["sql"]
     prompt = llm.calls[0].user
-    assert "- correctness_completeness (Correctness and Completeness): criteria = the" in prompt
+    assert "- semantic_correctness (Semantic Correctness): criteria = the" in prompt
     rules = prompt.split("metric_mapping: one entry", 1)[1].split("## OUTPUT CONTRACT", 1)[0]
     assert "schema_faithfulness (" not in rules and "relevance (" not in rules
+    assert "- correctness (" not in rules  # code maps it
 
 
 async def test_mapped_criterion_ids_must_exist(env: Env) -> None:
     bad = q(
         "Who spends most?",
-        mapping={"correctness_completeness": {"criteria": ["C1", "C9"], "expectation": None}},
+        mapping={"semantic_correctness": {"criteria": ["C1", "C9"], "expectation": None}},
     )
     llm = FakeLLMClient([batch(bad)] * 3)
-    result = await env.run(llm, count=1, metrics=("correctness_completeness",))
+    result = await env.run(llm, count=1, metrics=("semantic_correctness",))
     assert not result.questions
     reasons = " ".join(result.rejected[0].reasons)
     assert "criteria ['C9'] are not success_criteria ids" in reasons
@@ -477,20 +487,20 @@ async def test_mapped_criterion_ids_must_exist(env: Env) -> None:
 
 
 async def test_criterion_ids_are_normalised_by_code(env: Env) -> None:
-    question = q("Who spends most?", mapping={"correctness_completeness": {"criteria": ["b", "a"]}})
+    question = q("Who spends most?", mapping={"semantic_correctness": {"criteria": ["b", "a"]}})
     question["evaluation_context"]["success_criteria"] = [
-        {"id": "a", "requirement": "names the spenders", "observed_in": "answer"},
-        {"id": "b", "requirement": "ranks them", "observed_in": "answer"},
+        {"id": "a", "requirement": "names the spenders", "observed_in": "sql"},
+        {"id": "b", "requirement": "ranks them", "observed_in": "sql"},
     ]
     result = await env.run(
-        FakeLLMClient([batch(question)]), count=1, metrics=("correctness_completeness",)
+        FakeLLMClient([batch(question)]), count=1, metrics=("semantic_correctness",)
     )
     context = result.questions[0].context
     assert [(c.id, c.requirement) for c in context.success_criteria] == [
         ("C1", "names the spenders"),
         ("C2", "ranks them"),
     ]
-    assert context.metric_mapping["correctness_completeness"].criteria == ["C2", "C1"]
+    assert context.metric_mapping["semantic_correctness"].criteria == ["C2", "C1"]
 
 
 async def test_generation_failure_is_recorded_not_fabricated(env: Env) -> None:
@@ -509,7 +519,7 @@ async def test_context_recall_checklist_generated_and_stored(env: Env) -> None:
         }
     }
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
-    result = await env.run(llm, count=1, metrics=("correctness_completeness", "context_recall"))
+    result = await env.run(llm, count=1, metrics=("semantic_correctness", "context_recall"))
     stored = result.questions[0].context.expectation("context_recall")
     assert stored is not None and stored.status == "generated"
     assert stored.value == {"required_information": ["card spend per employee", "the last quarter"]}
@@ -528,7 +538,7 @@ async def test_cannot_generate_is_recorded_and_question_kept(env: Env) -> None:
         }
     }
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
-    result = await env.run(llm, count=1, metrics=("correctness_completeness", "context_recall"))
+    result = await env.run(llm, count=1, metrics=("semantic_correctness", "context_recall"))
     assert len(result.questions) == 1 and not result.rejected
     stored = result.questions[0].context.expectation("context_recall")
     assert stored is not None
@@ -575,16 +585,18 @@ async def test_malformed_metric_expectations_rejected(
 ) -> None:
     bad = with_metric_expectations(q("Who spends most?"), entries)
     llm = FakeLLMClient([batch(bad)] * 3)
-    result = await env.run(llm, count=1, metrics=("correctness_completeness", "context_recall"))
+    result = await env.run(llm, count=1, metrics=("semantic_correctness", "context_recall"))
     assert not result.questions
     assert any(problem in reason for reason in result.rejected[0].reasons), result.rejected
 
 
 async def test_tool_expectation_cannot_generate_without_tool_definitions(env: Env) -> None:
     """No agent_context in the reference: code records cannot_generate, the LLM is not asked."""
-    question = with_metric_expectations(q("Who spends most?"), {"tool_correctness": None})
+    question = with_metric_expectations(
+        q("Who spends most?"), {"tool_correctness": None}, (), "answer"
+    )
     llm = FakeLLMClient([batch(question)])
-    result = await env.run(llm, count=1, metrics=("correctness_completeness", "tool_correctness"))
+    result = await env.run(llm, count=1, metrics=("correctness", "tool_correctness"))
     stored = result.questions[0].context.expectation("tool_correctness")
     assert stored is not None and stored.status == "cannot_generate"
     assert "no authoritative tool definitions" in (stored.reason or "")

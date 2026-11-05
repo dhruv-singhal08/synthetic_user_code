@@ -329,7 +329,7 @@ def test_legacy_agent_runs_report_original_metric_ids() -> None:
         now=NOW,
     )
     by = {m.metric: m for m in kpis.metrics}
-    assert set(by) == {"relevance", "completion"}  # never relabelled correctness_completeness
+    assert set(by) == {"relevance", "completion"}  # never relabelled correctness
     assert by["completion"].display_name == "Completion (legacy)"
     assert by["completion"].origin == "legacy"
 

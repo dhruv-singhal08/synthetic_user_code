@@ -19,7 +19,7 @@ from synthetic_user.models.product import ProductDescription
 
 CATALOG = {
     "relevance": "answer_quality",
-    "correctness_completeness": "answer_quality",
+    "correctness": "answer_quality",
     "context_precision": "retrieval_quality",
     "context_recall": "retrieval_quality",
     "mrr": "retrieval_quality",
@@ -100,9 +100,9 @@ def test_config_is_frozen_and_round_trips() -> None:
 @pytest.mark.parametrize(
     ("selected", "message"),
     [
-        (["completion"], "replaced by correctness_completeness"),
+        (["completion"], "replaced by correctness"),
         (["tool_selection"], "replaced by tool_correctness"),
-        (["answer_correctness"], "replaced by correctness_completeness"),
+        (["answer_correctness"], "replaced by correctness"),
         (["nope"], "unknown built-in metric 'nope'"),
     ],
 )

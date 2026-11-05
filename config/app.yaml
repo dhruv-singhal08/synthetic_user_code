@@ -40,7 +40,7 @@ reference:
 evaluation:
   # Built-in metric ids used when a run does not choose its own (CLI). The UI Evaluation tab
   # selects metrics (and custom metrics) per run; the choice is frozen in metric_config.json.
-  default_metrics: [relevance, correctness_completeness]
+  default_metrics: [relevance, correctness]
   sql_dialect: null          # explicit sqlglot dialect for the SQL parser (e.g. bigquery); never guessed
   # Qualified table names in generated SQL (ns.table): null = any qualifier is dropped before
   # the exact catalog lookup; a list (e.g. [my_schema]) = only these qualifiers are accepted.

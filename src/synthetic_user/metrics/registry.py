@@ -27,8 +27,10 @@ Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 
 # Metric ids of earlier versions: refused with the replacement, never silently relabelled.
 LEGACY_METRIC_IDS = {
-    "completion": "correctness_completeness (merged definition; old scores are not relabelled)",
-    "answer_correctness": "correctness_completeness",
+    "completion": "correctness (merged definition; old scores are not relabelled)",
+    "answer_correctness": "correctness",
+    # Renamed and widened (every criterion + the Reference Spec, D256); old runs not migrated.
+    "correctness_completeness": "correctness (all success criteria + the Reference Spec)",
     "tool_selection": "tool_correctness (expanded definition; old scores are not relabelled)",
 }
 

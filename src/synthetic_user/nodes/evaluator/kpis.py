@@ -208,7 +208,7 @@ _FALLBACK_TEXT = {
         "Use only the allowed table and column names.",
     ),
     "relevance": ("Answer does not address the request", "Respond directly to the user's request."),
-    "correctness_completeness": (
+    "correctness": (
         "Requested output is incomplete or incorrect",
         "Deliver every requested part, consistent with the trusted evidence.",
     ),

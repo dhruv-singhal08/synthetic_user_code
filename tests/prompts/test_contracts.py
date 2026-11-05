@@ -135,7 +135,7 @@ def test_general_judge_example_matches_the_model(classify: bool) -> None:
     assert sorted(example["metrics"]) == sorted(d.metric_id for d in GENERAL)
     for metric_id, score in example["metrics"].items():
         keys = set(JudgedScore.model_fields) - {"not_applicable_rules"}  # rule metrics only
-        if metric_id != "correctness_completeness":
+        if metric_id != "correctness":
             keys -= {"factual_verification"}
         assert set(score) == keys, metric_id
     with_rules = judge_example(GENERAL, needs_classification=classify, rule_metrics=["relevance"])

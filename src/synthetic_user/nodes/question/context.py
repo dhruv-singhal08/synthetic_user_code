@@ -121,7 +121,7 @@ def context_request(
     for definition in metrics:
         if not definition.available:
             continue
-        if definition.maps_criteria:
+        if definition.maps_criteria and not definition.all_success_criteria:
             request.criteria_metrics.append(definition)
         if not definition.needs_expectations:
             continue
@@ -303,11 +303,12 @@ def build_context(
     mapping: dict[str, MetricMapping] = {}
     for definition in request.selected:
         entry = draft.metric_mapping.get(definition.metric_id)
-        mapped_criteria = (
-            [renumber[c] for c in entry.criteria if c in renumber]
-            if entry is not None and definition.maps_criteria
-            else []
-        )
+        if definition.all_success_criteria:
+            mapped_criteria = [c.id for c in criteria]  # every criterion, by code (D256)
+        elif entry is not None and definition.maps_criteria:
+            mapped_criteria = [renumber[c] for c in entry.criteria if c in renumber]
+        else:
+            mapped_criteria = []
         mapping[definition.metric_id] = MetricMapping(
             criteria=list(dict.fromkeys(mapped_criteria)),
             reference_requirements=metric_reference_requirements(definition, pack),
@@ -326,7 +327,7 @@ def metric_reference_requirements(
     selected schema as one requirement. Rules are available, not mandatory (below)."""
     if pack is None:
         return []
-    if ReferenceAsset.CATALOG_SCHEMA in definition.required_reference_assets and pack.tables:
+    if ReferenceAsset.CATALOG_SCHEMA in definition.reference_assets and pack.tables:
         return [SCHEMA_REQUIREMENT]
     return []
 
@@ -335,7 +336,7 @@ def metric_available_rules(definition: MetricDefinition, pack: ReferencePack | N
     """Every table rule and selected catalog rule of the pack, for a metric that checks rules.
     A table rule travels with its table whatever it is about, so the judge decides which rules
     apply to the question and the response; only those become scoring checks."""
-    if pack is None or ReferenceAsset.CATALOG_RULES not in definition.required_reference_assets:
+    if pack is None or ReferenceAsset.CATALOG_RULES not in definition.reference_assets:
         return []
     return [item.id for item in reference_requirements(pack) if item.kind in RULE_KINDS]
 

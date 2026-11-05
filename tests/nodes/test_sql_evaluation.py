@@ -152,7 +152,7 @@ def judge(
             if value < 1:
                 checks.append(failed_check(metric_id, "SQL:1"))
             metrics[metric_id] = {"score": value, "rationale": "r", "checks": checks}
-            if metric_id == "correctness_completeness":
+            if metric_id == "correctness":
                 metrics[metric_id]["factual_verification"] = "unverified"
         reply: Reply = {
             "metrics": metrics,

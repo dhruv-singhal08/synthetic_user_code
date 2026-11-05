@@ -61,7 +61,7 @@ ANSWER: dict[str, Any] = {
 }
 SQL_METRICS = (
     "relevance",
-    "correctness_completeness",
+    "correctness",
     "semantic_correctness",
     "rules_adherence",
     "schema_faithfulness",
@@ -113,7 +113,7 @@ def all_pass(*metric_ids: str, classify: bool = True) -> dict[str, Any]:
     metrics = {}
     for metric_id in metric_ids:
         metrics[metric_id] = score(1)
-        if metric_id == "correctness_completeness":
+        if metric_id == "correctness":
             metrics[metric_id]["factual_verification"] = "unverified"
     extra = {"response_classification": "answered"} if classify else {}
     return general(metrics, **extra)
@@ -265,7 +265,7 @@ async def test_correct_sql_passes_all_selected_metrics_in_one_general_call(
     assert JOIN in prompt
     assert "Also classify the response kind" in prompt
     # factual correctness is never asserted without trusted evidence
-    details = result.metrics["correctness_completeness"].details
+    details = result.metrics["correctness"].details
     assert (
         details["factual_verification"] == "unverified"
         and "not (fully) verified" in details["limitation"]
@@ -296,7 +296,7 @@ async def test_answer_without_sql_scores_zero_with_deterministic_finding(
     sample_reference: Reference,
 ) -> None:
     text_only = {"outcome": "answered", "text": "Top spenders: Ann, Bob."}
-    reply = all_pass("relevance", "correctness_completeness")
+    reply = all_pass("relevance", "correctness")
     result, llm = await evaluate(
         app_config, sample_product, case, sample_reference, text_only, [reply]
     )
@@ -306,7 +306,7 @@ async def test_answer_without_sql_scores_zero_with_deterministic_finding(
     )
     assert statuses(result) == {
         "relevance": 1.0,
-        "correctness_completeness": 1.0,
+        "correctness": 1.0,
         "semantic_correctness": 0.0,
         "rules_adherence": "not_applicable",
         "schema_faithfulness": "not_applicable",
@@ -323,7 +323,7 @@ async def test_unable_to_answer_without_sql_is_not_a_sql_failure(
     sample_reference: Reference,
 ) -> None:
     decline = {"outcome": "answered", "text": "I cannot forecast spend."}
-    reply = all_pass("relevance", "correctness_completeness")
+    reply = all_pass("relevance", "correctness")
     reply["response_classification"] = "unable_to_answer"
     reply["goal_completion"] = JUSTIFIED
     result, _ = await evaluate(app_config, sample_product, case, sample_reference, decline, [reply])
@@ -359,7 +359,7 @@ async def test_substantive_denial_is_judged_on_answer_level_metrics_only(
     sample_reference: Reference,
 ) -> None:
     denial = {"outcome": "denied", "message": "Forecasting is not supported yet."}
-    reply = all_pass("relevance", "correctness_completeness", classify=False)
+    reply = all_pass("relevance", "correctness", classify=False)
     reply["goal_completion"] = JUSTIFIED
     result, llm = await evaluate(
         app_config, sample_product, case, sample_reference, denial, [reply]
@@ -372,7 +372,7 @@ async def test_substantive_denial_is_judged_on_answer_level_metrics_only(
     assert result.classification_source == "typed_outcome"
     assert statuses(result) == {
         "relevance": 1.0,
-        "correctness_completeness": 1.0,
+        "correctness": 1.0,
         "semantic_correctness": "not_applicable",
         "rules_adherence": "not_applicable",
         "schema_faithfulness": "not_applicable",
@@ -414,7 +414,7 @@ async def test_rules_and_schema_not_applicable_without_a_pack(
         update={"mode": "ungrounded", "reference_id": None, "reference_pack_id": None}
     )
     case = (scenario, _question(scenario, None), None)
-    reply = all_pass("relevance", "correctness_completeness", "semantic_correctness")
+    reply = all_pass("relevance", "correctness", "semantic_correctness")
     result, llm = await evaluate(app_config, sample_product, case, None, ANSWER, [reply])
     assert statuses(result)["rules_adherence"] == "not_applicable"
     assert statuses(result)["schema_faithfulness"] == "not_applicable"

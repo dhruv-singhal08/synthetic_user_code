@@ -154,7 +154,7 @@ class EvaluationSettings(_Section):
     # Built-in metric ids used when a run does not choose its own (CLI runs, UI default ticks).
     # The run's choice always wins; it is frozen in metric_config.json before scenarios.
     default_metrics: list[str] = Field(
-        default_factory=lambda: ["relevance", "correctness_completeness"], min_length=1
+        default_factory=lambda: ["relevance", "correctness"], min_length=1
     )
     # Explicit SQL dialect for the SQL parser (sqlglot name, e.g. "bigquery"); never guessed.
     sql_dialect: str | None = None

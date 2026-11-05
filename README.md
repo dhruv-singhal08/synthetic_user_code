@@ -28,12 +28,17 @@ by every later step. See [docs/DECISIONS.md](docs/DECISIONS.md) D211-D224.
 
 | Category | Metric id | Judge |
 |---|---|---|
-| Answer Quality / Task Fulfilment | `relevance`, `correctness_completeness` | general |
+| Answer Quality / Task Fulfilment | `relevance`, `correctness` | general |
 | Retrieval Quality | `context_precision`, `context_recall` (expectation-based checklist coverage), `mrr` (computed by code from chunk labels) | retrieval |
 | Grounding & Citations | `faithfulness`, `citation_correctness` | retrieval |
 | SQL Quality | `semantic_correctness`, `rules_adherence`, `schema_faithfulness` (with the SQL parser's output as evidence) | general |
 | Agent | `tool_correctness` | general |
 | Custom | compiled once per run (`custom_01`, ...); unavailable ones are reported with the reason | general / retrieval |
+
+`correctness` (D256) checks everything the question requires: code maps EVERY success criterion
+to it and, for grounded questions, the cheat sheet's schema (`reference_spec.schema`) and its
+applicable rules - so a defect can lower Correctness and the matching SQL metric. Other criteria
+metrics get only the criteria they can observe (`observed_in`), proposed by the generator.
 
 | Node | What it does | LLM? |
 |---|---|---|
@@ -167,7 +172,7 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `generation.scenario.diversity_preference` | `balanced` | Free-text hint to the scenario generator |
 | `generation.question.question_count` | `1` | Questions per scenario (the UI run selection wins) |
 | `generation.question.max_parallel_scenarios` | `5` | Internal: concurrent per-scenario question calls (not a UI control) |
-| `evaluation.default_metrics` | `[relevance, correctness_completeness]` | Built-in metrics when a run does not choose its own (CLI) |
+| `evaluation.default_metrics` | `[relevance, correctness]` | Built-in metrics when a run does not choose its own (CLI) |
 | `evaluation.sql_dialect` | `null` | Explicit SQL dialect for the parser (never guessed) |
 | `evaluation.catalog_namespaces` | `null` | Qualifiers accepted on table names in generated SQL (`ns.table`): `null` = any qualifier is dropped before the exact catalog lookup; a list = only these (D230) |
 | `evaluation.reference_lookup.enabled` | `true` | The General Judge may request ONE batch of exact catalog lookups (one extra call) on SQL + data-catalog runs; `false` = one call, deterministic reconciliation only (D231) |
@@ -210,7 +215,7 @@ Global options `--config PATH`, `--log-level LEVEL` (also accepted after the com
 | `export-fixture-template` | `--run-id` (required), `--out` (`runs/<run_id>/fixture_template.json`) | Template (question_id, utterance, outcome, text, artifacts[]) to paste real answers into, for any product |
 | `evaluate` | `--run-id`, **or** `--questions --executions --scenarios` (+ `--metric-config` (a run's `metric_config.json`; default: built-in `default_metrics`), `--out-dir`, default: executions file's folder) | Node 5 |
 | `run` | `--run-id` (new), `--reference`, `--from-step STEP`, `--force-step STEP` (repeatable), `--scenario-count`, `--question-count`, `--metrics`, `--custom-metrics-text`, `--custom-metrics-file` | Full pipeline with reuse (a changed metric selection regenerates from scenarios) |
-| `migrate-run` | `--run-id` (required), `--map-completion` | Legacy (profile-era) runs: reports their metric ids; with `--map-completion` explicitly relabels `completion` as `correctness_completeness` (marked; original kept as `evaluations.legacy.json`) |
+| `migrate-run` | `--run-id` (required), `--map-completion` | Legacy (profile-era) runs: reports their metric ids; with `--map-completion` explicitly relabels `completion` as `correctness` (marked; original kept as `evaluations.legacy.json`) |
 | `benchmark-evaluator` | `--cases`, `--scenarios` (from `inputs.benchmark_*`; products from `inputs.benchmark_product_paths`) | **Live only**: evaluator agreement with labeled cases, per mode/product and overall |
 | `serve` | `--host` (`127.0.0.1`), `--port` (`8000`) | Web UI + API (see [Web UI](#web-ui)) |
 

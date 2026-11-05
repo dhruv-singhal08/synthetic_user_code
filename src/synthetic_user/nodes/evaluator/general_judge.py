@@ -1,7 +1,7 @@
 """The General Judge: ONE LLM call per evaluable terminal response that has general metrics
 (at most TWO when it uses the one-batch evidence lookup, D231).
 
-Scores the run's applicable general metrics (relevance, correctness_completeness, the SQL
+Scores the run's applicable general metrics (relevance, correctness, the SQL
 metrics, tool_correctness and custom metrics routed to ``general``), rates each success
 criterion, and - only when the adapter exposes no typed response kind for an answered payload -
 returns the response classification within the same call (no extra classifier call).

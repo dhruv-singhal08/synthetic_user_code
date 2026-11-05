@@ -273,10 +273,10 @@ class Finding(StrictModel):
 
 
 # Category names written before the VoC -> Agent and metric renames (kept as written then).
+# "correctness" is no longer read as semantic_correctness: it is the Correctness metric (D256).
 _LEGACY_FINDING_CATEGORIES = {
     "relevancy": "semantic_correctness",
     "accuracy": "semantic_correctness",
-    "correctness": "semantic_correctness",
     "completeness": "semantic_correctness",
     "answer_relevance": "relevance",
     "answer_completeness": "completion",

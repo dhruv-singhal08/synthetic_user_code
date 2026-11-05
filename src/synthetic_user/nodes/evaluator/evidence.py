@@ -115,9 +115,18 @@ def build_registry(
     registry = EvidenceRegistry()
     registry.add(RESPONSE_ID, EvidenceProvenance.PRODUCT_RESPONSE, "final response")
     if isinstance(response, AnsweredResponse):
+        # Numbered exactly as the judge's response view numbers them (render_response): every
+        # SQL artifact is SQL:<k> whether or not an SQL metric parsed it.
         others = [a for a in response.artifacts if a.kind.casefold() != "sql"]
         for n, artifact in enumerate(others, start=1):
             registry.add(f"ARTIFACT:{n}", EvidenceProvenance.PRODUCT_RESPONSE, artifact.kind)
+        queries = [
+            a.content
+            for a in response.artifacts
+            if a.kind.casefold() == "sql" and isinstance(a.content, str)
+        ]
+        for k, query in enumerate(queries, start=1):
+            registry.add(f"SQL:{k}", EvidenceProvenance.PRODUCT_RESPONSE, query)
     for k, (structure, reconciliation) in enumerate(sql, start=1):
         registry.add(f"SQL:{k}", EvidenceProvenance.PRODUCT_RESPONSE, structure.raw_sql)
         for clause, attribute in SQL_CLAUSES:

@@ -4,7 +4,7 @@
 # grouping only; they never decide which judge runs or which product can be tested.
 # Every metric is scored 0 / 0.5 / 1 (higher is better) or reported with a non-scored status.
 
-catalog_version: "2026.11-5"
+catalog_version: "2026.11-6"
 
 category_labels:
   answer_quality: Answer Quality / Task Fulfilment
@@ -39,34 +39,45 @@ metrics:
     applicability_policy: Applies to every evaluable terminal response (answer or substantive denial).
     evidence_requirements: The final response text and artifacts.
 
-  correctness_completeness:
+  correctness:
     asks_factual_verification: true
-    display_name: Correctness and Completeness
+    display_name: Correctness
     category: answer_quality
     judge_group: general
-    comparison_basis: criteria_vs_response
-    verification_method: response_review
+    comparison_basis: criteria_and_reference_spec_vs_response
+    verification_method: response_review_with_reference_spec
+    # Every success criterion of the question, by code (no generator choice), and - when the
+    # scenario's cheat sheet has them - its schema and its applicable rules (D256). These
+    # checks may overlap with Schema Faithfulness / Rules Adherence by design (user decision).
     uses_success_criteria: true
+    all_success_criteria: true
+    checked_reference_assets: [catalog_schema, catalog_rules]
     description: >-
-      Are all requested parts delivered, and is the delivered content correct to the extent it
-      can be verified from trusted evidence?
+      Is the response correct and complete against everything the question requires: every
+      success criterion and, for grounded questions, the Reference Spec (valid schema and every
+      applicable rule), as far as trusted evidence can verify it?
     rubric: >-
-      Compare every success criterion mapped to this metric with the delivered response and
-      artifacts. Completeness: every requested part is delivered. Correctness: delivered content
-      is consistent with the product contract, the question's success criteria and any authoritative
-      evidence supplied (cheat sheet, tool results, retrieved context). Never assert factual
-      accuracy without trusted evidence: when the content cannot be verified, set
-      factual_verification to "unverified" and judge only what is observable. A justified
-      statement that the product cannot do something is correct when the success criteria say so.
+      Check every success criterion listed for this metric against the delivered response and
+      artifacts: every requested part is delivered and nothing delivered contradicts it. When the
+      contract lists reference_spec.schema, check that the tables, columns and joins the
+      response / SQL uses are valid against the catalog reconciliation and the cheat sheet; when
+      it lists available rules, decide which apply and check each applicable one (a violation
+      is a failed check). Delivered content must be consistent with the product contract and
+      any authoritative evidence supplied (cheat sheet, catalog lookups, tool results, retrieved
+      context). Never assert factual accuracy without trusted evidence: when the content cannot
+      be verified, set factual_verification to "unverified" and judge only what is observable.
+      A justified statement that the product cannot do something is correct when the success
+      criteria say so.
     score_anchors:
-      "1": every requested part is delivered and nothing observable contradicts the success criteria
-      "0.5": some requested parts are missing or some delivered content is wrong
-      "0": the central request is not delivered or the delivered content is wrong
+      "1": every criterion and every listed Reference Spec requirement is met
+      "0.5": some criteria or Reference Spec requirements are missed or violated
+      "0": the central request is not delivered, or the delivered content is wrong
     required_execution_evidence: [answer]
     applicability_policy: Applies to every evaluable terminal response (answer or substantive denial).
     evidence_requirements: >-
-      The final response and artifacts; factual correctness only against trusted evidence
-      (cheat sheet, tool results or retrieved context), otherwise recorded as unverified.
+      The final response and artifacts, every success criterion, and for grounded questions the
+      cheat sheet, the catalog reconciliation and lookups; factual correctness only against
+      trusted evidence, otherwise recorded as unverified.
 
   context_precision:
     when_evidence_missing: evidence_unavailable
@@ -280,7 +291,7 @@ metrics:
       record an unresolved finding quoting both. A documented relationship is not a mandatory
       join when a valid single-table solution exists. Do not use unknown identifiers
       (schema_faithfulness) or missing requested behaviour (semantic_correctness /
-      correctness_completeness) here.
+      correctness) here.
     score_anchors:
       "1": all applicable rules and documented joins are followed
       "0.5": a mix of compliance and supported conflicts

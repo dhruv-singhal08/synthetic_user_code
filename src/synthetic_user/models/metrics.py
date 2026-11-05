@@ -164,6 +164,12 @@ class MetricDefinition(StrictModel):
     comparison_basis: NonEmptyStr | None = None
     verification_method: NonEmptyStr | None = None
     uses_success_criteria: bool | None = None
+    # Code maps EVERY success criterion to the metric (no generator choice, D256).
+    all_success_criteria: bool = False
+    # Reference Spec assets the metric also checks when the scenario's pack has them (its
+    # schema / applicable rules become checks); unlike required_reference_assets a missing one
+    # never makes the metric not applicable (D256).
+    checked_reference_assets: list[ReferenceAsset] = Field(default_factory=list)
     availability: MetricAvailability = MetricAvailability.AVAILABLE
     unavailable_reason: NonEmptyStr | None = None
     # Custom metrics: the user's exact words and where they came from (text / workbook row).
@@ -203,6 +209,13 @@ class MetricDefinition(StrictModel):
     @property
     def needs_expectations(self) -> bool:
         return bool(self.question_expectation_schema)
+
+    @property
+    def reference_assets(self) -> list[ReferenceAsset]:
+        """Every Reference Spec asset the metric checks: required + checked when present."""
+        return list(
+            dict.fromkeys([*self.required_reference_assets, *self.checked_reference_assets])
+        )
 
     @property
     def evaluation_target(self) -> EvaluationTarget:

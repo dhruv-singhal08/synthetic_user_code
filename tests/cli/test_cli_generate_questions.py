@@ -21,7 +21,7 @@ from synthetic_user.storage.runs import run_artifact, save_run_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
-TEST_METRICS = ("relevance", "correctness_completeness", "semantic_correctness")
+TEST_METRICS = ("relevance", "correctness", "semantic_correctness")
 
 
 @pytest.fixture
@@ -96,8 +96,8 @@ def _q(utterance: str) -> dict[str, Any]:
         "question_characteristics": {"style": "precise", "ambiguity_level": "low"},
         "evaluation_context": {
             "success_criteria": [{"id": "C1", "requirement": "answers", "observed_in": "sql"}],
-            # every selected criteria metric gets a mapping (code maps the others)
-            "metric_mapping": {m: {"criteria": ["C1"]} for m in TEST_METRICS if m != "relevance"},
+            # correctness and relevance are mapped by code (every criterion / none)
+            "metric_mapping": {"semantic_correctness": {"criteria": ["C1"]}},
         },
     }
 

@@ -184,6 +184,7 @@ async def test_full_run_files_types_refs_and_outcomes(
     assert [f.category for e in failed for f in e.findings] == [
         "rules_adherence",
         "schema_faithfulness",
+        "correctness",  # correctness checks the Reference Spec too (D256)
     ]
     recorded = [e.product_outcome for e in evaluations if e.verdict is None]
     assert recorded == ["clarification"]
@@ -194,7 +195,7 @@ async def test_full_run_files_types_refs_and_outcomes(
     assert (denial.verdict, denial.response_classification) == ("pass", "unable_to_answer")
     assert {m: r.status.value for m, r in denial.metrics.items()} == {
         "relevance": "scored",
-        "correctness_completeness": "scored",
+        "correctness": "scored",
         "semantic_correctness": "not_applicable",
         "rules_adherence": "not_applicable",
         "schema_faithfulness": "not_applicable",
@@ -214,7 +215,7 @@ async def test_full_run_files_types_refs_and_outcomes(
     means = {m.metric: m.mean for m in kpis.metrics}
     assert means == {
         "relevance": 1.0,
-        "correctness_completeness": 1.0,
+        "correctness": 0.75,  # 0.5 on the planted join (it checks the spec), 1 on the denial
         "semantic_correctness": 1.0,
         "rules_adherence": 0.0,
         "schema_faithfulness": 0.0,  # the planted unlisted join (D238)
@@ -229,9 +230,7 @@ async def test_full_run_files_types_refs_and_outcomes(
     kpi_csv = (run_dir / "kpis.csv").read_text(encoding="utf-8")
     assert "Rules Adherence (mean),0,1" in kpi_csv and "Accuracy,0.5,2" in kpi_csv
     judged = by_outcome["answered"]
-    assert judged.metrics["correctness_completeness"].details["factual_verification"] == (
-        "unverified"
-    )
+    assert judged.metrics["correctness"].details["factual_verification"] == ("unverified")
     # every score is explained: basis, assigned requirements, checks with evidence, coverage
     semantic = judged.metrics["semantic_correctness"]
     assert semantic.comparison_basis == "criteria_vs_sql"
@@ -262,6 +261,7 @@ async def test_full_run_files_types_refs_and_outcomes(
     ]
     assert "RECON:1" in schema.observed_evidence_ids
     assert judged.failed_requirements == [
+        "correctness: reference_spec.schema",
         "rules_adherence: JOIN-01",
         "schema_faithfulness: reference_spec.schema",
     ]

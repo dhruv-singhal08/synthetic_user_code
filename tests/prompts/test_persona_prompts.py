@@ -272,7 +272,7 @@ def test_product_fields_reach_the_prompts(sample_persona: Persona) -> None:
         }
     )
     # Every product is judged by the same General Judge with the full product contract.
-    config = builtin_metric_config(["relevance", "correctness_completeness"])
+    config = builtin_metric_config(["relevance", "correctness"])
     _system, judge = build_general_prompt(
         GeneralJudgeInput(
             product=voc,

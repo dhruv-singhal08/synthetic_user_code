@@ -25,7 +25,7 @@ from tests_support import evaluation_context, pack_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
-TEST_METRICS = ("relevance", "correctness_completeness", "semantic_correctness")
+TEST_METRICS = ("relevance", "correctness", "semantic_correctness")
 
 
 @pytest.fixture

@@ -250,6 +250,9 @@ class QuestionGenerationSettings(_Section):
     max_sources: int = Field(default=1, ge=0, le=2)
     max_success_criteria: int = Field(default=6, ge=1, le=MAX_SUCCESS_CRITERIA)
     max_words: int = Field(default=40, ge=5, le=200)
+    # Cheat-sheet columns in the question prompt: a longer list of allowed / example values is
+    # shown as its count and the first values (the evaluation still sees the full pack).
+    max_listed_values: int = Field(default=8, ge=0, le=200)
     allowed_complexities: list[QuestionComplexity] = Field(
         default_factory=lambda: [QuestionComplexity.SIMPLE, QuestionComplexity.MEDIUM],
         min_length=1,

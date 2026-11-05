@@ -803,6 +803,7 @@ async def test_document_and_ungrounded_runs_have_no_catalog_step(
     data["evaluation_context"]["reference_spec"] = None
     for mapping in data["evaluation_context"]["metric_mapping"].values():
         mapping["reference_requirements"] = []
+        mapping["available_rules"] = []
     question = QuestionCase.model_validate(
         {**data, "mode": "ungrounded", "reference_pack_id": None}
     )

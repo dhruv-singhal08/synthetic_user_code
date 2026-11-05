@@ -3,8 +3,12 @@
 Runs BEFORE the judge, from the parser output only (never a regex, never execution):
 
 - every base table / column -> ``valid_in_pack`` (catalog + cheat sheet), ``valid_extra``
-  (catalog only: NOT a schema error by itself), ``invalid`` (exact lookup proves it is absent)
-  or ``unresolved`` (ambiguous unqualified column, unknown table, namespace not permitted);
+  (catalog only: NOT a schema error by itself), ``invalid`` (exact lookup proves it is absent
+  from the catalog) or ``unresolved`` (ambiguous unqualified column, unknown table, namespace
+  not permitted), each invalid / unresolved one with a diagnosis (D253): ``catalog_mismatch``
+  (a table the catalog does not list - database existence not verified - with the cheat-sheet
+  tables the SQL does not read as the expected catalog tables), ``unresolved_identifier`` or
+  ``confirmed_invalid_identifier`` (a column absent from a catalogued table's column list);
 - cheat-sheet tables / columns the SQL does not use (listed; never a failure by itself);
 - equality join keys -> documented (verified / not verified), undocumented or unresolved;
 - rule ids the judge may need that the cheat sheet did not carry (rules of extra tables and
@@ -22,6 +26,7 @@ from itertools import combinations
 from synthetic_user.models.lookup import (
     ArtifactReconciliation,
     IdentifierCheck,
+    IdentifierDiagnosis,
     IdentifierStatus,
     JoinCheck,
     JoinStatus,
@@ -31,6 +36,13 @@ from synthetic_user.models.lookup import (
 from synthetic_user.models.reference import CatalogTable, ReferenceKind, ReferencePack
 from synthetic_user.references.catalog_index import CatalogIndex
 from synthetic_user.sql.parser import SqlColumnRef, SqlStructure
+
+# Appended to the reason of a table the catalog does not list (D253): the catalog is the only
+# schema evidence, so the table is a catalog mismatch, never proven absent from the database.
+CATALOG_MISMATCH_NOTE = (
+    "(catalog mismatch: database existence was not verified; a similarly named catalog table is "
+    "not assumed to be the same table)"
+)
 
 
 def reconcile(
@@ -59,7 +71,10 @@ def reconcile(
                     identifier=name,
                     kind="table",
                     status=IdentifierStatus.UNRESOLVED if namespace else IdentifierStatus.INVALID,
-                    reason=reason,
+                    reason=reason if namespace else f"{reason} {CATALOG_MISMATCH_NOTE}",
+                    diagnosis=IdentifierDiagnosis.UNRESOLVED_IDENTIFIER
+                    if namespace
+                    else IdentifierDiagnosis.CATALOG_MISMATCH,
                 )
             )
             continue
@@ -87,6 +102,13 @@ def reconcile(
         f"{table}.{column}"
         for (table_key, column_key), (table, column) in pack_columns.items()
         if (table_key, column_key) not in used_columns
+    ]
+    expected = [name for key, name in pack_tables.items() if key not in sql_tables]
+    checks = [
+        c.model_copy(update={"expected_catalog_tables": expected})
+        if c.diagnosis is IdentifierDiagnosis.CATALOG_MISMATCH
+        else c
+        for c in checks
     ]
     extra_tables = [t.name for key, t in sql_tables.items() if key not in pack_tables]
     pack_rule_ids = {r.id.casefold() for r in pack.rules} if pack is not None else set()
@@ -197,6 +219,7 @@ def _column_check(
                 kind="column",
                 status=IdentifierStatus.UNRESOLVED,
                 reason=f"its table cannot be checked: {reason}",
+                diagnosis=IdentifierDiagnosis.UNRESOLVED_IDENTIFIER,
             )
         candidates = [table]
     else:
@@ -208,6 +231,7 @@ def _column_check(
                 status=IdentifierStatus.UNRESOLVED,
                 reason="unqualified and present in several tables the SQL reads: "
                 + ", ".join(t.name for t in candidates),
+                diagnosis=IdentifierDiagnosis.UNRESOLVED_IDENTIFIER,
             )
         if not candidates:
             return IdentifierCheck(
@@ -216,6 +240,9 @@ def _column_check(
                 status=IdentifierStatus.UNRESOLVED if unresolved else IdentifierStatus.INVALID,
                 reason="not in any catalog table the SQL reads"
                 + (" (some of its tables could not be resolved)" if unresolved else ""),
+                diagnosis=IdentifierDiagnosis.UNRESOLVED_IDENTIFIER
+                if unresolved
+                else IdentifierDiagnosis.CONFIRMED_INVALID_IDENTIFIER,
             )
     table = candidates[0]
     column = index.column(table, ref.column)
@@ -226,6 +253,7 @@ def _column_check(
             status=IdentifierStatus.INVALID,
             canonical=None,
             reason=f"column {ref.column!r} is not in catalog table {table.name}",
+            diagnosis=IdentifierDiagnosis.CONFIRMED_INVALID_IDENTIFIER,
         )
     canonical = f"{table.name}.{column.name}"
     in_pack = (table.name.casefold(), column.name.casefold()) in pack_columns

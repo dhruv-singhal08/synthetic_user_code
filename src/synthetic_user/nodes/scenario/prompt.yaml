@@ -56,6 +56,11 @@ core: |
     top-N cutoff, currency conversion, filter, dimension or format that the business_goal does not
     require. Express a reference-dependent safeguard as an explicit "If ..." condition when its
     triggering data state is not guaranteed.
+  - Time windows: name the exact period definition and keep it identical in business_goal,
+    success_criteria and question_intent. Year-to-date versus the same period of the prior year
+    (YTD YoY) and the last 12 months versus the 12 months before (rolling-12-month YoY) are
+    DIFFERENT comparisons, as are calendar and relative periods. A reference date rule applies
+    only under its stated condition; it never replaces a period the goal explicitly names.
   - question_intent: WHAT the user will ask for, in one plain sentence. Never suggest wording,
     tone or phrasing: the question is written later, in the persona's own voice.
   ${constraints}

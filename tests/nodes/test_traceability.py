@@ -120,13 +120,15 @@ async def test_every_score_is_explained_by_its_checks(
     assert len(llm.calls) == 1  # no extra LLM call for traceability
     prompt = llm.calls[0].user
     # the judge sees the evaluation contract, the criteria ids and the evidence ids
-    assert '"reference_requirements": [' in prompt and '"id": "RULE-R1"' in prompt
+    assert '"available_rules": [\n      "TABLE-RULE-01.01",\n      "RULE-R1"' in prompt
     assert '"id": "C1"' in prompt and '"evidence_id": "SQL:1"' in prompt
     assert '"evidence_id": "RECON:1"' in prompt and "POLICY:UNRESOLVED" in prompt
     rules = result.metrics["rules_adherence"]
     assert rules.comparison_basis == "rules_vs_sql"
     assert rules.verification_method == "static_sql_analysis_with_catalog_lookups"
-    assert rules.assigned_reference_requirements == ["TABLE-RULE-01.01", "RULE-R1"]
+    assert rules.assigned_reference_requirements == []  # rules are available, not mandatory
+    assert rules.available_rules == ["TABLE-RULE-01.01", "RULE-R1"]
+    assert rules.not_applicable_rules == []
     assert [c.check_id for m in result.metrics.values() for c in m.checks] == [
         f"CHECK:{n:03d}" for n in range(1, 6)
     ]
@@ -151,7 +153,14 @@ async def test_every_score_is_explained_by_its_checks(
         "not_applicable": 0,
         "unresolved": 0,
         "derived": 0,
+        "derived_failed": 0,
+        "available_rules": 2,
+        "applicable_rules": 2,
     }
+    assert rules.score_explanation == (
+        "2/2 mapped requirements passed; 2 of 2 available rules applied (0 not applicable); "
+        "Rules Adherence scored 1."
+    )
     assert rules.observed_evidence_ids == ["SQL:1"]
     [rubric] = rules.guidance_applied
     assert rubric.guidance_id == "METRIC:rules_adherence"
@@ -321,7 +330,8 @@ async def test_metrics_decided_by_code_still_decide_every_mapped_requirement(
     sample_packs: list[ReferencePack],
 ) -> None:
     """A typed denial: the SQL metrics are not applicable, and their mapped requirements are
-    recorded as not_applicable checks with the reason (never silently omitted)."""
+    recorded as not_applicable checks with the reason, their available rules as not
+    applicable rules (never silently omitted)."""
     scenario, pack = sample_scenarios[0], sample_packs[0]
     denial = {"outcome": "denied", "message": "I cannot do that."}
     question = _mapped_question(scenario, pack)
@@ -341,11 +351,13 @@ async def test_metrics_decided_by_code_still_decide_every_mapped_requirement(
     )
     rules = result.metrics["rules_adherence"]
     assert rules.status is MetricStatus.NOT_APPLICABLE
-    assert [(c.requirement_id, c.status) for c in rules.checks] == [
-        ("TABLE-RULE-01.01", "not_applicable"),
-        ("RULE-R1", "not_applicable"),
+    assert rules.checks == []  # no mandatory requirement; its rules are recorded below
+    assert rules.not_applicable_rules == ["TABLE-RULE-01.01", "RULE-R1"]
+    schema = result.metrics["schema_faithfulness"]
+    assert [(c.requirement_id, c.status) for c in schema.checks] == [
+        ("reference_spec.schema", "not_applicable")
     ]
-    assert rules.checks[0].reason.startswith("decided by code (not_applicable)")
+    assert schema.checks[0].reason.startswith("decided by code (not_applicable)")
     assert rules.guidance_applied == []  # no judge decided it
     assert result.limitations == []  # nothing static about SQL was judged
 

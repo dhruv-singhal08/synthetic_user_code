@@ -86,8 +86,12 @@ GENERAL = [d for d in builtin_definitions() if d.judge_group == "general"]
 
 
 def test_question_example_matches_the_model() -> None:
-    _assert_matches(QUESTION_EXAMPLE, QuestionBatchDraft, "questions")
+    # observed_in is asked for only when criteria are mapped to metrics (below)
     context = QUESTION_EXAMPLE["questions"][0]["evaluation_context"]
+    assert "observed_in" not in context["success_criteria"][0]
+    example = json.loads(json.dumps(QUESTION_EXAMPLE))
+    example["questions"][0]["evaluation_context"]["success_criteria"][0]["observed_in"] = "answer"
+    _assert_matches(example, QuestionBatchDraft, "questions")
     assert context["metric_mapping"] == {}
     assert context["success_criteria"][0]["id"] == "C1"
 
@@ -103,6 +107,9 @@ def test_question_example_maps_criteria_metrics_and_expectation_metrics() -> Non
         requested=[by_id["context_recall"], by_id["tool_correctness"]],
     )
     example = question_example(request)
+    _assert_matches(example, QuestionBatchDraft, "questions")
+    criterion = example["questions"][0]["evaluation_context"]["success_criteria"][0]
+    assert criterion["observed_in"] == "<answer | tool_trace>"
     entries = example["questions"][0]["evaluation_context"]["metric_mapping"]
     # schema_faithfulness takes no criteria and no expectation: code maps it
     assert list(entries) == ["relevance", "context_recall", "tool_correctness"]
@@ -127,10 +134,12 @@ def test_general_judge_example_matches_the_model(classify: bool) -> None:
     assert set(example) == expected
     assert sorted(example["metrics"]) == sorted(d.metric_id for d in GENERAL)
     for metric_id, score in example["metrics"].items():
-        keys = set(JudgedScore.model_fields)
+        keys = set(JudgedScore.model_fields) - {"not_applicable_rules"}  # rule metrics only
         if metric_id != "correctness_completeness":
             keys -= {"factual_verification"}
         assert set(score) == keys, metric_id
+    with_rules = judge_example(GENERAL, needs_classification=classify, rule_metrics=["relevance"])
+    assert "not_applicable_rules" in with_rules["metrics"]["relevance"]
     # "unresolved" and "evidence_requests" are offered only with a catalog reconciliation;
     # "exempted_by" only with evaluation guidance (D243)
     assert set(example["findings"][0]) == set(FindingDraft.model_fields) - {

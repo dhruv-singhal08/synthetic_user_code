@@ -376,12 +376,17 @@ def _head(kind: str, name: str, description: str | None) -> str:
     return f"{kind}: {name}" + (f" - {description}" if description else "")
 
 
-def render_column(column: CatalogColumn) -> str:
+def render_column(column: CatalogColumn, max_values: int | None = None) -> str:
+    """``max_values``: a longer value list is shown as its count and the first values."""
     text = f"{column.name}" + (f" ({column.type})" if column.type else "")
     if column.description:
         text += f": {column.description}"
-    if column.values:
-        text += f" [values: {', '.join(column.values)}]"
+    values = column.values
+    if values and max_values is not None and len(values) > max_values:
+        shown = f": {', '.join(values[:max_values])}, ..." if max_values else ""
+        text += f" [{len(values)} values{shown}]"
+    elif values:
+        text += f" [values: {', '.join(values)}]"
     return text
 
 
@@ -518,8 +523,9 @@ class ReferencePack(StrictModel):
             names.extend(f"{table.name}.{c.name}" for c in table.columns)
         return names
 
-    def render(self) -> str:
-        """The cheat sheet as text for the question and evaluation prompts."""
+    def render(self, max_values: int | None = None) -> str:
+        """The cheat sheet as text for the question and evaluation prompts. ``max_values``
+        shortens long column value lists (question prompt); None shows every value."""
         if self.kind is ReferenceKind.DOCUMENT_COLLECTION:
             lines = ["Documents the answer should draw on:"]
             for doc in self.documents:
@@ -530,7 +536,7 @@ class ReferencePack(StrictModel):
             lines.append(f"- {table.name}: {table.description or '(no description)'}")
             lines.append(f"    why: {table.why}")
             lines.extend(f"    rule: {rule}" for rule in table.rules)
-            lines.extend(f"    - {render_column(c)}" for c in table.columns)
+            lines.extend(f"    - {render_column(c, max_values)}" for c in table.columns)
         if self.joins:
             lines += ["", "Joins needed (listed relationships):"]
             lines += [f"- {render_join(j, j.verified)}" for j in self.joins]

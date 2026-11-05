@@ -678,3 +678,25 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
 - Verified: UI drawer rendered in headless Brave (CDP) for an offline run: answered SQL with
   failures, a justified decline, a clarification; section order and content checked.
 - NOT verified: a new live Gemini / SafeChain run with the 22-rule pack that failed.
+
+## Targeted fixes to the evaluation agent (2026-11-05) - user list of 8 fixes (D251-D254)
+
+- Files: models/{question.py (available_rules, observed_in, unmapped_criteria), evaluation.py
+  (not_applicable_rules, score_impact, score_explanation, coverage counts), lookup.py
+  (IdentifierDiagnosis)}, nodes/question/{context.py, prompt.py/.yaml, generator.py},
+  nodes/scenario/prompt.yaml, nodes/evaluator/{general_judge.py (per-metric salvage, rule
+  accounting), general_prompt.py/.yaml, judge_common.py, traceability.py, evaluator.py},
+  sql/reconcile.py, models/reference.py (render max_values), core/config.py + config/app*.yaml
+  (max_listed_values), web/{results_csv.py, static/app.js}; tests (+ tests/nodes/
+  test_targeted_fixes.py, 14 tests) and tests/fixtures/fake_llm_script.json (observed_in).
+- Commands: ruff check / ruff format --check / mypy src / pytest -q: all pass, 846 passed
+  (baseline 832).
+- Verified (offline): unrelated rules need no check, every available rule decided or retried;
+  response-level criteria stay unmapped (coverage gap) instead of failing the question; one
+  invalid metric keeps the others; one shared, deduplicated error otherwise; catalog-mismatch
+  diagnosis; derived-defect explanation; enum / style problems fed back before acceptance;
+  prompt time-window rules; run.log, stored evaluation and CSV agree.
+- NOT verified: live Gemini / SafeChain runs (rule applicability decisions by a real judge,
+  observed_in quality, the 24-rule lodging case); the drawer changes in a browser (JS
+  syntax-checked with JavaScriptCore).
+- Next: re-run questions + evaluate on the failing lodging-spend scenario.

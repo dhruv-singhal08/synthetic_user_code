@@ -22,7 +22,8 @@ Persona + Product [+ Reference (data_catalog | document_collection) + optional i
   -> [4] Evaluator (deterministic applicability; SQL: parse + catalog reconciliation + exact
      lookups; General Judge + Retrieval/Grounding Judge, at most one call each - the General
      Judge at most two when it requests one batch of lookups, D231; check-level decisions with
-     evidence / guidance ids, coverage and limitations, D246-D249; severity verdict policy)
+     evidence / guidance ids, coverage and limitations, D246-D249; applicable rules only and
+     per-metric validation, D251; severity verdict policy)
      -> Bug Candidates
 ```
 

@@ -79,7 +79,8 @@ const mappingLines = (row) => Object.entries(jsonCell(row.metric_mapping)).map((
   const parts = [...(m.criteria || []), ...(m.reference_requirements || [])];
   const x = m.expectation;
   const expectation = x == null ? "" : ` · expectation ${x.status ? `${human(x.status)}${x.reason ? ` (${x.reason})` : ""}` : JSON.stringify(x)}`;
-  return `${metricLabel(id)} (${human(m.comparison_basis || "")}): ${parts.length ? parts.join(", ") : "no mapped requirement"}${expectation}`;
+  const rules = (m.available_rules || []).length ? ` · ${m.available_rules.length} available rule(s), applied only where they concern the question` : "";
+  return `${metricLabel(id)} (${human(m.comparison_basis || "")}): ${parts.length ? parts.join(", ") : "no mapped requirement"}${rules}${expectation}`;
 });
 const specItems = (row) => {
   const spec = jsonCell(row.reference_spec);
@@ -1173,7 +1174,12 @@ function openDrawer(row) {
       el("pre", { text: JSON.stringify(question.legacy_expectations, null, 1) })));
   } else if (row.question_id) {
     const context = question ? question.evaluation_context : null;
-    const criteria = context ? context.success_criteria.map((c) => el("span", {}, el("code", { class: "tag", text: c.id }), " ", c.requirement)) : split(row.success_criteria);
+    // A criterion no selected metric evaluates is a coverage gap (kept, never forced into a metric).
+    const mapped = new Set(Object.values((context && context.metric_mapping) || {}).flatMap((m) => m.criteria || []));
+    const hasMapping = context && Object.keys(context.metric_mapping || {}).length > 0;
+    const criteria = context ? context.success_criteria.map((c) => el("span", {}, el("code", { class: "tag", text: c.id }), " ", c.requirement,
+      c.observed_in ? el("small", { class: "muted", text: ` · observed in ${human(c.observed_in)}` }) : null,
+      hasMapping && !mapped.has(c.id) ? pill("coverage gap", "warn") : null)) : split(row.success_criteria);
     parts.push(section("Question and evaluation context", kvList([
       ["Asked", row.question], ["Success criteria", criteria],
       ["Reference Spec", spec ? `${spec.pack_id} · ${spec.reference_id}` : "none (ungrounded)"],
@@ -1249,7 +1255,8 @@ function evaluationSections(ev) {
     why.append(el("div", { class: "why-row" },
       el("div", { class: "why-head" }, el("b", { text: metricLabel(name) }),
         m.status === "scored" ? scoreChip(String(m.score), true) : pill(m.status, "neutral"), m.judge_group ? el("small", { class: "muted", text: ` ${human(m.judge_group)} judge` }) : null),
-      el("div", { text: m.rationale }), m.evidence ? el("span", { class: "quote", text: m.evidence }) : null,
+      el("div", { text: m.rationale }), m.score_explanation ? el("div", { class: "muted", text: m.score_explanation }) : null,
+      m.evidence ? el("span", { class: "quote", text: m.evidence }) : null,
       (m.what_worked || []).length ? el("ul", { class: "worked" }, m.what_worked.map((x) => el("li", { text: x }))) : null,
       (m.what_didnt || []).length ? el("ul", { class: "didnt" }, m.what_didnt.map((x) => el("li", { text: x }))) : null,
       details.length ? list(details) : null,
@@ -1274,21 +1281,34 @@ function traceTable(m) {
   const head = [
     m.comparison_basis ? `Compared: ${human(m.comparison_basis)}` : "",
     m.verification_method ? `Method: ${human(m.verification_method)}` : "",
-    c ? `Coverage: ${c.evaluated}/${c.assigned} evaluated · ${c.passed} passed · ${c.failed} failed · ${c.not_applicable} n/a · ${c.unresolved} unresolved${c.derived ? ` · ${c.derived} derived` : ""}` : "",
+    // Mapped coverage and additional (derived) defects are reported separately.
+    c ? `Mapped requirements: ${c.evaluated}/${c.assigned} evaluated · ${c.passed} passed · ${c.failed} failed · ${c.not_applicable} n/a · ${c.unresolved} unresolved` : "",
+    c && c.available_rules ? `Rules: ${c.applicable_rules} of ${c.available_rules} available applied` : "",
+    c && c.derived ? `Additional checks outside the mapping: ${c.derived} (${c.derived_failed || 0} failed)` : "",
   ].filter(Boolean);
-  const table = el("table", { class: "dtable" });
-  for (const ch of m.checks || []) {
-    table.append(el("tr", {}, el("td", { class: "fit" }, el("code", { class: "tag", text: ch.requirement_id }), " ", pill(ch.status, { passed: "pass", failed: "fail", unresolved: "warn" }[ch.status] || "neutral")),
-      el("td", {}, ch.requirement ? el("div", { text: ch.requirement }) : null, el("div", { class: "muted", text: ch.reason }),
-        tagChips([...(ch.observed_evidence_ids || []), ...(ch.guidance_ids || [])]))));
-  }
+  const rows = (checks) => {
+    const table = el("table", { class: "dtable" });
+    for (const ch of checks) {
+      table.append(el("tr", {}, el("td", { class: "fit" }, el("code", { class: "tag", text: ch.requirement_id }), " ", pill(ch.status, { passed: "pass", failed: "fail", unresolved: "warn" }[ch.status] || "neutral")),
+        el("td", {}, ch.requirement ? el("div", { text: ch.requirement }) : null, el("div", { class: "muted", text: ch.reason }),
+          ch.score_impact ? el("div", { class: "muted", text: `Score impact: ${ch.score_impact}` }) : null,
+          tagChips([...(ch.observed_evidence_ids || []), ...(ch.guidance_ids || [])]))));
+    }
+    return table;
+  };
+  const mappedChecks = (m.checks || []).filter((ch) => ch.requirement_source !== "derived");
+  const derivedChecks = (m.checks || []).filter((ch) => ch.requirement_source === "derived");
   const guidance = (m.guidance_applied || []).map((g) => `${g.guidance_id} (${human(g.guidance_type)}, ${g.source}): ${g.influence}`);
+  const notApplicable = (m.not_applicable_rules || []).length ? kvList([["Rules not applicable", m.not_applicable_rules.join(", ")]]) : null;
   if (!(m.checks || []).length) {
     // No mapped requirement (e.g. Relevance: question vs response only): say so, no empty table.
     const basis = [m.comparison_basis ? `Compared: ${human(m.comparison_basis)}` : "", m.verification_method ? `Method: ${human(m.verification_method)}` : ""].filter(Boolean).join(" · ");
-    return el("div", { class: "muted", text: `${basis}${basis ? " · " : ""}no mapped requirement` });
+    return el("div", { class: "muted" }, `${basis}${basis ? " · " : ""}no mapped requirement`, notApplicable);
   }
-  return el("details", { class: "raw" }, el("summary", { text: `Checks (${m.checks.length})` }), list(head), table, guidance.length ? kvList([["Guidance applied", guidance]]) : null);
+  return el("details", { class: "raw" }, el("summary", { text: `Checks (${m.checks.length})` }), list(head),
+    mappedChecks.length ? el("div", {}, el("b", { text: "Mapped requirements" }), rows(mappedChecks)) : null,
+    derivedChecks.length ? el("div", {}, el("b", { text: "Additional checks (outside the mapping)" }), rows(derivedChecks)) : null,
+    notApplicable, guidance.length ? kvList([["Guidance applied", guidance]]) : null);
 }
 
 function lookupLines(ev) {

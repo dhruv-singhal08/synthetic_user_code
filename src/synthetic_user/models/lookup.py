@@ -192,12 +192,31 @@ class IdentifierStatus(StrEnum):
     UNRESOLVED = "unresolved"  # cannot be established (ambiguous scope, unknown qualifier)
 
 
+class IdentifierDiagnosis(StrEnum):
+    """Why an identifier is not valid, as far as the evidence goes (D253). The tool never
+    queries a database: no diagnosis claims a database object exists or does not exist."""
+
+    # A table the catalog does not list (it may still exist in the database, e.g. a physical
+    # table behind a catalogued view): a mismatch with the catalog, not proven nonexistent.
+    CATALOG_MISMATCH = "catalog_mismatch"
+    # Cannot be checked: its table is not in the catalog, it is ambiguous, or its namespace is
+    # not permitted.
+    UNRESOLVED_IDENTIFIER = "unresolved_identifier"
+    # A column absent from the column list of a catalogued table it is read from.
+    CONFIRMED_INVALID_IDENTIFIER = "confirmed_invalid_identifier"
+
+
 class IdentifierCheck(StrictModel):
     identifier: NonEmptyStr  # as written in the artifact (base table / table.column)
     kind: Literal["table", "column"]
     status: IdentifierStatus
     canonical: NonEmptyStr | None = None  # canonical catalog name when valid
     reason: NonEmptyStr
+    # Invalid / unresolved identifiers only (None in older artifacts and for valid ones).
+    diagnosis: IdentifierDiagnosis | None = None
+    # A catalog-mismatch table: the cheat-sheet tables the SQL does not read (the expected
+    # catalog tables). Listed, never assumed equivalent to the observed table.
+    expected_catalog_tables: list[NonEmptyStr] = Field(default_factory=list)
 
 
 class JoinStatus(StrEnum):

@@ -81,6 +81,26 @@ def render_response(
     return json.dumps(body, indent=2)
 
 
+def evidence_texts(response: EvaluableResponse) -> dict[str, str]:
+    """Evidence id -> text for the response parts, numbered as ``render_response`` numbers
+    them (RESPONSE = everything quotable, SQL:<k>, ARTIFACT:<n>)."""
+    texts = {"RESPONSE": response_text(response)}
+    if isinstance(response, DeniedResponse):
+        return texts
+    sql = other = 0
+    for artifact in response.artifacts:
+        content = artifact.content
+        if artifact.kind.casefold() == "sql" and isinstance(content, str):
+            sql += 1
+            texts[f"SQL:{sql}"] = content
+        elif artifact.kind.casefold() != "sql":
+            other += 1
+            texts[f"ARTIFACT:{other}"] = (
+                content if isinstance(content, str) else json.dumps(content)
+            )
+    return texts
+
+
 def missing_finding_message(metric: str, score: float) -> str:
     """Retry feedback that allows BOTH fixes (D208: naming only "add a finding" made a live
     judge lower a correct score to 0 just to satisfy the check)."""

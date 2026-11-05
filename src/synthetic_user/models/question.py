@@ -121,10 +121,14 @@ SCHEMA_REQUIREMENT = "reference_spec.schema"
 
 
 class SuccessCriterion(StrictModel):
-    """One atomic, observable must-have of THIS question (id assigned by code: C1, C2, ...)."""
+    """One atomic, observable must-have of THIS question (id assigned by code: C1, C2, ...).
+    ``observed_in`` = the execution evidence it is observable in (answer, sql, tool_trace,
+    ...): a criterion is mapped only to metrics that read that evidence. None in questions
+    generated before it, or in fixed criteria (labeled benchmark cases)."""
 
     id: NonEmptyStr = Field(pattern=CRITERION_ID_PATTERN)
     requirement: NonEmptyStr
+    observed_in: EvidenceKind | None = None
 
 
 class ReferenceRequirementKind(StrEnum):
@@ -138,6 +142,9 @@ class ReferenceRequirementKind(StrEnum):
 
 
 RULE_KINDS = frozenset({ReferenceRequirementKind.TABLE_RULE, ReferenceRequirementKind.RULE})
+# Id prefixes of the rule kinds (TABLE-RULE-01.02, RULE-R1): read mappings stored before
+# ``available_rules`` existed, when every rule was a mandatory reference requirement.
+RULE_ID_PREFIXES = ("TABLE-RULE-", "RULE-")
 
 
 class ReferenceRequirement(StrictModel):
@@ -249,17 +256,44 @@ class MetricMapping(StrictModel):
     ``criteria`` are proposed by the question generator (validated by code); every other field
     is filled by code: the reference requirements from the Reference Spec and the metric's
     required assets, the comparison basis and evidence types from the frozen metric definition,
-    and ``expectation`` = the metric's question-specific value when its definition needs one."""
+    and ``expectation`` = the metric's question-specific value when its definition needs one.
+
+    ``reference_requirements`` are mandatory checks (e.g. ``reference_spec.schema``).
+    ``available_rules`` are the Reference Spec rules the metric may apply (every table rule and
+    selected catalog rule of the pack): the judge decides which apply to the question and the
+    response; only the applicable ones become scoring checks, the rest are recorded as not
+    applicable (none is silently dropped)."""
 
     criteria: list[NonEmptyStr] = Field(default_factory=list)
     reference_requirements: list[NonEmptyStr] = Field(default_factory=list)
+    available_rules: list[NonEmptyStr] = Field(default_factory=list)
     comparison_basis: NonEmptyStr
     evidence_types: list[EvidenceKind] = Field(default_factory=list)
     expectation: MetricExpectation | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _split_rules(cls, value: Any) -> Any:
+        """A mapping stored before ``available_rules``: its rule ids become available rules."""
+        if not isinstance(value, dict) or "available_rules" in value:
+            return value
+        ids = list(value.get("reference_requirements") or [])
+        rules = [i for i in ids if isinstance(i, str) and i.startswith(RULE_ID_PREFIXES)]
+        if not rules:
+            return value
+        return {
+            **value,
+            "reference_requirements": [i for i in ids if i not in rules],
+            "available_rules": rules,
+        }
+
     @model_validator(mode="after")
     def _unique(self) -> Self:
-        for name, ids in (("criteria", self.criteria), ("reference", self.reference_requirements)):
+        for name, ids in (
+            ("criteria", self.criteria),
+            ("reference", self.reference_requirements),
+            ("rule", self.available_rules),
+        ):
             if len(ids) != len(set(ids)):
                 raise ValueError(f"metric mapping lists a {name} id twice: {ids}")
         return self
@@ -291,7 +325,11 @@ class EvaluationContext(StrictModel):
                 problems.append(f"{metric_id!r} is not a metric id")
             if unknown := [c for c in mapping.criteria if c not in known]:
                 problems.append(f"{metric_id}: unknown criteria {unknown}")
-            if unknown := [r for r in mapping.reference_requirements if r not in spec]:
+            if unknown := [
+                r
+                for r in [*mapping.reference_requirements, *mapping.available_rules]
+                if r not in spec
+            ]:
                 problems.append(
                     f"{metric_id}: reference requirements {unknown} are not in the spec"
                 )
@@ -305,6 +343,12 @@ class EvaluationContext(StrictModel):
 
     def criterion(self, criterion_id: str) -> SuccessCriterion | None:
         return next((c for c in self.success_criteria if c.id == criterion_id), None)
+
+    def unmapped_criteria(self) -> list[SuccessCriterion]:
+        """Criteria no selected metric evaluates (no selected metric can observe them): kept in
+        the context and recorded as coverage gaps, never forced into an unsuitable metric."""
+        mapped = {c for m in self.metric_mapping.values() for c in m.criteria}
+        return [c for c in self.success_criteria if c.id not in mapped]
 
     def requirement_text(self, requirement_id: str) -> str | None:
         """The text of a criterion or Reference Spec requirement id; None when unknown."""
@@ -423,6 +467,8 @@ class MetricExpectationDraft(StrictModel):
 class SuccessCriterionDraft(StrictModel):
     id: NonEmptyStr
     requirement: NonEmptyStr
+    # Required by code when the run maps criteria to metrics (context.py).
+    observed_in: EvidenceKind | None = None
 
 
 class MetricMappingDraft(StrictModel):

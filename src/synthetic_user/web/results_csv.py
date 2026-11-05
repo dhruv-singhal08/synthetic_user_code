@@ -28,6 +28,7 @@ from typing import Any
 from synthetic_user.models.evaluation import (
     EvaluationResult,
     MetricStatus,
+    RequirementSource,
     Verdict,
 )
 from synthetic_user.models.execution import (
@@ -38,7 +39,7 @@ from synthetic_user.models.execution import (
     ExecutionRecord,
     ResponseArtifact,
 )
-from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.question import EvaluationContext, QuestionCase
 from synthetic_user.models.reference import ReferencePack, render_join
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
@@ -187,12 +188,24 @@ def _mapping_view(q: QuestionCase) -> dict[str, Any]:
             "reference_requirements": m.reference_requirements,
             "comparison_basis": m.comparison_basis,
         }
+        if m.available_rules:
+            entry["available_rules"] = m.available_rules
         if (x := m.expectation) is not None:
             entry["expectation"] = (
                 x.value if x.value is not None else {"status": x.status.value, "reason": x.reason}
             )
         view[metric_id] = entry
     return view
+
+
+def _criteria_lines(context: EvaluationContext) -> list[str]:
+    """``C1 (sql): ...``; a criterion no selected metric evaluates is marked as a coverage gap."""
+    unmapped = {c.id for c in context.unmapped_criteria()} if context.metric_mapping else set()
+    return [
+        f"{c.id}{f' ({c.observed_in.value})' if c.observed_in else ''}: {c.requirement}"
+        + (" [coverage gap: no selected metric evaluates it]" if c.id in unmapped else "")
+        for c in context.success_criteria
+    ]
 
 
 def _json(value: dict[str, Any]) -> str:
@@ -211,7 +224,7 @@ def _question_cells(q: QuestionCase) -> dict[str, str]:
     return {
         "question_id": q.question_id,
         "question": q.utterance,
-        "success_criteria": bullets([f"{c.id}: {c.requirement}" for c in context.success_criteria]),
+        "success_criteria": bullets(_criteria_lines(context)),
         "reference_spec": _json(
             {
                 "pack_id": spec.pack_id,
@@ -291,18 +304,33 @@ def _metric_cells(ev: EvaluationResult, metric_id: str) -> dict[str, str]:
         f"{metric_id}_reason": reason,
         f"{metric_id}_checks": bullets(
             [
-                f"{c.check_id} {c.requirement_id} {c.status.value}"
+                f"{c.check_id} {'derived' if derived else 'mapped'} {c.requirement_id} "
+                f"{c.status.value}"
                 + (f" [{', '.join(c.observed_evidence_ids)}]" if c.observed_evidence_ids else "")
                 + f": {c.reason}"
+                + (f" ({c.score_impact})" if c.score_impact else "")
+                for derived in (False, True)
                 for c in result.checks
+                if (c.requirement_source is RequirementSource.DERIVED) is derived
             ]
+            + (
+                [f"rules not applicable: {', '.join(result.not_applicable_rules)}"]
+                if result.not_applicable_rules
+                else []
+            )
         ),
         f"{metric_id}_coverage": (
-            f"assigned {coverage.assigned}, evaluated {coverage.evaluated}, passed "
+            (f"{result.score_explanation} " if result.score_explanation else "")
+            + f"[mapped: assigned {coverage.assigned}, evaluated {coverage.evaluated}, passed "
             f"{coverage.passed}, failed {coverage.failed}, not applicable "
-            f"{coverage.not_applicable}, unresolved {coverage.unresolved}, derived "
-            f"{coverage.derived}; basis {result.comparison_basis}; method "
-            f"{result.verification_method}"
+            f"{coverage.not_applicable}, unresolved {coverage.unresolved}; additional (derived) "
+            f"checks {coverage.derived}, failed {coverage.derived_failed}"
+            + (
+                f"; rules applicable {coverage.applicable_rules} of {coverage.available_rules}"
+                if coverage.available_rules
+                else ""
+            )
+            + f"; basis {result.comparison_basis}; method {result.verification_method}]"
             if coverage is not None
             else ""
         ),

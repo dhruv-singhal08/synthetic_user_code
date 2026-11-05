@@ -11,11 +11,16 @@ its Evaluation Context (context.py): the success criteria (C1..Cn), the Referenc
 scenario's pack, reused) and the Metric Mapping of every selected metric. When no valid question
 fits the scenario, the model returns a ``generation_failure`` reason, recorded as a rejection.
 
-Validation keeps the deterministic, structural checks only: schema / enums, counts and limits
-of the existing hard policy (deliverables, sources, words, criteria, complexity, follow-ups),
-canonical product data-source membership, Evaluation Context integrity (criterion ids, mapping
-keys and ids, expectation shape, canonical tool / source membership), exact structural
-duplicates (normalized text equality) and the reference-name leak check (a security check).
+Retry validation and final acceptance run the SAME per-item check (``_check``, D252): a reply
+passes only when every item would be usable, so an invalid enum value or a persona style rule
+is fed back instead of being found after acceptance; anything discarded later (surplus, a
+persisting near-duplicate, a cross-scenario exact duplicate) is logged and traced with its
+reason. Validation keeps the deterministic, structural checks only: schema / enums, counts
+and limits of the existing hard policy (deliverables, sources, words, criteria, complexity,
+follow-ups), canonical product data-source membership, Evaluation Context integrity
+(criterion ids, mapping keys and ids, criterion / metric evidence compatibility, expectation
+shape, canonical tool / source membership), exact structural duplicates (normalized text
+equality) and the reference-name leak check (a security check).
 There is no regex / keyword semantic rejection.
 
 Semantic diversity (D239): the prompt asks for different angles of the same goal and lists the
@@ -43,7 +48,7 @@ from synthetic_user.core.exceptions import (
     format_validation_error,
 )
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
-from synthetic_user.core.trace import trace_subject
+from synthetic_user.core.trace import record_validation, trace_subject
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.structured import generate_structured
 from synthetic_user.models.base import AmbiguityLevel, StrictModel
@@ -89,7 +94,8 @@ PERSONA_AMBIGUITY = {
     AmbiguityPreference.OCCASIONAL: (AmbiguityLevel.MEDIUM, True),
     AmbiguityPreference.FREQUENT: (AmbiguityLevel.HIGH, True),
 }
-VAGUE_NOT_ALLOWED = "vague_not_allowed"
+VAGUE_NOT_ALLOWED = "style 'vague' is not allowed for this persona: use precise or investigative"
+VAGUE_LOW = "a vague question must have ambiguity_level medium or high"
 SURPLUS = "surplus: more questions returned than requested"
 _WORD = re.compile(r"\b[\w'-]+\b")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -165,6 +171,11 @@ class QuestionGenerator:
         if per_scenario < 1:
             raise ValueError("question count must be >= 1")
         groundings = [_grounding(s, reference, packs) for s in scenarios]
+        known: dict[str, str] = {}
+        for utterance in persona.example_utterances:
+            known.setdefault(_normalise(utterance), "persona example utterance")
+        for utterance in product.typical_user_questions:
+            known.setdefault(_normalise(utterance), "product typical user question")
         semaphore = asyncio.Semaphore(cfg.max_parallel_scenarios)
         outcomes = await asyncio.gather(
             *(
@@ -178,26 +189,25 @@ class QuestionGenerator:
                     reference,
                     metrics,
                     list((previous or {}).get(s.id, ())),
+                    known,
                 )
                 for s, grounding in zip(scenarios, groundings, strict=True)
             )
         )
 
         result = QuestionGenerationResult()
-        seen: dict[str, str] = {}
-        for utterance in persona.example_utterances:
-            seen.setdefault(_normalise(utterance), "persona example utterance")
-        for utterance in product.typical_user_questions:
-            seen.setdefault(_normalise(utterance), "product typical user question")
+        seen = dict(known)
         for scenario, grounding, outcome in zip(scenarios, groundings, outcomes, strict=True):
             identifiers = pack_identifiers(grounding[0]) if grounding is not None else []
             result.rejected.extend(outcome.rejected)
             for draft, context, raw in outcome.drafts:
                 key = _normalise(draft.utterance)
                 if (duplicate_of := seen.get(key)) is not None:
-                    result.rejected.append(
-                        _reject(scenario, raw, [f"exact duplicate of {duplicate_of}"])
-                    )
+                    # Only a duplicate of another scenario's question can reach this point
+                    # (the calls run concurrently); everything else was checked per item.
+                    reasons = [f"exact duplicate of {duplicate_of}"]
+                    self._log.warning("%s: question discarded: %s", scenario.id, "; ".join(reasons))
+                    result.rejected.append(_reject(scenario, raw, reasons))
                     continue
                 question = QuestionCase(
                     question_id=self._ids.next(IdKind.QUESTION),
@@ -244,6 +254,7 @@ class QuestionGenerator:
         reference: Reference | None,
         metrics: Sequence[MetricDefinition],
         previous: Sequence[QuestionCase] = (),
+        known: Mapping[str, str] | None = None,
     ) -> _ScenarioOutcome:
         cfg = self._settings.generation.question
         earlier = [
@@ -265,6 +276,7 @@ class QuestionGenerator:
             max_sources=cfg.max_sources,
             max_success_criteria=cfg.max_success_criteria,
             max_words=cfg.max_words,
+            max_listed_values=cfg.max_listed_values,
             allowed_complexities=tuple(
                 QuestionComplexity(item) for item in cfg.allowed_complexities
             ),
@@ -288,38 +300,33 @@ class QuestionGenerator:
         last: list[_RawQuestionBatch] = []
 
         def post_validate(batch: _RawQuestionBatch) -> list[str]:
+            # The SAME checks as the final per-item acceptance (_check), schema and enum values
+            # included: a reply is accepted only when every item would be usable, so retry
+            # feedback names the actual failing condition. After the retries, items are still
+            # judged one by one (valid ones kept, the others rejected with their reasons).
             last[:] = [batch]
             errors: list[str] = []
             shapes: list[QuestionShape | None] = []
             for i, raw in enumerate(batch.questions, start=1):
-                if enforce_leaks and (
-                    leaks := find_leaks(str(raw.get("utterance", "")), identifiers)
-                ):
-                    errors.append(
-                        f"question {i}: uses internal reference names {leaks}; rephrase in "
-                        "the persona's own words"
-                    )
-                try:
-                    draft = QuestionDraft.model_validate(raw)
-                except ValidationError:
-                    # Schema failures are rejected item-by-item below. Retrying here would let
-                    # one malformed item consume retries for otherwise valid questions.
+                checked = self._check(
+                    raw, product, identifiers, enforce_leaks, rules, request, known
+                )
+                if not isinstance(checked, QuestionDraft):
                     shapes.append(None)
+                    errors.extend(f"question {i}: {problem}" for problem in checked)
                     continue
-                shapes.append(shape_of(draft, f"question {i}"))
+                shapes.append(shape_of(checked, f"question {i}"))
                 errors.extend(
                     f"question {i}: {problem}"
-                    for problem in [
-                        *question_policy_problems(draft, product, cfg),
-                        *mapping_problems(draft.evaluation_context, request),
-                        *(
-                            problem
-                            for problems in canonical_problems(
-                                draft.evaluation_context, request, reference
-                            ).values()
-                            for problem in problems
-                        ),
-                    ]
+                    for problems in canonical_problems(
+                        checked.evaluation_context, request, reference
+                    ).values()
+                    for problem in problems
+                )
+            if not batch.questions and not batch.generation_failure:
+                errors.append(
+                    "questions is empty: return the requested question(s), or "
+                    "generation_failure with the specific reason none fits"
                 )
             if cfg.diversity_check:
                 errors.extend(
@@ -361,14 +368,18 @@ class QuestionGenerator:
                     _reject(scenario, {}, [f"generation failure: {batch.generation_failure}"])
                 ]
             )
+        if not batch.questions:
+            reason = "the model returned no question and no generation_failure reason"
+            self._log.warning("%s: %s", scenario.id, reason)
+            return _ScenarioOutcome(rejected=[_reject(scenario, {}, [reason])])
         accepted: list[QuestionShape] = []
         for position, raw in enumerate(batch.questions, start=1):
             if len(outcome.drafts) >= count:
-                outcome.rejected.append(_reject(scenario, raw, [SURPLUS]))
+                outcome.rejected.append(self._discard(scenario, position, raw, [SURPLUS]))
                 continue
-            checked = self._check(raw, product, identifiers, enforce_leaks, rules, request)
-            if isinstance(checked, tuple):
-                draft, _ = checked
+            checked = self._check(raw, product, identifiers, enforce_leaks, rules, request, known)
+            if isinstance(checked, QuestionDraft):
+                draft = checked
                 shape = shape_of(draft, f"question {position}")
                 problem = (
                     diversity_problem(shape, [*earlier, *accepted], threshold=threshold)
@@ -376,7 +387,7 @@ class QuestionGenerator:
                     else None
                 )
                 if problem is not None:  # persisted after the retries: rejected, kept first
-                    outcome.rejected.append(_reject(scenario, raw, [problem]))
+                    outcome.rejected.append(self._discard(scenario, position, raw, [problem]))
                     continue
                 if shape is not None:
                     accepted.append(shape)
@@ -388,12 +399,23 @@ class QuestionGenerator:
                 )
                 outcome.drafts.append((draft, context, raw))
             else:
-                outcome.rejected.append(_reject(scenario, raw, checked))
+                outcome.rejected.append(self._discard(scenario, position, raw, checked))
         if len(outcome.drafts) < count:
             self._log.warning(
                 "%s: %d of %d questions usable", scenario.id, len(outcome.drafts), count
             )
         return outcome
+
+    def _discard(
+        self, scenario: Scenario, position: int, raw: dict[str, Any], reasons: list[str]
+    ) -> RejectedQuestion:
+        """A returned question that is not used: logged and traced with its reasons (never
+        dropped silently, even when the reply as a whole passed validation)."""
+        self._log.warning(
+            "%s: question %d discarded: %s", scenario.id, position, "; ".join(reasons)
+        )
+        record_validation(f"question {position} of {scenario.id} (final)", 0, reasons)
+        return _reject(scenario, raw, reasons)
 
     def _check(
         self,
@@ -403,11 +425,19 @@ class QuestionGenerator:
         enforce_leaks: bool,
         rules: PersonaQuestionRules,
         request: ContextRequest,
-    ) -> tuple[QuestionDraft, None] | list[str]:
+        known: Mapping[str, str] | None = None,
+    ) -> QuestionDraft | list[str]:
+        """Every reason a returned question cannot be used (the output contract's schema and
+        enum values, the hard policy, the persona's style rules, the Evaluation Context, a
+        reference leak, an exact duplicate of a persona example / typical user question); the
+        validated draft when there is none. Used for retry feedback AND final acceptance."""
         try:
             draft = QuestionDraft.model_validate(raw)
         except ValidationError as exc:
-            return [format_validation_error(exc)]
+            return [
+                f"{format_validation_error(exc)} (use exactly the field names and the enum "
+                "values the output contract lists)"
+            ]
         reasons: list[str] = []
         if enforce_leaks and (leaks := find_leaks(draft.utterance, identifiers)):
             reasons.append(f"reference leak: {leaks}")
@@ -418,8 +448,10 @@ class QuestionGenerator:
             if not rules.allow_vague:
                 reasons.append(VAGUE_NOT_ALLOWED)
             if traits.ambiguity_level is AmbiguityLevel.LOW:
-                reasons.append("vague question must have ambiguity_level medium or high")
-        return reasons or (draft, None)
+                reasons.append(VAGUE_LOW)
+        if known and (duplicate_of := known.get(_normalise(draft.utterance))) is not None:
+            reasons.append(f"exact duplicate of {duplicate_of}: write a new question")
+        return reasons or draft
 
 
 def complexity_for_plan(plan: QuestionPlan) -> QuestionComplexity:

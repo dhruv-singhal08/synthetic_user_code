@@ -95,7 +95,7 @@ def _q(utterance: str) -> dict[str, Any]:
         "intent": {"task_type": "ranking"},
         "question_characteristics": {"style": "precise", "ambiguity_level": "low"},
         "evaluation_context": {
-            "success_criteria": [{"id": "C1", "requirement": "answers"}],
+            "success_criteria": [{"id": "C1", "requirement": "answers", "observed_in": "sql"}],
             # every selected criteria metric gets a mapping (code maps the others)
             "metric_mapping": {m: {"criteria": ["C1"]} for m in TEST_METRICS if m != "relevance"},
         },

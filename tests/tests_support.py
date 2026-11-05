@@ -113,10 +113,12 @@ def contract_in(user: str) -> dict[str, Any]:
 def checks_for(
     user: str, metric: str, *, status: str = "passed", evidence: str = "RESPONSE"
 ) -> list[dict[str, Any]]:
-    """One check per requirement the prompt's contract assigns to ``metric``."""
+    """One check per requirement the prompt's contract assigns to ``metric`` (every available
+    rule is treated as applicable and decided with the same status)."""
     entry = contract_in(user).get(metric, {})
     criteria = entry.get("criteria", [])
     references = [r["id"] for r in entry.get("reference_requirements", [])]
+    references += entry.get("available_rules", [])
     return [
         {
             "requirement_ids": [rid],

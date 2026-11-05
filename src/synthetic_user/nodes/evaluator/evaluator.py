@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -117,6 +117,7 @@ from synthetic_user.nodes.evaluator.general_prompt import (
 )
 from synthetic_user.nodes.evaluator.guidance import guidance_registry
 from synthetic_user.nodes.evaluator.judge_common import (
+    evidence_texts,
     matches_known_gap,
     normalise,
     quoted,
@@ -156,6 +157,11 @@ Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 CONTEXT_RECALL_DISCLOSURE = (
     "Expectation-based coverage of the question's required-information checklist; "
     "not exhaustive recall over the full corpus."
+)
+# A metric of a failed judge call: the error itself is recorded ONCE in the notes (D251).
+SHARED_ERROR = (
+    "Not scored: the {judge} call failed - one shared error for {metrics}, recorded in the "
+    "evaluation notes."
 )
 UNKNOWN_AFTER_JUDGE_ERROR = (
     "Response classification unresolved: the General Judge call failed (see the error note)."
@@ -516,24 +522,49 @@ class Evaluator:
             )
         results: dict[str, MetricResult] = dict(plan.preset)
         deterministic = list(plan.findings)
+        judge_limits: list[str] = []
         if general is not None:
+            affected = [d.metric_id for d in plan.general]
             if general.error:
-                notes.append(general.error)
+                # ONE shared error naming the affected metrics (each metric's reason points to
+                # it); the per-attempt details are in run.log.
+                notes.append(f"{general.error} [affects: {', '.join(affected)}]")
+                judge_limits.append(
+                    f"General Judge error: {', '.join(affected)} not scored (see the notes)."
+                )
+            if general.invalid_metrics:
+                invalid = list(general.invalid_metrics)
+                notes.append(
+                    f"General Judge output stayed invalid for {', '.join(invalid)} only; the "
+                    "other metrics of the same reply were validated independently and kept."
+                )
+                judge_limits.append(
+                    f"{', '.join(invalid)}: not scored (judge output invalid for this metric)."
+                )
             self._judged(
                 results,
                 plan.general,
                 general.draft.metrics if general.draft else None,
-                general.error,
+                SHARED_ERROR.format(judge="General Judge", metrics=", ".join(affected))
+                if general.error
+                else None,
                 JudgeGroup.GENERAL,
+                invalid=general.invalid_metrics,
             )
         if retrieval is not None:
             if retrieval.error:
-                notes.append(retrieval.error)
+                affected = [d.metric_id for d in [*plan.retrieval, *plan.computed]]
+                notes.append(f"{retrieval.error} [affects: {', '.join(affected)}]")
             self._judged(
                 results,
                 plan.retrieval,
                 retrieval.draft.metrics if retrieval.draft else None,
-                retrieval.error,
+                SHARED_ERROR.format(
+                    judge="Retrieval/Grounding Judge",
+                    metrics=", ".join(d.metric_id for d in plan.retrieval),
+                )
+                if retrieval.error
+                else None,
                 JudgeGroup.RETRIEVAL_GROUNDING,
             )
             self._retrieval_details(results, plan, retrieval, judgements.evidence)
@@ -639,14 +670,21 @@ class Evaluator:
             )
         lookups = judgements.reference_checks.lookup_trace if judgements.reference_checks else []
         exemptions: dict[str, list[str]] = {}
-        by_metric: dict[str, list[tuple[str, str, bool]]] = {}
+        by_metric: dict[str, list[tuple[str, str, bool, str | None]]] = {}
         for finding in findings:
             if finding.exempted_by_id is not None:
                 exemptions.setdefault(finding.category, []).append(finding.exempted_by_id)
             elif finding.exempted_by is None:
                 by_metric.setdefault(finding.category, []).append(
-                    (finding.finding_id, finding.description, finding.unresolved)
+                    (
+                        finding.finding_id,
+                        finding.description,
+                        finding.unresolved,
+                        finding.evidence,
+                    )
                 )
+        response = case.execution.response
+        assert isinstance(response, AnsweredResponse | DeniedResponse)
         metrics = trace_metrics(
             metrics,
             TraceInputs(
@@ -658,6 +696,7 @@ class Evaluator:
                 rule_texts=rule_texts(lookups),
                 exemptions=exemptions,
                 findings=by_metric,
+                evidence_texts=evidence_texts(response),
             ),
         )
         reference_checks = mark_used_lookups(judgements.reference_checks, metrics)
@@ -669,7 +708,8 @@ class Evaluator:
                 for k, item in enumerate(judgements.sql, start=1)
             ],
             reference_checks=reference_checks,
-            notes=[general.error] if general is not None and general.error else [],
+            notes=judge_limits,
+            question=case.question,
         )
         decision = self._policy.decide(metrics, findings, self._definitions, goal)
         verdict = decision.verdict
@@ -821,8 +861,20 @@ class Evaluator:
         scores: dict[str, JudgedScore] | None,
         error: str | None,
         group: JudgeGroup,
+        *,
+        invalid: Mapping[str, list[str]] | None = None,
     ) -> None:
         for definition in definitions:
+            problems = (invalid or {}).get(definition.metric_id)
+            if problems:
+                results[definition.metric_id] = MetricResult(
+                    status=MetricStatus.EVALUATION_ERROR,
+                    rationale="Not scored: the judge's output for this metric stayed invalid "
+                    "after the retries (the other metrics were kept): " + "; ".join(problems),
+                    judge_group=group,
+                    failure_source=f"{group.value} judge",
+                )
+                continue
             judged = scores.get(definition.metric_id) if scores is not None else None
             if judged is None:
                 results[definition.metric_id] = MetricResult(

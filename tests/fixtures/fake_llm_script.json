@@ -256,11 +256,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "names the employees ranked by total card spend"
+                  "requirement": "names the employees ranked by total card spend",
+                  "observed_in": "sql"
                 },
                 {
                   "id": "C2",
-                  "requirement": "covers the requested time period"
+                  "requirement": "covers the requested time period",
+                  "observed_in": "sql"
                 }
               ],
               "metric_mapping": {
@@ -317,11 +319,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "names the employees ranked by total card spend"
+                  "requirement": "names the employees ranked by total card spend",
+                  "observed_in": "sql"
                 },
                 {
                   "id": "C2",
-                  "requirement": "covers the requested time period"
+                  "requirement": "covers the requested time period",
+                  "observed_in": "sql"
                 }
               ],
               "metric_mapping": {
@@ -417,11 +421,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "shows card spend per merchant category for each month"
+                  "requirement": "shows card spend per merchant category for each month",
+                  "observed_in": "sql"
                 },
                 {
                   "id": "C2",
-                  "requirement": "covers the requested period"
+                  "requirement": "covers the requested period",
+                  "observed_in": "sql"
                 }
               ],
               "metric_mapping": {
@@ -478,11 +484,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "shows card spend per merchant category for each month"
+                  "requirement": "shows card spend per merchant category for each month",
+                  "observed_in": "sql"
                 },
                 {
                   "id": "C2",
-                  "requirement": "covers the requested period"
+                  "requirement": "covers the requested period",
+                  "observed_in": "sql"
                 }
               ],
               "metric_mapping": {
@@ -578,11 +586,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "states clearly whether a forecast can be produced"
+                  "requirement": "states clearly whether a forecast can be produced",
+                  "observed_in": "answer"
                 },
                 {
                   "id": "C2",
-                  "requirement": "does not present invented future figures as facts"
+                  "requirement": "does not present invented future figures as facts",
+                  "observed_in": "answer"
                 }
               ],
               "metric_mapping": {
@@ -594,10 +604,7 @@
                   "expectation": null
                 },
                 "semantic_correctness": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
+                  "criteria": [],
                   "expectation": null
                 }
               }
@@ -639,11 +646,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "states clearly whether a forecast can be produced"
+                  "requirement": "states clearly whether a forecast can be produced",
+                  "observed_in": "answer"
                 },
                 {
                   "id": "C2",
-                  "requirement": "does not present invented future figures as facts"
+                  "requirement": "does not present invented future figures as facts",
+                  "observed_in": "answer"
                 }
               ],
               "metric_mapping": {
@@ -739,11 +748,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "states the nightly hotel limit that applies"
+                  "requirement": "states the nightly hotel limit that applies",
+                  "observed_in": "answer"
                 },
                 {
                   "id": "C2",
-                  "requirement": "says whether taxes are included"
+                  "requirement": "says whether taxes are included",
+                  "observed_in": "answer"
                 }
               ],
               "metric_mapping": {
@@ -755,10 +766,7 @@
                   "expectation": null
                 },
                 "semantic_correctness": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
+                  "criteria": [],
                   "expectation": null
                 }
               }
@@ -800,11 +808,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "states the nightly hotel limit that applies"
+                  "requirement": "states the nightly hotel limit that applies",
+                  "observed_in": "answer"
                 },
                 {
                   "id": "C2",
-                  "requirement": "says whether taxes are included"
+                  "requirement": "says whether taxes are included",
+                  "observed_in": "answer"
                 }
               ],
               "metric_mapping": {
@@ -900,11 +910,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "says clearly that it cannot approve reports"
+                  "requirement": "says clearly that it cannot approve reports",
+                  "observed_in": "answer"
                 },
                 {
                   "id": "C2",
-                  "requirement": "explains where approval is done"
+                  "requirement": "explains where approval is done",
+                  "observed_in": "answer"
                 }
               ],
               "metric_mapping": {
@@ -916,10 +928,7 @@
                   "expectation": null
                 },
                 "semantic_correctness": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
+                  "criteria": [],
                   "expectation": null
                 }
               }
@@ -961,11 +970,13 @@
               "success_criteria": [
                 {
                   "id": "C1",
-                  "requirement": "says clearly that it cannot approve reports"
+                  "requirement": "says clearly that it cannot approve reports",
+                  "observed_in": "answer"
                 },
                 {
                   "id": "C2",
-                  "requirement": "explains where approval is done"
+                  "requirement": "explains where approval is done",
+                  "observed_in": "answer"
                 }
               ],
               "metric_mapping": {

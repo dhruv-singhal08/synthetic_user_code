@@ -20,7 +20,8 @@ user: |
   ${expected}
 
   Evaluation contract of each listed metric (the question's Metric Mapping): the success
-  criteria and Reference Spec requirements that metric must check, and its comparison basis:
+  criteria and Reference Spec requirements that metric must check, the rules it may apply
+  (available_rules: only the applicable ones are checked) and its comparison basis:
   ${mapping}
   ${sections}
   Traceability catalog (stable tags for related_tags):
@@ -40,10 +41,10 @@ user: |
   - Score each listed metric 0, 0.5 or 1 (null only when it genuinely cannot be decided from
     the evidence). Keep metrics independent: a problem belongs to the metric whose comparison
     it violates, not to every metric.
-  - checks (inside each metric): EVERY requirement the evaluation contract lists for that
-    metric is decided in exactly one entry, never omitted: requirement_ids = the id(s) it
-    decides, copied exactly (requirements with the same source, status and reason - e.g. rules
-    that do not concern this SQL - share ONE entry listing all their ids), source
+  - checks (inside each metric): EVERY criterion and reference requirement the evaluation
+    contract lists for that metric is decided in exactly one entry, never omitted:
+    requirement_ids = the id(s) it decides, copied exactly (requirements with the same source,
+    status and reason share ONE entry listing all their ids), source
     success_criteria (C ids) or reference_spec (Reference Spec ids), status passed | failed |
     not_applicable | unresolved, evidence_ids = evidence ids you actually inspected, copied
     exactly as shown above (never invented or renumbered), guidance_ids = guidance that changed
@@ -52,12 +53,21 @@ user: |
     requirement cannot concern this metric for this response (e.g. a criterion the SQL cannot
     express); unresolved = the evidence cannot settle it (never a pass, and it does not lower a
     score by itself). A partly met requirement is failed (say what is missing).
+  - available_rules (rules of the Reference Spec, text in the cheat sheet under the same tag):
+    decide from the question, the response / SQL and each rule's own condition whether it
+    applies. An applicable rule gets a check (source reference_spec: passed | failed |
+    unresolved). List every other available rule id in that metric's not_applicable_rules
+    (ids only, no check, no reason). When you cannot tell whether a rule applies, treat it as
+    applicable with status unresolved - never drop it. Each available rule id appears exactly
+    once: in a check or in not_applicable_rules.
   - Derived checks (source derived) record anything else a score relies on: a catalog rule
     found by a lookup or the reconciliation (requirement_id = its rule id), an extra check or
     exception an evaluation guidance item requires (its id), or a problem the metric's rubric
     covers that no listed requirement names (METRIC:<metric id>). Never invent requirements.
   - A metric scored 1 has no failed check; for a metric scored 0 or 0.5 mark the requirement
-    that fails (code otherwise records its findings as failed derived checks). guidance_applied (inside each metric) lists every user guidance item or POLICY id
+    that fails. A defect outside the listed requirements is a failed derived check citing the
+    evidence_ids that show it (code otherwise records the metric's findings as failed derived
+    checks); never record the same defect twice. guidance_applied (inside each metric) lists every user guidance item or POLICY id
     that materially influenced the score (applicability = why it applies here, influence =
     what it changed); the metric's own rubric is recorded by code, do not list it.
   - Never assert factual accuracy without trusted evidence (the cheat sheet, tool results or
@@ -266,6 +276,7 @@ check_example:
   reason: "<why, citing the evidence>"
 
 checks_as_above: "<entries deciding every requirement listed for this metric, shaped as above>"
+not_applicable_rules_example: "<available rule id that does not concern this question / response>"
 guidance_as_above: "<shaped as above; empty if none>"
 
 guidance_applied_example:

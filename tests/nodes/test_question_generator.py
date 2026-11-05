@@ -17,7 +17,12 @@ from synthetic_user.models.question import QuestionGenerationResult
 from synthetic_user.models.reference import CatalogPackDraft, Reference, ReferencePack, TablePick
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario, TaskType
-from synthetic_user.nodes.question.generator import SURPLUS, VAGUE_NOT_ALLOWED, QuestionGenerator
+from synthetic_user.nodes.question.generator import (
+    SURPLUS,
+    VAGUE_LOW,
+    VAGUE_NOT_ALLOWED,
+    QuestionGenerator,
+)
 from synthetic_user.nodes.question.prompt import QuestionPromptOptions, build_question_prompt
 from synthetic_user.references.pack import build_pack
 
@@ -54,7 +59,7 @@ def q(
         "question_characteristics": {"style": style, "ambiguity_level": ambiguity},
         "evaluation_context": {
             "success_criteria": [
-                {"id": f"C{i}", "requirement": text}
+                {"id": f"C{i}", "requirement": text, "observed_in": "answer"}
                 for i, text in enumerate(criteria or CRITERIA, start=1)
             ],
             "metric_mapping": mapping or {},
@@ -180,6 +185,7 @@ async def test_llm_cannot_set_ids_or_goal(env: Env) -> None:
                 q("Top spenders?", intended_goal="x"),
             )
         ]
+        * 3
     )
     result = await env.run(llm)
     assert not result.questions
@@ -253,12 +259,13 @@ async def test_vague_question_needs_ambiguity(env: Env) -> None:
                 q("Is spend looking weird lately?", "vague", "medium"),
             )
         ]
+        * 3
     )
     config_driven = with_prefs(env.persona, ambiguity=None)  # persona leaves ambiguity to config
     result = await env.run(llm, persona=config_driven, allow_vague_questions=True)
     assert [x.utterance for x in result.questions] == ["Is spend looking weird lately?"]
     assert result.questions[0].question_characteristics.ambiguity_level is AmbiguityLevel.MEDIUM
-    assert result.rejected[0].reasons == ["vague question must have ambiguity_level medium or high"]
+    assert result.rejected[0].reasons == [VAGUE_LOW]
 
 
 async def test_vague_rejected_when_not_allowed(env: Env) -> None:
@@ -269,6 +276,7 @@ async def test_vague_rejected_when_not_allowed(env: Env) -> None:
                 q("Why did travel spend jump in May?", "investigative", "medium"),
             )
         ]
+        * 3
     )
     config_driven = with_prefs(env.persona, ambiguity=None)
     result = await env.run(llm, persona=config_driven, allow_vague_questions=False)
@@ -305,16 +313,18 @@ async def test_exact_duplicates_are_rejected(env: Env) -> None:
 
 async def test_copying_persona_example_rejected(env: Env) -> None:
     example = env.persona.example_utterances[0]
-    llm = FakeLLMClient([batch(q(example))])
+    llm = FakeLLMClient([batch(q(example))] * 3)
     result = await env.run(llm, count=1)
-    assert not result.questions
-    assert result.rejected[0].reasons == ["exact duplicate of persona example utterance"]
+    assert not result.questions and len(llm.calls) == 3  # fed back, not found after acceptance
+    assert result.rejected[0].reasons == [
+        "exact duplicate of persona example utterance: write a new question"
+    ]
 
 
 async def test_copying_a_typical_user_question_rejected(env: Env) -> None:
     typical = "What are the biggest customer pain points this quarter?"
     product = env.product.model_copy(update={"typical_user_questions": [typical]})
-    llm = FakeLLMClient([batch(q("what are the biggest customer pain points this quarter"))])
+    llm = FakeLLMClient([batch(q("what are the biggest customer pain points this quarter"))] * 3)
     generator = QuestionGenerator(
         llm, env.settings, logging.getLogger("test"), id_generator=SequentialIdGenerator()
     )
@@ -322,7 +332,9 @@ async def test_copying_a_typical_user_question_rejected(env: Env) -> None:
         env.persona, product, env.scenarios[:1], env.reference, env.packs, count=1
     )
     assert not result.questions
-    assert result.rejected[0].reasons == ["exact duplicate of product typical user question"]
+    assert result.rejected[0].reasons == [
+        "exact duplicate of product typical user question: write a new question"
+    ]
 
 
 # --- one call per scenario, concurrency, isolation ---------------------------------------------
@@ -412,14 +424,18 @@ def with_metric_expectations(
     question: dict[str, Any],
     entries: dict[str, Any],
     criteria_metrics: tuple[str, ...] = ("correctness_completeness",),
+    observed_in: str = "answer",
 ) -> dict[str, Any]:
-    """The question with a metric_mapping: every criterion mapped to ``criteria_metrics`` and
-    ``entries`` (metric id -> expectation) as the expectations."""
-    ids = [c["id"] for c in question["evaluation_context"]["success_criteria"]]
+    """The question with a metric_mapping: every criterion (observed in ``observed_in``) mapped
+    to ``criteria_metrics`` and ``entries`` (metric id -> expectation) as the expectations."""
+    stated = question["evaluation_context"]["success_criteria"]
+    criteria = [{**c, "observed_in": observed_in} for c in stated]
+    ids = [c["id"] for c in criteria]
     mapping: dict[str, Any] = {m: {"criteria": ids, "expectation": None} for m in criteria_metrics}
     for metric_id, entry in entries.items():
         mapping.setdefault(metric_id, {"criteria": []})["expectation"] = entry
     question = {**question, "evaluation_context": {**question["evaluation_context"]}}
+    question["evaluation_context"]["success_criteria"] = criteria
     question["evaluation_context"]["metric_mapping"] = mapping
     return question
 
@@ -447,7 +463,7 @@ async def test_criteria_metrics_are_mapped_and_code_completes_the_mapping(env: E
     assert "schema_faithfulness (" not in rules and "relevance (" not in rules
 
 
-async def test_every_criterion_must_be_mapped_and_ids_must_exist(env: Env) -> None:
+async def test_mapped_criterion_ids_must_exist(env: Env) -> None:
     bad = q(
         "Who spends most?",
         mapping={"correctness_completeness": {"criteria": ["C1", "C9"], "expectation": None}},
@@ -457,14 +473,14 @@ async def test_every_criterion_must_be_mapped_and_ids_must_exist(env: Env) -> No
     assert not result.questions
     reasons = " ".join(result.rejected[0].reasons)
     assert "criteria ['C9'] are not success_criteria ids" in reasons
-    assert "success criteria ['C2'] are not mapped" in reasons
+    assert "not mapped" not in reasons  # an unmapped C2 is a coverage gap, not a rejection
 
 
 async def test_criterion_ids_are_normalised_by_code(env: Env) -> None:
     question = q("Who spends most?", mapping={"correctness_completeness": {"criteria": ["b", "a"]}})
     question["evaluation_context"]["success_criteria"] = [
-        {"id": "a", "requirement": "names the spenders"},
-        {"id": "b", "requirement": "ranks them"},
+        {"id": "a", "requirement": "names the spenders", "observed_in": "answer"},
+        {"id": "b", "requirement": "ranks them", "observed_in": "answer"},
     ]
     result = await env.run(
         FakeLLMClient([batch(question)]), count=1, metrics=("correctness_completeness",)
@@ -566,9 +582,7 @@ async def test_malformed_metric_expectations_rejected(
 
 async def test_tool_expectation_cannot_generate_without_tool_definitions(env: Env) -> None:
     """No agent_context in the reference: code records cannot_generate, the LLM is not asked."""
-    question = with_metric_expectations(
-        q("Who spends most?"), {}, ("correctness_completeness", "tool_correctness")
-    )
+    question = with_metric_expectations(q("Who spends most?"), {"tool_correctness": None})
     llm = FakeLLMClient([batch(question)])
     result = await env.run(llm, count=1, metrics=("correctness_completeness", "tool_correctness"))
     stored = result.questions[0].context.expectation("tool_correctness")
@@ -601,8 +615,9 @@ async def test_tool_expectation_canonical_names_and_unknown_tools(
         }
     }
     tools = ("tool_correctness",)
+    trace = "tool_trace"
     llm = FakeLLMClient(
-        [batch(with_metric_expectations(q("Which complaints rank top?"), good, tools))]
+        [batch(with_metric_expectations(q("Which complaints rank top?"), good, tools, trace))]
     )
     result = await tools_env.run(llm, count=1, metrics=("tool_correctness",))
     stored_good = result.questions[0].context.expectation("tool_correctness")
@@ -612,7 +627,7 @@ async def test_tool_expectation_canonical_names_and_unknown_tools(
     assert "aggregate_feedback" in llm.calls[0].user  # authoritative definitions are shown
 
     llm = FakeLLMClient(
-        [batch(with_metric_expectations(q("Which complaints rank top?"), bad, tools))] * 3
+        [batch(with_metric_expectations(q("Which complaints rank top?"), bad, tools, trace))] * 3
     )
     result = await tools_env.run(llm, count=1, metrics=("tool_correctness",))
     assert len(llm.calls) == 3  # retried with the membership problem as feedback
@@ -832,7 +847,7 @@ async def test_persona_ambiguity_overrides_config(env: Env) -> None:
     assert [x.utterance for x in allowed.questions] == ["Is spend looking weird lately?"]
     never = with_prefs(env.persona, ambiguity="none")
     refused = await env.run(
-        FakeLLMClient([batch(vague)]), persona=never, count=1, allow_vague_questions=True
+        FakeLLMClient([batch(vague)] * 3), persona=never, count=1, allow_vague_questions=True
     )
     assert not refused.questions and refused.rejected[0].reasons == [VAGUE_NOT_ALLOWED]
 
@@ -874,7 +889,7 @@ async def test_mixed_complexity_accepts_any(env: Env) -> None:
 async def test_model_supplied_complexity_label_is_rejected(env: Env) -> None:
     question = q("Who spent most last month?")
     question["question_characteristics"]["complexity"] = "complex"
-    result = await env.run(FakeLLMClient([batch(question)]), count=1)
+    result = await env.run(FakeLLMClient([batch(question)] * 3), count=1)
     assert not result.questions
     assert "complexity: Extra inputs are not permitted" in result.rejected[0].reasons[0]
 

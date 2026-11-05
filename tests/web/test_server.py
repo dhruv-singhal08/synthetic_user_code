@@ -719,7 +719,7 @@ def test_ungrounded_run_has_no_reference_pack(client: TestClient) -> None:
     assert body["rows"] and all(r["mode"] == "ungrounded" for r in body["rows"])
     assert body["reference_packs"] == []
     assert all(r["reference_spec"] == "" for r in body["rows"])
-    assert all("C1: " in r["success_criteria"] for r in body["rows"] if r["question_id"])
+    assert all("C1 (" in r["success_criteria"] for r in body["rows"] if r["question_id"])
     assert all(r["question"] for r in body["rows"])
 
 

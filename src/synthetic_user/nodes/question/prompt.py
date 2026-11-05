@@ -76,6 +76,7 @@ class QuestionPromptOptions:
     max_sources: int = 1
     max_success_criteria: int = MAX_SUCCESS_CRITERIA
     max_words: int = 40
+    max_listed_values: int | None = None
     allowed_complexities: tuple[QuestionComplexity, ...] = (
         QuestionComplexity.SIMPLE,
         QuestionComplexity.MEDIUM,
@@ -124,6 +125,11 @@ def question_example(request: ContextRequest) -> dict[str, Any]:
             )
             mapping[m.metric_id] = entry
         context["metric_mapping"] = mapping
+        if request.criteria_metrics:
+            for criterion in context["success_criteria"]:
+                criterion["observed_in"] = PROMPTS.text(
+                    "observed_in_example", kinds=choices(request.evidence_kinds)
+                )
     return example
 
 
@@ -143,7 +149,12 @@ def _metric_rules(request: ContextRequest) -> str:
             metric_id=m.metric_id,
             display_name=m.display_name,
             criteria_rule=(
-                PROMPTS.text("metric_criteria_rule", basis=m.basis)
+                PROMPTS.text(
+                    "metric_criteria_rule",
+                    basis=m.basis,
+                    evidence=", ".join(k.value for k in m.required_execution_evidence)
+                    or "everything",
+                )
                 if m.metric_id in criteria_ids
                 else PROMPTS.text("metric_no_criteria_rule")
             ),
@@ -170,7 +181,12 @@ def _metric_rules(request: ContextRequest) -> str:
         )
         for m in mapped
     )
-    return PROMPTS.text("metric_rules", metrics=requirements)
+    rules = PROMPTS.text("metric_rules", metrics=requirements)
+    if request.criteria_metrics:
+        rules += "\n" + PROMPTS.text(
+            "observed_in_rule", kinds=" | ".join(k.value for k in request.evidence_kinds)
+        )
+    return rules
 
 
 def _diversity(options: QuestionPromptOptions) -> str:
@@ -226,7 +242,7 @@ def build_question_prompt(
         pack, reference = grounding
         reference_block = PROMPTS.text(
             "grounded_reference",
-            pack=pack.render(),
+            pack=pack.render(max_values=options.max_listed_values),
             instructions=reference.instructions_text(),
             tools=tools,
         )

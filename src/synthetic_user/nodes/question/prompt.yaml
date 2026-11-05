@@ -58,6 +58,12 @@ core: |
   - Write the utterance FIRST. Then derive the evaluation_context from that exact utterance and
     the authoritative inputs - never from a broader scenario, an invented factual answer or a
     copied example.
+  - The scenario's success_criteria are guidance only. Derive this question's criteria from its
+    own utterance: never copy a scenario criterion the utterance contradicts or does not request.
+    Keep the exact period the utterance requests: YTD versus prior YTD and rolling 12 months
+    versus the prior 12 months are distinct comparisons, and relative dates ("last quarter")
+    stay relative. A reference date rule applies only when its condition holds (e.g. a default
+    period when the question names none); it never replaces an explicitly requested period.
   - evaluation_context.success_criteria: every requirement THIS question needs (at most
     ${max_success_criteria}; as many as the question needs, never padded), each {id, requirement}
     with ids C1, C2, ... in order. Each criterion is ONE atomic, observable, independently
@@ -197,7 +203,9 @@ grounded_reference: |
   Cheat sheet of this scenario (for YOUR understanding only - never use its names). It is the
   scenario's selected scope: a supported question asks only for measures, dimensions, filters,
   periods and calculations it can support (an unsupported scenario keeps its unsupported
-  request). Code attaches it to every question as the Reference Spec; do not reselect it:
+  request). Code attaches it to every question as the Reference Spec; do not reselect it.
+  Table rules travel with their table whatever they are about: a rule matters to this question
+  only when its condition concerns it:
   ${pack}
 
   Usage instructions of the reference (for YOUR understanding):
@@ -225,9 +233,13 @@ metric_rules: |-
   - evaluation_context.metric_mapping: one entry for EXACTLY these metric ids (no others; code
     maps the remaining selected metrics and every Reference Spec requirement itself):
   ${metrics}
-    criteria = the ids of the success criteria that metric evaluates for this question (map
-    every criterion to at least one listed criteria metric; a criterion the metric cannot
-    observe is left out of it); [] for a metric marked "no criteria".
+    criteria = the ids of the success criteria that metric evaluates for this question; [] for
+    a metric marked "no criteria". Map a criterion only to a metric that reads the evidence it
+    is observed in (success_criteria[].observed_in; a metric reading the answer also reads its
+    artifacts). A criterion no listed metric can observe (e.g. a statement the response must
+    make when only SQL metrics are listed) stays in success_criteria but is left out of every
+    mapping: code reports it as a coverage gap. Never force a criterion into a metric that
+    cannot observe it.
     expectation (only where fields are listed, else null): status "generated" with value = the
     listed fields; "not_applicable" (value null, reason) when the metric does not apply to this
     question; "cannot_generate" (value null, specific reason) when it may apply but the value
@@ -240,7 +252,7 @@ no_metric_rules: >-
 metric_requirement: |-
     - ${metric_id} (${display_name}): ${criteria_rule}${expectation_rule}
 
-metric_criteria_rule: "criteria = the ids of the criteria it evaluates (${basis})"
+metric_criteria_rule: "criteria = the ids of the criteria it evaluates (${basis}; reads: ${evidence})"
 metric_no_criteria_rule: "no criteria ([])"
 metric_expectation_rule: |-
   ; expectation: ${instructions}
@@ -256,3 +268,12 @@ metric_expectation_example:
 
 metric_mapping_example:
   criteria: ["<criterion id, e.g. C1>"]
+
+# Added to each success criterion of the example when criteria are mapped to metrics.
+observed_in_example: "${kinds}"
+
+observed_in_rule: |-
+  - success_criteria[].observed_in: where the requirement is observable - ${kinds}
+    (answer = what the response says or delivers; sql = the SQL artifact's logic; tool_trace =
+    the exposed tool calls). A requirement on what the product must SAY (e.g. state that it
+    cannot execute SQL) is observed in the answer, even when the product also returns SQL.

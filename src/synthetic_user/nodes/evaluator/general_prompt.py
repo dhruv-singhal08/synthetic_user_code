@@ -144,11 +144,17 @@ class GeneralJudgeInput:
         )
 
     def assigned(self, metric_id: str) -> list[str]:
-        """The requirement ids the question's Metric Mapping assigns to a metric."""
+        """The MANDATORY requirement ids the question's Metric Mapping assigns to a metric
+        (criteria and mandatory Reference Spec items; available rules are separate)."""
         mapping = self.question.context.metric_mapping.get(metric_id)
         if mapping is None:
             return []
         return [*mapping.criteria, *mapping.reference_requirements]
+
+    def available_rules(self, metric_id: str) -> list[str]:
+        """The Reference Spec rules a metric may apply; the judge decides which do."""
+        mapping = self.question.context.metric_mapping.get(metric_id)
+        return list(mapping.available_rules) if mapping is not None else []
 
     def undocumented_joins(self) -> list[str]:
         """``left = right`` of every undocumented join (the judge must decide each, D238)."""
@@ -214,7 +220,9 @@ def judge_example(
     lookup_offer: bool = False,
     join_decisions: bool = False,
     guidance: bool = False,
+    rule_metrics: Sequence[str] = (),
 ) -> dict[str, Any]:
+    """``rule_metrics``: metrics with available rules (they list the inapplicable ones)."""
     ids = [d.metric_id for d in definitions]
     metrics: dict[str, Any] = {}
     check = PROMPTS.data(
@@ -226,6 +234,8 @@ def judge_example(
         example = score_example()
         # The full check / guidance shape once; the other metrics point to it (shorter prompt).
         example["checks"] = [check] if position == 0 else [PROMPTS.text("checks_as_above")]
+        if definition.metric_id in rule_metrics:
+            example["not_applicable_rules"] = [PROMPTS.text("not_applicable_rules_example")]
         example["guidance_applied"] = (
             [PROMPTS.data("guidance_applied_example")]
             if position == 0
@@ -368,6 +378,9 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
                 lookup_offer=data.max_lookup_requests > 0,
                 join_decisions=bool(data.undocumented_joins()),
                 guidance=bool(data.guidance),
+                rule_metrics=[
+                    d.metric_id for d in definitions if data.available_rules(d.metric_id)
+                ],
             )
         ),
     )
@@ -404,6 +417,9 @@ def _mapping_view(data: GeneralJudgeInput) -> dict[str, Any]:
                 for r in mapping.reference_requirements
             ],
         }
+        if mapping.available_rules:
+            # Ids only: each rule's text is in the cheat sheet under the same tag.
+            entry["available_rules"] = mapping.available_rules
         if (value := context.generated(definition.metric_id)) is not None:
             entry["question_specific_expectation"] = value
         view[definition.metric_id] = entry
@@ -526,7 +542,17 @@ def _reconciliation_view(rec: ArtifactReconciliation) -> dict[str, Any]:
         view[status.value] = [i.canonical or i.identifier for i in rec.with_status(status)]
     for status in (IdentifierStatus.INVALID, IdentifierStatus.UNRESOLVED):
         view[status.value] = [
-            {"identifier": i.identifier, "reason": i.reason} for i in rec.with_status(status)
+            {
+                "identifier": i.identifier,
+                **({"diagnosis": i.diagnosis.value} if i.diagnosis else {}),
+                **(
+                    {"expected_catalog_tables": i.expected_catalog_tables}
+                    if i.expected_catalog_tables
+                    else {}
+                ),
+                "reason": i.reason,
+            }
+            for i in rec.with_status(status)
         ]
     view["cheat_sheet_items_not_used"] = rec.pack_items_not_used
     view["joins"] = [j.model_dump(mode="json", exclude_none=True) for j in rec.joins]

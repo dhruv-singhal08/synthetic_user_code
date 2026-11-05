@@ -15,8 +15,17 @@ without a failed check gets its findings as failed derived checks, by code), a f
 score below 1, a factual-verification state where the metric asks
 for one, no schema finding that names an SQL output alias, CTE or function (from the parser,
 not a regex), and a goal-completion assessment consistent with the response kind (D243).
-Invalid output is retried (bounded); exhausted retries or a provider failure produce
-``evaluation_error`` results with the reason, never a guessed score.
+Invalid output is retried (bounded). After the retries, metrics are validated independently
+(D251): when only some metrics' own output is invalid (e.g. Rules Adherence omits a rule
+decision), those become ``evaluation_error`` with their own problems and the valid metrics'
+scores, checks and findings are kept; a shared problem (goal completion, classification, join
+decisions, ...), every metric invalid, or a provider failure makes the whole call an
+``evaluation_error`` with one deduplicated reason - never a guessed score or a fabricated check.
+
+Rules (D250-D251): only the criteria and mandatory Reference Spec items are mandatory checks.
+The rules of the Reference Spec are AVAILABLE to a rule metric: the judge gives each applicable
+rule a check and lists the others in ``not_applicable_rules`` (ids only), so an unrelated rule
+needs no check but none is silently dropped.
 
 Bounded lookup (data-catalog runs with SQL, ``evaluation.reference_lookup``): code has already
 reconciled the SQL with the catalog and run the obvious exact lookups. The first call may then
@@ -75,6 +84,9 @@ class GeneralJudgement:
     attempts: list[int] = field(default_factory=list)
     # The evidence ids the final (scoring) call could cite.
     evidence_ids: list[str] = field(default_factory=list)
+    # Metrics whose own output stayed invalid after the retries (D251): metric id -> its
+    # problems. The other metrics of the reply are kept; ``error`` stays None.
+    invalid_metrics: dict[str, list[str]] = field(default_factory=dict)
 
 
 def quotable_text(data: GeneralJudgeInput) -> str:
@@ -157,32 +169,66 @@ def check_problems(draft: GeneralJudgeDraft, data: GeneralJudgeInput) -> list[st
             if (metric_id in data.question.context.metric_mapping)
             else set()
         )
+        available = data.available_rules(metric_id)
         decided: list[str] = []
         for check in judged.checks:
             for rid in (r.strip() for r in check.requirement_ids):
                 if check.source is RequirementSource.DERIVED:
-                    if rid not in derivable:
+                    if rid in available:
+                        errors.append(
+                            f"{metric_id}: {rid!r} is an available rule of this metric: decide "
+                            "it with source reference_spec (or list it in not_applicable_rules)"
+                        )
+                    elif rid not in derivable:
                         errors.append(
                             f"{metric_id}: derived check {rid!r} names no catalog rule, "
                             "guidance id, Reference Spec id or METRIC:<id> shown above"
                         )
                     continue
                 decided.append(rid)
-                if rid not in assigned:
+                if rid not in assigned and rid not in available:
                     errors.append(
                         f"{metric_id}: check {rid!r} is not assigned to this metric (assigned: "
                         f"{assigned}); use source derived only for an extra check"
                     )
                 elif (rid in criteria) != (check.source is RequirementSource.SUCCESS_CRITERIA):
                     errors.append(f"{metric_id}: check {rid!r} has the wrong source")
-        if missing := [r for r in assigned if r not in decided]:
+        not_applicable = [r.strip() for r in judged.not_applicable_rules]
+        mandatory = [r for r in decided if r not in available]
+        if missing := [r for r in assigned if r not in mandatory]:
             errors.append(
                 f"{metric_id}: checks must decide every assigned requirement; missing {missing} "
                 "(requirements with the same decision may share one entry: list their ids in "
                 "requirement_ids)"
             )
-        if repeated := sorted({r for r in decided if decided.count(r) > 1}):
+        if unknown := [r for r in not_applicable if r not in available]:
+            errors.append(
+                f"{metric_id}: not_applicable_rules {unknown} are not available rules of this "
+                f"metric ({available})"
+            )
+        if undecided := [r for r in available if r not in decided and r not in not_applicable]:
+            errors.append(
+                f"{metric_id}: decide every available rule: give each applicable rule a check "
+                f"and list the others in not_applicable_rules; missing {undecided}"
+            )
+        both = [r for r in available if r in decided and r in not_applicable]
+        if both:
+            errors.append(
+                f"{metric_id}: rules {both} are both checked and listed in not_applicable_rules"
+            )
+        listed = [*decided, *not_applicable]
+        if repeated := sorted({r for r in listed if listed.count(r) > 1} - set(both)):
             errors.append(f"{metric_id}: requirements decided more than once: {repeated}")
+        for check in judged.checks:
+            if (
+                check.source is RequirementSource.DERIVED
+                and check.status is RequirementStatus.FAILED
+                and not check.evidence_ids
+            ):
+                errors.append(
+                    f"{metric_id}: the failed derived check {check.requirement_ids} needs the "
+                    "evidence_ids that show the defect"
+                )
         cited = [*judged.evidence_ids, *(i for c in judged.checks for i in c.evidence_ids)]
         if unknown := registry.unknown(cited):
             errors.append(
@@ -327,6 +373,78 @@ def _non_base_identifier_findings(draft: GeneralJudgeDraft, data: GeneralJudgeIn
     return errors
 
 
+def metric_problems(
+    draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: str
+) -> tuple[list[str], dict[str, list[str]]]:
+    """The validation problems of a scoring reply split into shared ones (goal completion,
+    classification, join decisions, unknown metric keys or finding categories, ...) and the
+    ones of each metric, by validating each metric on its own (its score, checks and findings)
+    with the SAME checks as ``check_general``. Code only, no LLM call (D251)."""
+    ids = {d.metric_id for d in data.definitions}
+    shared_draft = draft.model_copy(
+        update={
+            "metrics": {k: v for k, v in draft.metrics.items() if k not in ids},
+            "findings": [f for f in draft.findings if f.category not in ids],
+        }
+    )
+    shared = check_general(shared_draft, replace(data, definitions=[]), quotable)
+    by_metric: dict[str, list[str]] = {}
+    for definition in data.definitions:
+        metric_id = definition.metric_id
+        own = draft.model_copy(
+            update={
+                "metrics": {k: v for k, v in draft.metrics.items() if k == metric_id},
+                "findings": [f for f in draft.findings if f.category == metric_id],
+            }
+        )
+        problems = [
+            p
+            for p in check_general(own, replace(data, definitions=[definition]), quotable)
+            if p not in shared
+        ]
+        if problems:
+            by_metric[metric_id] = problems
+    covered = {*shared, *(p for ps in by_metric.values() for p in ps)}
+    shared.extend(p for p in check_general(draft, data, quotable) if p not in covered)
+    return shared, by_metric
+
+
+def salvage(
+    draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: str
+) -> tuple[GeneralJudgeDraft, dict[str, list[str]]] | None:
+    """After the bounded retries: keep the metrics whose own output is valid and drop the
+    invalid ones (their scores, checks and findings), returning each invalid metric's
+    problems. None when a shared part is invalid or no metric is valid (the whole call is then
+    an evaluation error, as before). Never fabricates a check or a score."""
+    if draft.evidence_requests:
+        return None
+    shared, invalid = metric_problems(draft, data, quotable)
+    if shared or not invalid or len(invalid) == len(data.definitions):
+        return None
+    kept = draft.model_copy(
+        update={
+            "metrics": {k: v for k, v in draft.metrics.items() if k not in invalid},
+            "findings": [f for f in draft.findings if f.category not in invalid],
+        }
+    )
+    return kept, invalid
+
+
+def dedupe_errors(errors: list[str]) -> list[str]:
+    """``attempt n: problem`` lines -> each problem once, with the attempts it occurred in."""
+    seen: dict[str, list[str]] = {}
+    for error in errors:
+        head, sep, problem = error.partition(": ")
+        if sep and head.startswith("attempt "):
+            seen.setdefault(problem, []).append(head.removeprefix("attempt "))
+        else:
+            seen.setdefault(error, [])
+    return [
+        f"{problem} (attempt{'s' if len(at) > 1 else ''} {', '.join(at)})" if at else problem
+        for problem, at in seen.items()
+    ]
+
+
 class _CountingLLM:
     """Counts the LLM attempts of the current structured call (retries included) for the
     evaluation trace; everything else is passed through unchanged."""
@@ -388,6 +506,12 @@ class GeneralJudge:
         judgement.calls += 1
         judgement.attempts.append(0)
         judgement.evidence_ids = data.registry().ids()
+        last: list[GeneralJudgeDraft] = []
+
+        def post_validate(draft: GeneralJudgeDraft) -> list[str]:
+            last[:] = [draft]
+            return check_general(draft, data, quotable)
+
         try:
             return await generate_structured(
                 _CountingLLM(self._llm, judgement.attempts),
@@ -395,14 +519,24 @@ class GeneralJudge:
                 user,
                 GeneralJudgeDraft,
                 max_retries=self._max_retries,
-                post_validate=lambda draft: check_general(draft, data, quotable),
+                post_validate=post_validate,
                 cumulative_feedback=True,
             )
         except LLMOutputValidationError as exc:
+            kept = salvage(last[0], data, quotable) if last else None
+            if kept is not None:
+                draft, invalid = kept
+                judgement.invalid_metrics = invalid
+                self._log.warning(
+                    "%s: general judge output invalid for %s only; other metrics kept",
+                    data.question.question_id,
+                    ", ".join(invalid),
+                )
+                return draft
             self._log.warning("%s: general judge output invalid", data.question.question_id)
             judgement.error = (
                 f"general judge output invalid after {exc.attempts} attempt(s): "
-                + "; ".join(exc.errors)
+                + "; ".join(dedupe_errors(list(exc.errors)))
             )
         except LLMProviderError as exc:
             # A transient outage must not discard other completed judgements in the batch.

@@ -46,6 +46,7 @@ generation:
     max_sources: 1                      # one data source per question by default
     max_success_criteria: 6                # a cap, never a target: as many as the question needs
     max_words: 40
+    max_listed_values: 8                # question prompt: longer column value lists are shortened
     allowed_complexities: [simple, medium]
     allow_follow_ups: false
     allow_cross_source_comparison: false

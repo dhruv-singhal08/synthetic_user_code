@@ -245,7 +245,8 @@ async def test_full_run_files_types_refs_and_outcomes(
     assert semantic.coverage is not None and semantic.coverage.evaluated == 2
     assert [g.guidance_id for g in semantic.guidance_applied] == ["METRIC:semantic_correctness"]
     rules = judged.metrics["rules_adherence"]
-    assert rules.assigned_reference_requirements == ["TABLE-RULE-01.01", "RULE-R1"]
+    assert rules.assigned_reference_requirements == []
+    assert rules.available_rules == ["TABLE-RULE-01.01", "RULE-R1"]
     assert [(c.requirement_id, c.requirement_source, c.status) for c in rules.checks][-1] == (
         "JOIN-01",
         "derived",

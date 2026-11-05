@@ -129,11 +129,19 @@ class RequirementCheck(StrictModel):
     observed_evidence_ids: list[NonEmptyStr] = Field(default_factory=list)
     guidance_ids: list[NonEmptyStr] = Field(default_factory=list)
     reason: NonEmptyStr
+    # A failed derived check (a defect outside the mapped requirements): what it did to the
+    # metric's score, e.g. "reduced Semantic Correctness to 0.5". None otherwise.
+    score_impact: NonEmptyStr | None = None
 
 
 class CheckCoverage(StrictModel):
-    """Counts over one metric's checks. ``assigned`` = requirements the Metric Mapping gave the
-    metric; ``evaluated`` = assigned requirements with a decision other than unresolved."""
+    """Counts over one metric's checks. Mapped requirements and additional (derived) defects are
+    counted separately: ``assigned`` = mandatory requirements of the Metric Mapping (criteria,
+    mandatory Reference Spec items) plus the rules the judge found applicable; ``evaluated`` =
+    those with a decision other than unresolved; passed / failed / not_applicable / unresolved
+    count the mapped checks only. ``derived`` / ``derived_failed`` = additional checks outside
+    the mapping (and how many failed). ``available_rules`` = rules the metric could apply;
+    ``applicable_rules`` = the ones that applied (the rest are recorded as not applicable)."""
 
     assigned: int = Field(ge=0)
     evaluated: int = Field(ge=0)
@@ -142,6 +150,9 @@ class CheckCoverage(StrictModel):
     not_applicable: int = Field(ge=0)
     unresolved: int = Field(ge=0)
     derived: int = Field(default=0, ge=0)
+    derived_failed: int = Field(default=0, ge=0)
+    available_rules: int = Field(default=0, ge=0)
+    applicable_rules: int = Field(default=0, ge=0)
 
 
 class GuidanceApplication(StrictModel):
@@ -178,10 +189,18 @@ class MetricResult(StrictModel):
     verification_method: NonEmptyStr | None = None
     assigned_criteria: list[NonEmptyStr] = Field(default_factory=list)
     assigned_reference_requirements: list[NonEmptyStr] = Field(default_factory=list)
+    # Rules the metric could apply, and those judged not applicable to this question / response
+    # (ids only: no per-rule check is needed for an unrelated rule).
+    available_rules: list[NonEmptyStr] = Field(default_factory=list)
+    not_applicable_rules: list[NonEmptyStr] = Field(default_factory=list)
     guidance_applied: list[GuidanceApplication] = Field(default_factory=list)
     checks: list[RequirementCheck] = Field(default_factory=list)
     observed_evidence_ids: list[NonEmptyStr] = Field(default_factory=list)
     coverage: CheckCoverage | None = None
+    # Code's one-line account of the score from the checks: mapped coverage first, then any
+    # additional defect that lowered it (e.g. "3/3 mapped requirements passed; 1 additional
+    # defect reduced Semantic Correctness to 0.5: ...").
+    score_explanation: NonEmptyStr | None = None
 
     @model_validator(mode="after")
     def _score_iff_scored(self) -> Self:
@@ -503,6 +522,8 @@ class JudgedScore(StrictModel):
     # General Judge only: one decision per mapped requirement (+ derived checks) and the
     # guidance that influenced the score. Code numbers the checks and resolves every id.
     checks: list[CheckDraft] = Field(default_factory=list)
+    # Available rules (Metric Mapping) that do not concern this question / response: ids only.
+    not_applicable_rules: list[NonEmptyStr] = Field(default_factory=list)
     guidance_applied: list[GuidanceApplicationDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")

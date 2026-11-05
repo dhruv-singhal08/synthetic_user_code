@@ -9,18 +9,21 @@ evaluates) or needs a question-specific expectation (its value). Code does the r
   them), so ids are stable whatever the model wrote;
 - the Reference Spec is the scenario's Reference Pack, reused as is (never reselected);
 - each selected metric's mapping gets its Reference Spec requirements from the metric's
-  required reference assets (``catalog_schema`` -> ``reference_spec.schema``, ``catalog_rules``
-  -> every table / catalog rule of the pack), its comparison basis and evidence types from the
-  frozen metric definition, and its expectation (generated, or decided by code up front when the
-  authoritative asset is absent: the LLM is then not asked).
+  required reference assets (``catalog_schema`` -> the mandatory ``reference_spec.schema``,
+  ``catalog_rules`` -> every table / catalog rule of the pack as AVAILABLE rules: the judge
+  decides which apply, only those become scoring checks), its comparison basis and evidence
+  types from the frozen metric definition, and its expectation (generated, or decided by code
+  up front when the authoritative asset is absent: the LLM is then not asked).
 
 Integrity checks are structural only (no catalog validation, no meaning of text): unique
-criterion ids, exactly the requested mapping keys, mapped criterion ids that exist, every
-criterion mapped to at least one criteria metric when one is selected, expectation shape /
-fields / types, and canonical membership of tool / data-source names in the reference's tool
-definitions. A generated expectation that fails canonical membership after the bounded retries
-is recorded as ``cannot_generate`` with the exact problem - never used, never silently fixed -
-and the question itself is kept.
+criterion ids, exactly the requested mapping keys, mapped criterion ids that exist, each mapped
+criterion observable in evidence the metric reads (``observed_in`` vs the metric's required
+execution evidence), expectation shape / fields / types, and canonical membership of tool /
+data-source names in the reference's tool definitions. A criterion no selected metric can
+observe stays in the context unmapped (a coverage gap, reported), never forced into a metric
+and never a reason to reject the question. A generated expectation that fails canonical
+membership after the bounded retries is recorded as ``cannot_generate`` with the exact problem -
+never used, never silently fixed - and the question itself is kept.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from synthetic_user.models.metrics import (
+    EvidenceKind,
     ExpectationFieldType,
     MetricDefinition,
     ReferenceAsset,
@@ -87,6 +91,25 @@ class ContextRequest:
         """The metrics the generator writes a metric_mapping entry for, in frozen order."""
         ids = {d.metric_id for d in [*self.criteria_metrics, *self.requested]}
         return [d for d in self.selected if d.metric_id in ids]
+
+    @property
+    def evidence_kinds(self) -> list[EvidenceKind]:
+        """The ``observed_in`` values offered for a criterion: the answer, plus the evidence the
+        run's criteria metrics read (e.g. sql, tool_trace)."""
+        kinds = [EvidenceKind.ANSWER]
+        for definition in self.criteria_metrics:
+            kinds.extend(definition.required_execution_evidence)
+        return list(dict.fromkeys(kinds))
+
+
+def observes(definition: MetricDefinition, kind: EvidenceKind) -> bool:
+    """Whether a metric reads the evidence a criterion is observed in. A metric that reads the
+    answer also reads its artifacts (an SQL artifact is part of the response); a metric whose
+    definition names no evidence (some custom metrics) reads everything."""
+    evidence = definition.required_execution_evidence
+    if not evidence or kind in evidence:
+        return True
+    return kind is EvidenceKind.SQL and EvidenceKind.ANSWER in evidence
 
 
 def context_request(
@@ -154,7 +177,18 @@ def mapping_problems(draft: EvaluationContextDraft, request: ContextRequest) -> 
         )
     criteria_ids = {d.metric_id for d in request.criteria_metrics}
     requested_ids = {d.metric_id for d in request.requested}
-    mapped: set[str] = set()
+    observed = {c.id: c.observed_in for c in draft.success_criteria}
+    if criteria_ids:
+        offered = request.evidence_kinds
+        names = " | ".join(k.value for k in offered)
+        for criterion in draft.success_criteria:
+            if criterion.observed_in is None:
+                problems.append(f"{criterion.id}: observed_in is required ({names})")
+            elif criterion.observed_in not in offered:
+                problems.append(
+                    f"{criterion.id}: observed_in {criterion.observed_in.value!r} is not one of "
+                    f"{names}"
+                )
     for metric_id, entry in got.items():
         definition = wanted.get(metric_id)
         if definition is None:
@@ -162,7 +196,16 @@ def mapping_problems(draft: EvaluationContextDraft, request: ContextRequest) -> 
         if unknown := [c for c in entry.criteria if c not in known]:
             problems.append(f"{metric_id}: criteria {unknown} are not success_criteria ids")
         if metric_id in criteria_ids:
-            mapped.update(entry.criteria)
+            for criterion_id in entry.criteria:
+                kind = observed.get(criterion_id)
+                if kind is not None and not observes(definition, kind):
+                    reads = ", ".join(k.value for k in definition.required_execution_evidence)
+                    problems.append(
+                        f"{metric_id}: {criterion_id} is observed in the {kind.value}, but "
+                        f"{metric_id} evaluates only the {reads}: leave {criterion_id} out of "
+                        f"{metric_id} (a criterion no listed metric can observe stays unmapped "
+                        "and is reported as a coverage gap)"
+                    )
         elif entry.criteria:
             problems.append(f"{metric_id}: criteria must be [] (this metric does not use them)")
         if metric_id in requested_ids:
@@ -174,11 +217,6 @@ def mapping_problems(draft: EvaluationContextDraft, request: ContextRequest) -> 
                 )
         elif entry.expectation is not None:
             problems.append(f"{metric_id}: expectation must be null (none is needed)")
-    if criteria_ids and (unmapped := [i for i in ids if i not in mapped]):
-        problems.append(
-            f"success criteria {unmapped} are not mapped to any of {sorted(criteria_ids)}: map "
-            "every criterion to the metric(s) that evaluate it"
-        )
     return problems
 
 
@@ -253,7 +291,7 @@ def build_context(
     """The stored Evaluation Context (the draft passed ``mapping_problems``)."""
     renumber = {c.id: f"C{i}" for i, c in enumerate(draft.success_criteria, start=1)}
     criteria = [
-        SuccessCriterion(id=renumber[c.id], requirement=c.requirement)
+        SuccessCriterion(id=renumber[c.id], requirement=c.requirement, observed_in=c.observed_in)
         for c in draft.success_criteria
     ]
     spec = (
@@ -273,6 +311,7 @@ def build_context(
         mapping[definition.metric_id] = MetricMapping(
             criteria=list(dict.fromkeys(mapped_criteria)),
             reference_requirements=metric_reference_requirements(definition, pack),
+            available_rules=metric_available_rules(definition, pack),
             comparison_basis=definition.basis,
             evidence_types=list(definition.required_execution_evidence),
             expectation=expectations.get(definition.metric_id),
@@ -283,17 +322,22 @@ def build_context(
 def metric_reference_requirements(
     definition: MetricDefinition, pack: ReferencePack | None
 ) -> list[str]:
-    """The Reference Spec requirement ids a metric evaluates, from its required assets."""
+    """The MANDATORY Reference Spec requirement ids of a metric, from its required assets: the
+    selected schema as one requirement. Rules are available, not mandatory (below)."""
     if pack is None:
         return []
-    items = reference_requirements(pack)
-    ids: list[str] = []
-    assets = definition.required_reference_assets
-    if ReferenceAsset.CATALOG_SCHEMA in assets and pack.tables:
-        ids.append(SCHEMA_REQUIREMENT)
-    if ReferenceAsset.CATALOG_RULES in assets:
-        ids.extend(item.id for item in items if item.kind in RULE_KINDS)
-    return ids
+    if ReferenceAsset.CATALOG_SCHEMA in definition.required_reference_assets and pack.tables:
+        return [SCHEMA_REQUIREMENT]
+    return []
+
+
+def metric_available_rules(definition: MetricDefinition, pack: ReferencePack | None) -> list[str]:
+    """Every table rule and selected catalog rule of the pack, for a metric that checks rules.
+    A table rule travels with its table whatever it is about, so the judge decides which rules
+    apply to the question and the response; only those become scoring checks."""
+    if pack is None or ReferenceAsset.CATALOG_RULES not in definition.required_reference_assets:
+        return []
+    return [item.id for item in reference_requirements(pack) if item.kind in RULE_KINDS]
 
 
 def _expectations(

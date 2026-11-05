@@ -16,12 +16,14 @@ Persona + Product [+ Reference (data_catalog | document_collection) + optional i
   + run metric selection (11 built-in metrics + custom metrics; no evaluation profiles)
   -> [0] frozen metric config (compiler call only for custom metrics)
   -> [1] Scenarios (one call; + Reference Pack only when grounded)
-  -> [2] Questions (one call per scenario; metric expectations only where needed)
+  -> [2] Questions (one call per scenario; each with an Evaluation Context: success criteria
+     C1.., Reference Spec = the scenario's pack, Metric Mapping; no expected_behavior, D245)
   -> [3] Product Executor (ProductAdapter; + tool trace / retrieved context)
   -> [4] Evaluator (deterministic applicability; SQL: parse + catalog reconciliation + exact
      lookups; General Judge + Retrieval/Grounding Judge, at most one call each - the General
-     Judge at most two when it requests one batch of lookups, D231; provisional verdict
-     policy) -> Bug Candidates
+     Judge at most two when it requests one batch of lookups, D231; check-level decisions with
+     evidence / guidance ids, coverage and limitations, D246-D249; severity verdict policy)
+     -> Bug Candidates
 ```
 
 One orchestrator. Nodes are classes, not agents. One package per node

@@ -23,21 +23,21 @@ from synthetic_user.core.exceptions import InputAssetError, format_validation_er
 from synthetic_user.models.base import AmbiguityLevel, NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import Verdict
 from synthetic_user.models.execution import ExecutionRecord
+from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
     MAX_SUCCESS_CRITERIA,
-    Expectations,
     QuestionCase,
     QuestionCharacteristics,
     QuestionComplexity,
     QuestionIntent,
     QuestionStyle,
-    SuccessCriteria,
 )
 from synthetic_user.models.reference import ReferencePack
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+from synthetic_user.nodes.question.context import fixed_context
 
 # Benchmark executions come from labeled cases, not from a product adapter.
 BENCHMARK_ADAPTER = "benchmark"
@@ -152,8 +152,12 @@ def build_evaluation_cases(
     cases: Sequence[BenchmarkCase],
     scenarios: Sequence[Scenario],
     packs: Sequence[ReferencePack] = (),
+    metrics: Sequence[MetricDefinition] = (),
 ) -> list[EvaluationCase]:
-    """One EvaluationCase per labeled case; grounded scenarios use their reference pack."""
+    """One EvaluationCase per labeled case; grounded scenarios use their reference pack. The
+    case's expected behaviour (an input of the labeled file) is kept as the last success
+    criterion after the scenario's, so its meaning reaches the judge through the Evaluation
+    Context; every criterion is mapped to every selected criteria metric."""
     by_id = {s.id: s for s in scenarios}
     pack_by_id = {p.pack_id: p for p in packs}
     started = datetime.now(UTC)
@@ -189,12 +193,10 @@ def build_evaluation_cases(
                 ambiguity_level=AmbiguityLevel.MEDIUM,
                 complexity=QuestionComplexity.MEDIUM,
             ),
-            expectations=Expectations(
-                expected_behavior=case.expected_behavior,
-                success_criteria=SuccessCriteria(
-                    general=list(scenario.success_criteria)[:MAX_SUCCESS_CRITERIA],
-                    cheat_sheet=pack,
-                ),
+            evaluation_context=fixed_context(
+                [*scenario.success_criteria[: MAX_SUCCESS_CRITERIA - 1], case.expected_behavior],
+                pack,
+                metrics,
             ),
         )
         execution = ExecutionRecord.model_validate(
@@ -223,7 +225,9 @@ async def run_benchmark(
     missing = sorted({c.product_id for c in cases} - set(products))
     if missing:
         raise InputAssetError(f"No product description loaded for product_id(s) {missing}")
-    evaluation_cases = build_evaluation_cases(cases, scenarios, packs)
+    evaluation_cases = build_evaluation_cases(
+        cases, scenarios, packs, evaluator.metric_config.definitions
+    )
     verdicts: dict[str, Verdict | None] = {}
     for product_id, product in products.items():
         selected = [

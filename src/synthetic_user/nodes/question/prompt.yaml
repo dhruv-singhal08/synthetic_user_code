@@ -55,23 +55,27 @@ core: |
   - ${identifiers_rule}
   - Set question_characteristics style and ambiguity_level honestly. Code computes complexity from
     the structured plan; do not output complexity.
-  - Write the utterance FIRST. Then derive every expectation from that exact utterance and the
-    authoritative inputs - never from a broader scenario, an invented factual answer or a
+  - Write the utterance FIRST. Then derive the evaluation_context from that exact utterance and
+    the authoritative inputs - never from a broader scenario, an invented factual answer or a
     copied example.
-  - expected_behavior: 1-3 plain sentences: what the product should do for THIS question (what
-    it should return or do; whether asking for clarification or declining would be right or
-    wrong). If the question can fairly be read in more than one way, say which readings are
-    acceptable. For an unsupported scenario, keep the unsupported request: the expected
-    behaviour states the limitation instead of turning the question into a supported proxy.
-  - expected_behavior and success_criteria must respect the product's expected_outputs and scope.
-    Do not require execution, returned data values, or another artifact that the product says it
-    does not provide. When the product returns an artifact that computes the requested answer,
-    require that artifact to be complete and valid for the request.
-  - success_criteria: 1-${max_success_criteria} short, checkable must-haves of a goal-complete
-    answer, refined from the scenario's success_criteria to this exact question. Every criterion
-    must be entailed by this exact question, its structured plan, the product answer contract or a
-    necessary rule in the supplied reference. A generally useful practice is not automatically a
-    must-have. Word each criterion so that every acceptable reading passes it.
+  - evaluation_context.success_criteria: every requirement THIS question needs (at most
+    ${max_success_criteria}; as many as the question needs, never padded), each {id, requirement}
+    with ids C1, C2, ... in order. Each criterion is ONE atomic, observable, independently
+    testable requirement (e.g. calculate the requested measure; group by the requested
+    dimension; apply the requested period; calculate the requested comparison; return the
+    requested output; state a required limitation; decline an unsupported request). Never
+    state the same requirement twice or add an unrelated one. Every criterion must be entailed by
+    this exact question, its structured plan, the product answer contract or a necessary rule in
+    the supplied reference. A generally useful practice is not automatically a must-have.
+  - The success criteria also say what the product should DO: whether asking for clarification
+    or declining would be right or wrong. If the question can fairly be read in more than one
+    way, word the criteria so that every acceptable reading passes them. For an unsupported
+    scenario, keep the unsupported request: the criteria describe the correct limitation,
+    refusal or supported alternative instead of turning the question into a supported proxy.
+  - The success criteria respect the product's expected_outputs and scope. Do not require
+    execution, returned data values, or another artifact that the product says it does not
+    provide. When the product returns an artifact that computes the requested answer, require
+    that artifact to be complete and valid for the request.
   ${metric_rules}
   - A ranking without a numeric plan.deliverables[].limit requires ordering, not an invented top-N
     cutoff. Never require LIMIT, top N, top 5, top 10 or another result count unless that exact
@@ -116,12 +120,12 @@ diversity_multi: |-
     stays unsupported), the persona's characteristics, the hard policy or the allowed
     complexities. Never add a deliverable, an unsupported requirement or a fact that depends on
     the reference only to make a question different.
-  - Each question's plan, intent, expected_behavior and success_criteria describe THAT
-    question's own utterance; never copy them from a sibling question or from the scenario.
+  - Each question's plan, intent and evaluation_context describe THAT question's own
+    utterance; never copy them from a sibling question or from the scenario.
 
 diversity_single: |-
 
-  - The plan, intent, expected_behavior and success_criteria describe this exact utterance.
+  - The plan, intent and evaluation_context describe this exact utterance.
 
 diversity_previous: |-
 
@@ -172,23 +176,28 @@ question_example:
       question_characteristics:
         style: "${styles}"
         ambiguity_level: "${ambiguity_levels}"
-      expectations:
-        expected_behavior: "<1-3 sentences: what the product should do for this question>"
-        success_criteria: ["<1-${max_success_criteria} short, checkable must-haves>"]
-        metric_expectations: {}
+      evaluation_context:
+        success_criteria:
+          - id: "C1"
+            requirement: "<one atomic, observable must-have of this question>"
+        metric_mapping: {}
 
 # --- ungrounded ---------------------------------------------------------------------------
 
 ungrounded_missing: |-
   No reference data is available: do not invent names, fields or numbers. If the goal could
-  be read several ways, say in expected_behavior which readings are fine and whether the
+  be read several ways, say in a success criterion which readings are fine and whether the
   product should ask for clarification.
+  ${failure}
 
 # --- grounded (a reference pack) -----------------------------------------------------------
 
 grounded_reference: |
 
-  Cheat sheet of this scenario (for YOUR understanding only - never use its names):
+  Cheat sheet of this scenario (for YOUR understanding only - never use its names). It is the
+  scenario's selected scope: a supported question asks only for measures, dimensions, filters,
+  periods and calculations it can support (an unsupported scenario keeps its unsupported
+  request). Code attaches it to every question as the Reference Spec; do not reselect it:
   ${pack}
 
   Usage instructions of the reference (for YOUR understanding):
@@ -200,27 +209,42 @@ grounded_tools: |
   ${tools}
 
 grounded_missing: |-
-  If the cheat sheet shows the goal depends on something ambiguous, say in expected_behavior
+  If the cheat sheet shows the goal depends on something ambiguous, say in a success criterion
   whether the product should ask or state its assumption. Do not guess silently.
+  ${failure}
+
+# When no valid question fits (both modes).
+generation_failure: |-
+  If you cannot write a valid question within the scenario's scope and every rule above,
+  return {"questions": [], "generation_failure": "<the specific reason>"} instead of
+  fabricating requirements.
 
 # --- selected-metric expectations (only metrics that need a question-specific value) -------
 
 metric_rules: |-
-  - metric_expectations: the run's selected metrics below need a question-specific value. Give
-    an entry for EXACTLY these metric ids (no others):
+  - evaluation_context.metric_mapping: one entry for EXACTLY these metric ids (no others; code
+    maps the remaining selected metrics and every Reference Spec requirement itself):
   ${metrics}
-    For each: status "generated" with value = the listed fields; "not_applicable" (value null,
-    reason) when the metric does not apply to this question; "cannot_generate" (value null,
-    specific reason) when it may apply but the value cannot be established from this exact
-    question and the authoritative inputs. Never fabricate a value; required fields must be
-    present when generated.
+    criteria = the ids of the success criteria that metric evaluates for this question (map
+    every criterion to at least one listed criteria metric; a criterion the metric cannot
+    observe is left out of it); [] for a metric marked "no criteria".
+    expectation (only where fields are listed, else null): status "generated" with value = the
+    listed fields; "not_applicable" (value null, reason) when the metric does not apply to this
+    question; "cannot_generate" (value null, specific reason) when it may apply but the value
+    cannot be established from this exact question and the authoritative inputs. Never
+    fabricate a value; required fields must be present when generated.
 
 no_metric_rules: >-
-  - metric_expectations must be {} (no selected metric needs a question-specific value).
+  - evaluation_context.metric_mapping must be {} (code maps every selected metric).
 
 metric_requirement: |-
-    - ${metric_id} (${display_name}): ${instructions}
-      fields: ${fields}
+    - ${metric_id} (${display_name}): ${criteria_rule}${expectation_rule}
+
+metric_criteria_rule: "criteria = the ids of the criteria it evaluates (${basis})"
+metric_no_criteria_rule: "no criteria ([])"
+metric_expectation_rule: |-
+  ; expectation: ${instructions}
+        fields: ${fields}
 
 metric_field: "${name} (${type}, ${required}): ${description}"
 field_required: required
@@ -229,3 +253,6 @@ field_optional: optional
 metric_expectation_example:
   status: "${statuses}"
   reason: "<null, or the specific reason when not_applicable / cannot_generate>"
+
+metric_mapping_example:
+  criteria: ["<criterion id, e.g. C1>"]

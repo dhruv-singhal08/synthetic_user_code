@@ -22,6 +22,7 @@ from synthetic_user.models.evaluation import CoverageStatus, RetrievalJudgeDraft
 from synthetic_user.models.execution import RetrievedContext
 from synthetic_user.nodes.evaluator.judge_common import (
     check_scores_and_findings,
+    guidance_items,
     normalise,
     response_text,
 )
@@ -68,7 +69,13 @@ def check_retrieval(draft: RetrievalJudgeDraft, data: RetrievalJudgeInput) -> li
     chunk_ids = {c.chunk_id for c in data.context.chunks}
     quotable = "\n".join([response_text(data.response), *(c.text for c in data.context.chunks)])
     errors = check_scores_and_findings(
-        draft.metrics, draft.findings, ids, quotable, guidance=data.guidance
+        draft.metrics,
+        draft.findings,
+        ids,
+        quotable,
+        guidance_ids=[i.guidance_id for i in guidance_items(data.guidance)]
+        if data.guidance is not None
+        else [],
     )
     tool_refs = {f"tool-{c.order}" for c in data.tool_trace or ()}
     for name, judged in draft.metrics.items():

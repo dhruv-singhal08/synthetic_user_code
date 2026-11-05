@@ -30,12 +30,21 @@ def plan_for(complexity: str, limit: int | None = None) -> dict[str, Any]:
     return {"deliverables": deliverables[complexity], "filters": [], "is_follow_up": False}
 
 
+CRITERIA = [
+    "names the spenders in ranked order",
+    "if amounts use several currencies, keeps them separate",
+]
+
+
 def q(
     utterance: str,
     style: str = "precise",
     ambiguity: str = "low",
     complexity: str = "simple",
     limit: int | None = None,
+    *,
+    criteria: list[str] | None = None,
+    mapping: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
     return {
@@ -43,13 +52,12 @@ def q(
         "plan": plan_for(complexity, limit),
         "intent": {"task_type": "ranking"},
         "question_characteristics": {"style": style, "ambiguity_level": ambiguity},
-        "expectations": {
-            "expected_behavior": "Rank the spenders. If amounts use several currencies, keep "
-            "them separate.",
+        "evaluation_context": {
             "success_criteria": [
-                "names the spenders in ranked order",
-                "if amounts use several currencies, keeps them separate",
+                {"id": f"C{i}", "requirement": text}
+                for i, text in enumerate(criteria or CRITERIA, start=1)
             ],
+            "metric_mapping": mapping or {},
         },
         **extra,
     }
@@ -400,19 +408,82 @@ async def test_failed_scenario_call_is_isolated(env: Env) -> None:
 # --- metric expectations -----------------------------------------------------------------------
 
 
-def with_metric_expectations(question: dict[str, Any], entries: dict[str, Any]) -> dict[str, Any]:
-    question = {**question, "expectations": {**question["expectations"]}}
-    question["expectations"]["metric_expectations"] = entries
+def with_metric_expectations(
+    question: dict[str, Any],
+    entries: dict[str, Any],
+    criteria_metrics: tuple[str, ...] = ("relevance",),
+) -> dict[str, Any]:
+    """The question with a metric_mapping: every criterion mapped to ``criteria_metrics`` and
+    ``entries`` (metric id -> expectation) as the expectations."""
+    ids = [c["id"] for c in question["evaluation_context"]["success_criteria"]]
+    mapping: dict[str, Any] = {m: {"criteria": ids, "expectation": None} for m in criteria_metrics}
+    for metric_id, entry in entries.items():
+        mapping.setdefault(metric_id, {"criteria": []})["expectation"] = entry
+    question = {**question, "evaluation_context": {**question["evaluation_context"]}}
+    question["evaluation_context"]["metric_mapping"] = mapping
     return question
 
 
-async def test_metrics_without_question_expectations_get_no_entries(env: Env) -> None:
-    llm = FakeLLMClient([batch(q("Who spends most?"))])
-    result = await env.run(llm, count=1, metrics=("relevance", "correctness_completeness"))
-    assert result.questions[0].expectations.success_criteria.metrics == {}
+async def test_criteria_metrics_are_mapped_and_code_completes_the_mapping(env: Env) -> None:
+    mapped = with_metric_expectations(
+        q("Who spends most?"), {}, ("relevance", "correctness_completeness")
+    )
+    llm = FakeLLMClient([batch(mapped)])
+    result = await env.run(
+        llm, count=1, metrics=("relevance", "correctness_completeness", "schema_faithfulness")
+    )
+    context = result.questions[0].context
+    relevance = context.metric_mapping["relevance"]
+    assert (relevance.criteria, relevance.expectation) == (["C1", "C2"], None)
+    assert relevance.comparison_basis == "question_vs_response"
+    # schema_faithfulness takes no criteria: code maps it to the Reference Spec's schema
+    schema = context.metric_mapping["schema_faithfulness"]
+    assert (schema.criteria, schema.reference_requirements) == ([], ["reference_spec.schema"])
+    assert schema.comparison_basis == "schema_vs_sql" and schema.evidence_types == ["sql"]
     prompt = llm.calls[0].user
-    assert "metric_expectations must be {}" in prompt
-    assert '"metric_expectations": {}' in prompt
+    assert "- relevance (Relevance): criteria = the ids" in prompt
+    assert (
+        "schema_faithfulness ("
+        not in prompt.split("## OUTPUT CONTRACT", 1)[0]
+        .split("metric_mapping: one entry", 1)[1]
+        .split("## PROHIBITED", 1)[0]
+    )
+
+
+async def test_every_criterion_must_be_mapped_and_ids_must_exist(env: Env) -> None:
+    bad = q(
+        "Who spends most?",
+        mapping={"relevance": {"criteria": ["C1", "C9"], "expectation": None}},
+    )
+    llm = FakeLLMClient([batch(bad)] * 3)
+    result = await env.run(llm, count=1, metrics=("relevance",))
+    assert not result.questions
+    reasons = " ".join(result.rejected[0].reasons)
+    assert "criteria ['C9'] are not success_criteria ids" in reasons
+    assert "success criteria ['C2'] are not mapped" in reasons
+
+
+async def test_criterion_ids_are_normalised_by_code(env: Env) -> None:
+    question = q("Who spends most?", mapping={"relevance": {"criteria": ["b", "a"]}})
+    question["evaluation_context"]["success_criteria"] = [
+        {"id": "a", "requirement": "names the spenders"},
+        {"id": "b", "requirement": "ranks them"},
+    ]
+    result = await env.run(FakeLLMClient([batch(question)]), count=1, metrics=("relevance",))
+    context = result.questions[0].context
+    assert [(c.id, c.requirement) for c in context.success_criteria] == [
+        ("C1", "names the spenders"),
+        ("C2", "ranks them"),
+    ]
+    assert context.metric_mapping["relevance"].criteria == ["C2", "C1"]
+
+
+async def test_generation_failure_is_recorded_not_fabricated(env: Env) -> None:
+    llm = FakeLLMClient([{"questions": [], "generation_failure": "the cheat sheet has no period"}])
+    result = await env.run(llm, count=1)
+    assert not result.questions
+    assert result.rejected[0].reasons == ["generation failure: the cheat sheet has no period"]
+    assert "generation_failure" in llm.calls[0].user
 
 
 async def test_context_recall_checklist_generated_and_stored(env: Env) -> None:
@@ -424,8 +495,8 @@ async def test_context_recall_checklist_generated_and_stored(env: Env) -> None:
     }
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
     result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
-    stored = result.questions[0].expectations.success_criteria.metrics["context_recall"]
-    assert stored.status == "generated"
+    stored = result.questions[0].context.expectation("context_recall")
+    assert stored is not None and stored.status == "generated"
     assert stored.value == {"required_information": ["card spend per employee", "the last quarter"]}
     prompt = llm.calls[0].user
     assert "required_information (string_list, required)" in prompt
@@ -444,7 +515,8 @@ async def test_cannot_generate_is_recorded_and_question_kept(env: Env) -> None:
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
     result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
     assert len(result.questions) == 1 and not result.rejected
-    stored = result.questions[0].expectations.success_criteria.metrics["context_recall"]
+    stored = result.questions[0].context.expectation("context_recall")
+    assert stored is not None
     assert (stored.status, stored.value, stored.reason) == (
         "cannot_generate",
         None,
@@ -455,7 +527,7 @@ async def test_cannot_generate_is_recorded_and_question_kept(env: Env) -> None:
 @pytest.mark.parametrize(
     ("entries", "problem"),
     [
-        ({}, "metric_expectations is missing ['context_recall']"),
+        ({}, "metric_mapping is missing ['context_recall']"),
         (
             {
                 "context_recall": {"status": "generated", "value": {"required_information": []}},
@@ -477,9 +549,9 @@ async def test_cannot_generate_is_recorded_and_question_kept(env: Env) -> None:
         (
             {
                 "context_recall": {"status": "not_applicable", "value": None, "reason": "n/a"},
-                "relevance": {"status": "not_applicable", "value": None, "reason": "n/a"},
+                "faithfulness": {"status": "not_applicable", "value": None, "reason": "n/a"},
             },
-            "must not include ['relevance']",
+            "must not include ['faithfulness']",
         ),
     ],
 )
@@ -495,12 +567,15 @@ async def test_malformed_metric_expectations_rejected(
 
 async def test_tool_expectation_cannot_generate_without_tool_definitions(env: Env) -> None:
     """No agent_context in the reference: code records cannot_generate, the LLM is not asked."""
-    llm = FakeLLMClient([batch(q("Who spends most?"))])
+    question = with_metric_expectations(
+        q("Who spends most?"), {}, ("relevance", "tool_correctness")
+    )
+    llm = FakeLLMClient([batch(question)])
     result = await env.run(llm, count=1, metrics=("relevance", "tool_correctness"))
-    stored = result.questions[0].expectations.success_criteria.metrics["tool_correctness"]
-    assert stored.status == "cannot_generate"
+    stored = result.questions[0].context.expectation("tool_correctness")
+    assert stored is not None and stored.status == "cannot_generate"
     assert "no authoritative tool definitions" in (stored.reason or "")
-    assert "tool_correctness (" not in llm.calls[0].user
+    assert "expected_tools" not in llm.calls[0].user  # its expectation is not asked for
 
 
 async def test_tool_expectation_canonical_names_and_unknown_tools(
@@ -526,19 +601,26 @@ async def test_tool_expectation_canonical_names_and_unknown_tools(
             "value": {"expected_tools": ["invented_tool"]},
         }
     }
-    llm = FakeLLMClient([batch(with_metric_expectations(q("Which complaints rank top?"), good))])
+    tools = ("tool_correctness",)
+    llm = FakeLLMClient(
+        [batch(with_metric_expectations(q("Which complaints rank top?"), good, tools))]
+    )
     result = await tools_env.run(llm, count=1, metrics=("tool_correctness",))
-    value = result.questions[0].expectations.success_criteria.metrics["tool_correctness"].value
+    stored_good = result.questions[0].context.expectation("tool_correctness")
+    value = stored_good.value if stored_good is not None else None
     # aliases are stored as the canonical names of the authoritative tool definitions
     assert value == {"expected_tools": ["aggregate_feedback"], "expected_data_sources": ["csat"]}
     assert "aggregate_feedback" in llm.calls[0].user  # authoritative definitions are shown
 
-    llm = FakeLLMClient([batch(with_metric_expectations(q("Which complaints rank top?"), bad))] * 3)
+    llm = FakeLLMClient(
+        [batch(with_metric_expectations(q("Which complaints rank top?"), bad, tools))] * 3
+    )
     result = await tools_env.run(llm, count=1, metrics=("tool_correctness",))
     assert len(llm.calls) == 3  # retried with the membership problem as feedback
     assert "unknown tool 'invented_tool'" in llm.calls[1].user
     # never fabricated or silently fixed: recorded as cannot_generate, the question is kept
-    stored = result.questions[0].expectations.success_criteria.metrics["tool_correctness"]
+    stored = result.questions[0].context.expectation("tool_correctness")
+    assert stored is not None
     assert stored.status == "cannot_generate" and "invented_tool" in (stored.reason or "")
 
 
@@ -595,8 +677,10 @@ def test_prompt_contents(
     assert "Transaction amount in the transaction currency" in user  # copied by code
     assert sample_reference.render() not in user  # the cheat sheet, not the whole reference
     assert "merchant names cannot be joined in" in user  # the usage instructions
-    assert "expected_behavior: 1-3 plain sentences" in user
-    assert "success_criteria: 1-4 short" in user
+    assert "evaluation_context.success_criteria: every requirement" in user
+    assert "with ids C1, C2, ... in order" in user
+    assert "expected_behavior" not in user  # removed from the contract (reforming)
+    assert "Code attaches it to every question as the Reference Spec" in user
     assert "acceptable_variations" not in user  # removed (D204)
     assert "The persona decides HOW the question is asked" in user
     assert "Do not reuse the wording of the scenario's business_goal" in user
@@ -613,32 +697,32 @@ def test_prompt_contents(
 # --- v2.1: success criteria ------------------------------------------------------------------
 
 
-async def test_question_owns_its_expectations(env: Env) -> None:
+async def test_question_owns_its_evaluation_context(env: Env) -> None:
     llm = FakeLLMClient([batch(q("Who are our biggest card spenders this quarter?"))])
     result = await env.run(llm, count=1)
-    expectations = result.questions[0].expectations
-    assert expectations.success_criteria.general == [
-        "names the spenders in ranked order",
-        "if amounts use several currencies, keeps them separate",
-    ]
-    assert expectations.success_criteria.general != env.scenarios[0].success_criteria
-    # Collected after generation into one structure (D240): the scenario's cheat sheet is a
-    # code copy of its pack.
+    context = result.questions[0].context
+    assert [c.requirement for c in context.success_criteria] == CRITERIA
+    assert [c.requirement for c in context.success_criteria] != env.scenarios[0].success_criteria
+    # The Reference Spec is the scenario's pack, reused by code with its identity
     pack = next(p for p in env.packs if p.pack_id == env.scenarios[0].reference_pack_id)
-    assert expectations.success_criteria.cheat_sheet == pack
-    assert expectations.expected_behavior.startswith("Rank the spenders")
+    assert context.reference_spec is not None and context.reference_spec.pack == pack
+    assert context.reference_spec.reference_id == env.reference.reference_id
+    assert result.questions[0].legacy_expectations is None
 
 
 @pytest.mark.parametrize(
-    "expectations",
+    "evaluation_context",
     [
-        {"expected_behavior": "x"},  # no criteria: never copied from the scenario
-        {"expected_behavior": "x", "success_criteria": ["a", "b", "c", "d", "e"]},
-        {"clarification": "conditional", "acceptable_behaviors": ["x"], "success_criteria": ["a"]},
+        {"success_criteria": []},  # no criteria: never copied from the scenario
+        {"success_criteria": [{"id": f"C{i}", "requirement": "x"} for i in range(11)]},
+        {"success_criteria": [{"id": "C1", "requirement": "a"}], "expected_behavior": "x"},
     ],
 )
-async def test_bad_expectations_rejected(env: Env, expectations: dict[str, Any]) -> None:
-    llm = FakeLLMClient([batch(q("Who spends the most on cards?", expectations=expectations))])
+async def test_bad_evaluation_context_rejected(
+    env: Env, evaluation_context: dict[str, Any]
+) -> None:
+    bad = q("Who spends the most on cards?", evaluation_context=evaluation_context)
+    llm = FakeLLMClient([batch(bad)])
     result = await env.run(llm, count=1)
     assert not result.questions and len(result.rejected) == 1
 
@@ -779,7 +863,7 @@ async def test_mixed_complexity_accepts_any(env: Env) -> None:
         FakeLLMClient([batch(question, q("Which merchants?"))]),
         allowed_complexities=["simple", "medium", "complex"],
         max_deliverables=3,
-        diversity_check=False,  # q() copies one expected_behavior into every question
+        diversity_check=False,  # q() gives every question the same success criteria
     )
     assert not result.rejected
     assert [x.question_characteristics.complexity for x in result.questions] == [
@@ -862,8 +946,22 @@ def test_clean_question_has_no_policy_problems(env: Env) -> None:
         ),
         ("Who spent most and what did they buy?", {}),
         ("Top 5 spenders?", {}),
-        ("Who spent most?", {"expectations__expected_behavior": "Return the top 10 spenders."}),
-        ("Who spent most?", {"expectations__success_criteria": ["shows amounts in USD"]}),
+        (
+            "Who spent most?",
+            {
+                "evaluation_context__success_criteria": [
+                    {"id": "C1", "requirement": "Return the top 10 spenders."}
+                ]
+            },
+        ),
+        (
+            "Who spent most?",
+            {
+                "evaluation_context__success_criteria": [
+                    {"id": "C1", "requirement": "shows amounts in USD"}
+                ]
+            },
+        ),
     ],
 )
 def test_no_regex_semantic_rejection(env: Env, utterance: str, changes: dict[str, Any]) -> None:
@@ -905,12 +1003,20 @@ def test_prompt_guards_replace_the_former_regex_gates(env: Env) -> None:
 
 
 def _with(
-    question: dict[str, Any], *, filters: list[dict[str, str]] | None = None, **expect: Any
+    question: dict[str, Any],
+    *,
+    filters: list[dict[str, str]] | None = None,
+    criteria: list[str] | None = None,
 ) -> dict[str, Any]:
     if filters is not None:
         question["plan"]["filters"] = filters
-    if expect:
-        question["expectations"] = {**question["expectations"], **expect}
+    if criteria is not None:
+        question["evaluation_context"] = {
+            **question["evaluation_context"],
+            "success_criteria": [
+                {"id": f"C{i}", "requirement": text} for i, text in enumerate(criteria, start=1)
+            ],
+        }
     return question
 
 
@@ -957,7 +1063,7 @@ async def test_paraphrase_is_a_near_duplicate_fixed_by_the_existing_retry(env: E
         _with(
             q("Who were our top 5 card spenders last quarter?", limit=5),
             filters=PERIOD,
-            expected_behavior="Rank the five biggest card spenders of last quarter.",
+            criteria=["ranks the five biggest card spenders of last quarter"],
         ),
         # the same request in clearly different terminology
         _with(q("Show the biggest corporate-card users for Q3 please"), filters=PERIOD),
@@ -984,21 +1090,21 @@ async def test_persistent_near_duplicate_is_rejected_with_its_reason(env: Env) -
     assert rejected.reasons[0].startswith("near-duplicate of question 1")
 
 
-async def test_expectations_copied_from_a_sibling_are_retried(env: Env) -> None:
+async def test_criteria_copied_from_a_sibling_are_retried(env: Env) -> None:
     copied = batch(
         q("Who spent most last quarter?"),
-        q("How did monthly card spend move?", complexity="medium"),  # same expected_behavior
+        q("How did monthly card spend move?", complexity="medium"),  # same success criteria
     )
     fixed = batch(
         q("Who spent most last quarter?"),
         _with(
             q("How did monthly card spend move?", complexity="medium"),
-            expected_behavior="Show the monthly card spend trend and rank the spenders.",
+            criteria=["shows the monthly card spend trend", "ranks the spenders"],
         ),
     )
     llm = FakeLLMClient([copied, fixed])
     result = await env.run(llm)
-    assert "expected_behavior is copied word for word from question 1" in llm.calls[1].user
+    assert "success_criteria are copied word for word from question 1" in llm.calls[1].user
     assert len(result.questions) == 2
 
 

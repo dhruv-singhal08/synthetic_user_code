@@ -158,6 +158,28 @@ class LookupTraceEntry(StrictModel):
     request: LookupRequest
     result: LookupResult
     cached: bool = False  # answered from the per-catalog-version cache
+    # Traceability (reforming, Part 9): the evidence id the judge cites (LOOKUP:<n>, in trace
+    # order), the round (0 = precomputed by code, 1 = the judge's one requested batch) and
+    # whether a final metric decision cited it. Absent in older artifacts.
+    evidence_id: NonEmptyStr | None = None
+    round: int | None = Field(default=None, ge=0, le=1)
+    used_in_judgment: bool | None = None
+
+    @property
+    def status(self) -> str:
+        """found / not_found / ambiguous (schema) or found / partly_found / not_found."""
+        result = self.result
+        if isinstance(result, SchemaLookup):
+            return result.status.value
+        found = bool(
+            getattr(result, "rules", None)
+            or getattr(result, "relationships", None)
+            or getattr(result, "alternatives", None)
+        )
+        missing = bool(getattr(result, "not_found", None))
+        if found and missing:
+            return "partly_found"
+        return "found" if found else "not_found"
 
 
 # --- reconciliation of an artifact's identifiers -------------------------------------------
@@ -221,3 +243,5 @@ class ReferenceCheckRecord(StrictModel):
     general_judge_calls: int = Field(default=0, ge=0)
     # The judge's decisions on undocumented joins (D238), as returned: join, allowed, basis.
     join_decisions: list[dict[NonEmptyStr, JsonValue]] = Field(default_factory=list)
+    # True when the judge requested its one optional batch of lookups (None: older artifact).
+    additional_lookup_performed: bool | None = None

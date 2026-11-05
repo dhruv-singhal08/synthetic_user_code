@@ -1,26 +1,33 @@
 """Assemble the General Judge prompt; the prompt text itself is in ``general_prompt.yaml``.
 
-Sections are included only when one of the call's metrics (or the correctness evidence) needs
-them: question-specific metric expectations, the cheat sheet, authoritative tool definitions,
-the SQL parser output and the exposed tool trace. When SQL is reconciled with a data catalog
-(D230/D231) the cheat sheet is presented as expected evidence (not an allow-list), followed by
-the catalog reconciliation, the lookups code made, and either the optional one-batch lookup
-offer (first call) or the results of the judge's requested lookups (second call). Prompts of
-runs without that reconciliation are unchanged.
+The judge always sees the question's success criteria (with their ids) and the evaluation
+contract of each listed metric (its Metric Mapping: criteria, Reference Spec requirements,
+comparison basis, question-specific expectation). Other sections are included only when one of
+the call's metrics needs them: the cheat sheet, authoritative tool definitions, the SQL parser
+output and the exposed tool trace. Every citable piece of evidence carries its evidence id
+(evidence.py) and every guidance item its guidance id (guidance.py).
+
+When SQL is reconciled with a data catalog (D230/D231) the cheat sheet is presented as expected
+evidence (not an allow-list), followed by the catalog reconciliation, the lookups code made, and
+either the optional one-batch lookup offer (first call) or the results of the judge's requested
+lookups (second call).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from synthetic_user.models.evaluation import (
-    CriterionStatus,
     FactualVerification,
     GoalStatus,
     JoinBasis,
+    RequirementSource,
+    RequirementStatus,
     Verdict,
 )
 from synthetic_user.models.execution import (
@@ -33,14 +40,22 @@ from synthetic_user.models.lookup import (
     ArtifactReconciliation,
     IdentifierStatus,
     JoinStatus,
-    LookupResult,
     LookupTool,
+    LookupTraceEntry,
 )
 from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
+from synthetic_user.models.run import EvaluationGuidance
 from synthetic_user.models.scenario import CapabilityClassification
+from synthetic_user.nodes.evaluator.evidence import (
+    SQL_CLAUSES,
+    EvidenceRegistry,
+    build_registry,
+    sql_clause_id,
+)
+from synthetic_user.nodes.evaluator.guidance import GuidanceRef, builtin_listing
 from synthetic_user.nodes.evaluator.judge_common import (
     EvaluableResponse,
     bounded,
@@ -58,6 +73,14 @@ from synthetic_user.sql.parser import SqlStructure
 
 PROMPTS = prompts_beside(__file__, "general_prompt.yaml")
 SYSTEM = PROMPTS.text("system")
+# Version of the judge's prompt templates (recorded per judge invocation in run.log): sha256 of
+# the two template files, so a prompt change is visible when comparing runs.
+TEMPLATE_FINGERPRINT = hashlib.sha256(
+    b"".join(
+        (Path(__file__).parent / name).read_bytes()
+        for name in ("general_prompt.yaml", "judge_common_prompt.yaml")
+    )
+).hexdigest()[:16]
 PRODUCT_CONTRACT_FIELDS = {
     "name",
     "description",
@@ -93,13 +116,15 @@ class GeneralJudgeInput:
     sql_dialect: str | None
     artifact_max_chars: int
     # Exact lookups code made before the call (reconciled runs only).
-    catalog_lookups: Sequence[LookupResult] = ()
+    catalog_lookups: Sequence[LookupTraceEntry] = ()
     # > 0: the judge may return up to this many lookups instead of scoring (first call only).
     max_lookup_requests: int = 0
     # Second call: the results of the judge's requested lookups.
-    requested_lookups: Sequence[LookupResult] | None = None
-    # Optional run-level evaluation guidance (D237); None -> prompt unchanged.
-    guidance: str | None = None
+    requested_lookups: Sequence[LookupTraceEntry] | None = None
+    # Optional run-level evaluation guidance (D237); None -> no guidance section.
+    guidance: EvaluationGuidance | None = None
+    # Every citable guidance id of the run (user items, METRIC:<id>, POLICY:<name>).
+    guidance_refs: dict[str, GuidanceRef] = field(default_factory=dict)
     # The scenario's capability (and why) for the goal-completion assessment (D243).
     capability: CapabilityClassification = CapabilityClassification.UNKNOWN
     capability_rationale: str | None = None
@@ -107,6 +132,23 @@ class GeneralJudgeInput:
     @property
     def reconciled(self) -> bool:
         return any(item.reconciliation is not None for item in self.sql)
+
+    def registry(self) -> EvidenceRegistry:
+        """Every evidence id this call may cite (the requested lookups only on the second call)."""
+        return build_registry(
+            self.response,
+            sql=[(item.structure, item.reconciliation) for item in self.sql],
+            tool_trace=self.tool_trace,
+            conversation=self.conversation,
+            lookups=[*self.catalog_lookups, *(self.requested_lookups or ())],
+        )
+
+    def assigned(self, metric_id: str) -> list[str]:
+        """The requirement ids the question's Metric Mapping assigns to a metric."""
+        mapping = self.question.context.metric_mapping.get(metric_id)
+        if mapping is None:
+            return []
+        return [*mapping.criteria, *mapping.reference_requirements]
 
     def undocumented_joins(self) -> list[str]:
         """``left = right`` of every undocumented join (the judge must decide each, D238)."""
@@ -175,8 +217,20 @@ def judge_example(
 ) -> dict[str, Any]:
     ids = [d.metric_id for d in definitions]
     metrics: dict[str, Any] = {}
-    for definition in definitions:
+    check = PROMPTS.data(
+        "check_example",
+        sources=choices(RequirementSource),
+        statuses=choices(RequirementStatus),
+    )
+    for position, definition in enumerate(definitions):
         example = score_example()
+        # The full check / guidance shape once; the other metrics point to it (shorter prompt).
+        example["checks"] = [check] if position == 0 else [PROMPTS.text("checks_as_above")]
+        example["guidance_applied"] = (
+            [PROMPTS.data("guidance_applied_example")]
+            if position == 0
+            else [PROMPTS.text("guidance_as_above")]
+        )
         if definition.asks_factual_verification:
             example["factual_verification"] = PROMPTS.text(
                 "factual_example", factual_values=choices(FactualVerification)
@@ -186,13 +240,6 @@ def judge_example(
     out.update(
         {
             "metrics": metrics,
-            "criteria": [
-                PROMPTS.data(
-                    "criterion_example",
-                    criterion_statuses=choices(CriterionStatus),
-                    metric_ids=choices([*ids, "null"]),
-                )
-            ],
             "findings": [_finding_example(ids, unresolved=unresolved_findings, guidance=guidance)],
             "goal_completion": PROMPTS.data("goal_example", statuses=choices(GoalStatus)),
             "overall_verdict": PROMPTS.text("verdict_example", verdicts=choices(Verdict)),
@@ -214,32 +261,23 @@ def _finding_example(ids: Sequence[str], *, unresolved: bool, guidance: bool) ->
 
 def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
     question = data.question
+    context = question.context
     definitions = list(data.definitions)
     expected = {
         "question": question.utterance,
         "conversation": [
             {
+                "evidence_id": f"TURN:{n}",
                 "role": t.role.value,
                 "kind": t.kind.value,
                 "message": t.message,
                 **({"options": list(t.options)} if t.options else {}),
             }
-            for t in data.conversation
+            for n, t in enumerate(data.conversation, start=1)
         ],
-        "expected_behavior": question.expectations.expected_behavior,
-        "success_criteria": question.expectations.success_criteria.general,
+        "success_criteria": [c.model_dump(mode="json") for c in context.success_criteria],
     }
     sections: list[str] = []
-    criteria = question.expectations.success_criteria
-    expectations = {
-        d.metric_id: value for d in definitions if (value := criteria.generated(d.metric_id))
-    }
-    if expectations:
-        sections.append(
-            PROMPTS.text(
-                "section_metric_expectations", expectations=json.dumps(expectations, indent=2)
-            )
-        )
     if data.pack is not None:
         sections.append(
             PROMPTS.text(
@@ -271,7 +309,10 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
         )
         sections.extend(_catalog_sections(data))
     if data.tool_trace is not None:
-        trace = [call.model_dump(mode="json") for call in data.tool_trace]
+        trace = [
+            {"evidence_id": f"TOOL:{call.order}", **call.model_dump(mode="json")}
+            for call in data.tool_trace
+        ]
         sections.append(
             PROMPTS.text(
                 "section_tool_trace",
@@ -295,6 +336,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
             data.product.model_dump(mode="json", include=PRODUCT_CONTRACT_FIELDS), indent=2
         ),
         expected=json.dumps(expected, indent=2),
+        mapping=json.dumps(_mapping_view(data), indent=2),
         sections="".join(sections),
         trace_catalog=json.dumps(
             [item.as_dict() for item in trace_catalog(question, data.pack)], indent=2
@@ -303,6 +345,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
         response=render_response(data.response, artifact_max_chars=data.artifact_max_chars),
         metric_rules=metric_blocks(marked),
         guidance=guidance_block(data.guidance),
+        builtin_guidance=json.dumps(builtin_listing(data.guidance_refs), indent=2),
         severity_rule=severity_rule(),
         goal_rule=PROMPTS.text(
             "goal_rule",
@@ -341,9 +384,37 @@ def _response_kind(response: EvaluableResponse) -> str:
     return PROMPTS.text("response_kind_typed", kind=kind, type=response.product_response_type)
 
 
+def _mapping_view(data: GeneralJudgeInput) -> dict[str, Any]:
+    """Each listed metric's evaluation contract, with the Reference Spec text of every
+    assigned requirement (so the judge never has to guess what an id means)."""
+    context = data.question.context
+    view: dict[str, Any] = {}
+    for definition in data.definitions:
+        mapping = context.metric_mapping.get(definition.metric_id)
+        if mapping is None:
+            view[definition.metric_id] = {"comparison_basis": definition.basis}
+            continue
+        entry: dict[str, Any] = {
+            "comparison_basis": mapping.comparison_basis,
+            "criteria": mapping.criteria,
+            "reference_requirements": [
+                {"id": r, "text": context.requirement_text(r)}
+                for r in mapping.reference_requirements
+            ],
+        }
+        if (value := context.generated(definition.metric_id)) is not None:
+            entry["question_specific_expectation"] = value
+        view[definition.metric_id] = entry
+    return view
+
+
 def _sql_view(index: int, item: SqlEvidence) -> dict[str, Any]:
     s = item.structure
-    view: dict[str, Any] = {"sql_artifact": index, "parsed": s.parsed}
+    view: dict[str, Any] = {
+        "sql_artifact": index,
+        "evidence_id": f"SQL:{index}",
+        "parsed": s.parsed,
+    }
     if s.diagnostics:
         view["diagnostics"] = s.diagnostics
     if not s.parsed:
@@ -359,13 +430,17 @@ def _sql_view(index: int, item: SqlEvidence) -> dict[str, Any]:
             ],
             "output_aliases": s.output_aliases,
             "functions": s.functions,
-            "joins": [j.model_dump(mode="json") for j in s.joins],
-            "filters": s.filters,
-            "projections": s.projections,
-            "aggregations": s.aggregations,
-            "group_by": s.group_by,
-            "order_by": s.order_by,
-            "limits": s.limits,
+            "joins": [
+                {"id": sql_clause_id(index, "JOIN", i), **j.model_dump(mode="json")}
+                for i, j in enumerate(s.joins, start=1)
+            ],
+            **{
+                attribute: [
+                    {"id": sql_clause_id(index, clause, i), "expr": expression}
+                    for i, expression in enumerate(getattr(s, attribute), start=1)
+                ]
+                for clause, attribute in SQL_CLAUSES
+            },
         }
     )
     return view
@@ -408,13 +483,16 @@ def _catalog_sections(data: GeneralJudgeInput) -> list[str]:
     return sections
 
 
-def _lookups(results: Sequence[LookupResult]) -> str:
-    """Lookup results as the judge sees them: nulls and empty lists dropped, and a found
-    column's table-level duplicates (table, description, provenance) shown once, in the column.
-    The stored lookup trace keeps the full results."""
+def _lookups(entries: Sequence[LookupTraceEntry]) -> str:
+    """Lookup results as the judge sees them, each with its evidence id: nulls and empty lists
+    dropped, and a found column's table-level duplicates (table, description, provenance) shown
+    once, in the column. The stored lookup trace keeps the full results."""
     views: list[dict[str, Any]] = []
-    for result in results:
-        view = _prune(result.model_dump(mode="json", exclude_none=True))
+    for entry in entries:
+        view = {
+            "evidence_id": entry.evidence_id,
+            **_prune(entry.result.model_dump(mode="json", exclude_none=True)),
+        }
         if isinstance(view.get("column"), dict):
             for key in ("table", "table_description", "provenance"):
                 view.pop(key, None)
@@ -431,7 +509,11 @@ def _prune(value: Any) -> Any:
 
 
 def _reconciliation_view(rec: ArtifactReconciliation) -> dict[str, Any]:
-    view: dict[str, Any] = {"sql_artifact": rec.artifact, "parsed": rec.parsed}
+    view: dict[str, Any] = {
+        "sql_artifact": rec.artifact,
+        "evidence_id": f"RECON:{rec.artifact}",
+        "parsed": rec.parsed,
+    }
     if not rec.parsed:
         view["note"] = (
             "parse failed: identifiers were not reconciled; judge the original SQL and treat "

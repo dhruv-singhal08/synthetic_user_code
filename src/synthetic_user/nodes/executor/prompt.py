@@ -49,7 +49,7 @@ def build_clarification_reply_prompt(
         },
         "original_question": question.utterance,
         "business_goal": scenario.business_goal,
-        "expected_behavior": question.expectations.expected_behavior,
+        "success_criteria": question.criteria_texts,
         "conversation": conversation,
         "available_scope": pack.render() if pack is not None else None,
     }

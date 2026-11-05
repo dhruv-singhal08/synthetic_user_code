@@ -42,10 +42,11 @@ from synthetic_user.models.reference import CatalogPackDraft, Reference, Referen
 from synthetic_user.models.run import GenerationMode
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+from synthetic_user.nodes.question.context import fixed_context
 from synthetic_user.references.loader import load_reference
 from synthetic_user.references.pack import build_pack
 from synthetic_user.web.results_csv import build_rows
-from tests_support import goal_for
+from tests_support import checks_for, failed_check, goal_for
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "references" / "sql_eval_catalog.yaml"
 SQL_METRICS = ("semantic_correctness", "schema_faithfulness", "rules_adherence")
@@ -108,13 +109,10 @@ def make_case(
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {
-                "expected_behavior": "SQL summing net LPC per billing month for 2025.",
-                "success_criteria": {
-                    "general": [CRITERION],
-                    "cheat_sheet": pack.model_dump(mode="json"),
-                },
-            },
+            # Every criterion mapped to every criteria metric; rules / schema mapped by code.
+            "evaluation_context": fixed_context(
+                [CRITERION], pack, builtin_metric_config(list(SQL_METRICS)).definitions
+            ).model_dump(mode="json", by_alias=True),
         }
     )
     return scenario, question, pack
@@ -143,17 +141,21 @@ def judge(
     scores: dict[str, float] | None = None,
     findings: list[dict[str, Any]] | None = None,
 ) -> Callable[[str, str], Reply]:
-    """A General Judge reply: every asked metric 1 unless overridden; criteria copied."""
+    """A General Judge reply: every asked metric 1 unless overridden; a passed check for every
+    requirement the contract assigns, plus a failed derived check for a score below 1."""
 
     def respond(system: str, user: str) -> Reply:
         metrics = {}
         for metric_id in asked_metrics(user):
-            metrics[metric_id] = {"score": (scores or {}).get(metric_id, 1), "rationale": "r"}
+            value = (scores or {}).get(metric_id, 1)
+            checks = checks_for(user, metric_id, evidence="SQL:1")
+            if value < 1:
+                checks.append(failed_check(metric_id, "SQL:1"))
+            metrics[metric_id] = {"score": value, "rationale": "r", "checks": checks}
             if metric_id == "correctness_completeness":
                 metrics[metric_id]["factual_verification"] = "unverified"
         reply: Reply = {
             "metrics": metrics,
-            "criteria": [{"criterion": CRITERION, "status": "met", "rationale": "ok"}],
             "findings": findings or [],
             "overall_verdict": "pass",
             "goal_completion": goal_for(user),
@@ -797,8 +799,10 @@ async def test_document_and_ungrounded_runs_have_no_catalog_step(
     scenario = scenario.model_copy(
         update={"mode": "ungrounded", "reference_id": None, "reference_pack_id": None}
     )
-    data = question.model_dump(mode="json")
-    data["expectations"]["success_criteria"]["cheat_sheet"] = None
+    data = question.model_dump(mode="json", by_alias=True)
+    data["evaluation_context"]["reference_spec"] = None
+    for mapping in data["evaluation_context"]["metric_mapping"].values():
+        mapping["reference_requirements"] = []
     question = QuestionCase.model_validate(
         {**data, "mode": "ungrounded", "reference_pack_id": None}
     )

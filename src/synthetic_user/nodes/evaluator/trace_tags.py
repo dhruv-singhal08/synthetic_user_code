@@ -1,24 +1,29 @@
 """Stable trace tags linking evaluation results to the question and its cheat sheet.
 
-Reporting aid only (never a validation gate). A failed criterion is linked to a finding when the
-General Judge assigned that criterion to the finding's metric (``metric_id``); older artifacts
-without that link fall back to keyword overlap between the finding and the criterion.
+Reporting aid only (never a validation gate). Success criteria are tagged with their own ids
+(C1, C2, ...) and Reference Spec items with the ids of ``reference_requirements`` (one scheme for
+the judge, the checks and the report). A finding is linked to the criteria whose check FAILED in
+the finding's metric; with several failed criteria, keyword overlap picks among them.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from synthetic_user.models.evaluation import (
-    CriterionResult,
-    CriterionStatus,
     EvaluationResult,
     Finding,
     FindingDraft,
+    RequirementStatus,
 )
-from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.question import (
+    QuestionCase,
+    ReferenceRequirementKind,
+    reference_requirements,
+)
 from synthetic_user.models.reference import ReferencePack
 
 
@@ -33,67 +38,31 @@ class TraceItem:
         return asdict(self)
 
 
-def criterion_tag(index: int) -> str:
-    return f"CRIT-{index:02d}"
+_LABELS = {
+    ReferenceRequirementKind.TABLE: ("table", "Allowed table"),
+    ReferenceRequirementKind.COLUMN: ("column", "Allowed column"),
+    ReferenceRequirementKind.TABLE_RULE: ("table_rule", "Table rule"),
+    ReferenceRequirementKind.JOIN: ("join", "Allowed join"),
+    ReferenceRequirementKind.RULE: ("rule", "Selected rule"),
+    ReferenceRequirementKind.DOCUMENT: ("document", "Reference document"),
+}
 
 
 def trace_catalog(question: QuestionCase, pack: ReferencePack | None) -> list[TraceItem]:
     """Return the stable, ordered tags visible to the judge and report UI."""
 
     items = [
-        TraceItem(criterion_tag(index), "criterion", "Expected criterion", criterion)
-        for index, criterion in enumerate(question.expectations.success_criteria.general, start=1)
+        TraceItem(c.id, "criterion", "Success criterion", c.requirement)
+        for c in (
+            question.evaluation_context.success_criteria if question.evaluation_context else []
+        )
     ]
     if pack is None:
         return items
-    for table_index, table in enumerate(pack.tables, start=1):
-        table_tag = f"TABLE-{table_index:02d}"
-        items.append(TraceItem(table_tag, "table", "Allowed table", table.name))
-        for column_index, column in enumerate(table.columns, start=1):
-            items.append(
-                TraceItem(
-                    f"COLUMN-{table_index:02d}.{column_index:02d}",
-                    "column",
-                    "Allowed column",
-                    f"{table.name}.{column.name}",
-                )
-            )
-        for rule_index, table_rule in enumerate(table.rules, start=1):
-            items.append(
-                TraceItem(
-                    f"TABLE-RULE-{table_index:02d}.{rule_index:02d}",
-                    "table_rule",
-                    "Table rule",
-                    table_rule,
-                )
-            )
-    for join_index, join in enumerate(pack.joins, start=1):
-        items.append(
-            TraceItem(
-                f"JOIN-{join_index:02d}",
-                "join",
-                "Allowed join",
-                f"{join.from_} -> {join.to} ({'verified' if join.verified else 'not verified'})",
-            )
-        )
-    for selected_rule in pack.rules:
-        items.append(
-            TraceItem(
-                f"RULE-{selected_rule.id}",
-                "rule",
-                "Selected rule",
-                selected_rule.rule,
-            )
-        )
-    for document_index, document in enumerate(pack.documents, start=1):
-        items.append(
-            TraceItem(
-                f"DOCUMENT-{document_index:02d}",
-                "document",
-                "Reference document",
-                document.name,
-            )
-        )
+    for requirement in reference_requirements(pack):
+        if requirement.kind in _LABELS:
+            kind, label = _LABELS[requirement.kind]
+            items.append(TraceItem(requirement.id, kind, label, requirement.text))
     return items
 
 
@@ -151,8 +120,9 @@ def link_finding_tags(
     finding: FindingDraft | Finding,
     question: QuestionCase,
     pack: ReferencePack | None,
-    criteria_results: list[CriterionResult],
+    failed_criteria: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
+    """``failed_criteria`` = metric id -> the criterion ids whose check failed in it."""
     """Link a finding to trace items using exact names and conservative semantic overlap."""
 
     text = " ".join(
@@ -167,28 +137,25 @@ def link_finding_tags(
         )
     )
     linked: set[str] = set()
-    failed_criteria = [
-        result
-        for result in criteria_results
-        if result.status in {CriterionStatus.PARTLY, CriterionStatus.NOT_MET}
-        and result.metric_id in (None, finding.category)
+    context = question.evaluation_context
+    failed = [
+        c
+        for c in (failed_criteria or {}).get(finding.category, [])
+        if context is not None and context.criterion(c) is not None
     ]
-    if failed_criteria:
-        if len(failed_criteria) == 1:
-            linked.add(failed_criteria[0].tag or "")
+    if failed and context is not None:
+        if len(failed) == 1:
+            linked.add(failed[0])
         else:
             finding_words = _keywords(text)
             scores = [
-                (
-                    len(finding_words & _keywords(f"{result.criterion} {result.rationale}")),
-                    result,
-                )
-                for result in failed_criteria
+                (len(finding_words & _keywords(context.requirement_text(c) or "")), c)
+                for c in failed
             ]
             best = max((score for score, _ in scores), default=0)
-            for score, result in scores:
+            for score, criterion_id in scores:
                 if score == best and score >= 2:
-                    linked.add(result.tag or "")
+                    linked.add(criterion_id)
 
     catalog = trace_catalog(question, pack)
     if pack is not None:
@@ -247,16 +214,13 @@ def attach_trace_links(
 ) -> EvaluationResult:
     """Add deterministic tags to a stored result, including historical run artifacts."""
 
-    criteria = [
-        result.model_copy(update={"tag": result.tag or criterion_tag(index)})
-        for index, result in enumerate(evaluation.criteria_results, start=1)
-    ]
+    failed = failed_criteria_by_metric(evaluation)
     findings = [
         finding.model_copy(
             update={
                 "related_tags": merge_finding_tags(
                     finding.related_tags,
-                    link_finding_tags(finding, question, pack, criteria),
+                    link_finding_tags(finding, question, pack, failed),
                     question,
                     pack,
                 )
@@ -264,7 +228,18 @@ def attach_trace_links(
         )
         for finding in evaluation.findings
     ]
-    return evaluation.model_copy(update={"criteria_results": criteria, "findings": findings})
+    return evaluation.model_copy(update={"findings": findings})
+
+
+def failed_criteria_by_metric(evaluation: EvaluationResult) -> dict[str, list[str]]:
+    return {
+        metric_id: [
+            c.requirement_id
+            for c in result.checks
+            if c.status is RequirementStatus.FAILED and c.requirement_id.startswith("C")
+        ]
+        for metric_id, result in evaluation.metrics.items()
+    }
 
 
 def _mentions_identifier(text: str, name: str) -> bool:

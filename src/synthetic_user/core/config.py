@@ -248,7 +248,7 @@ class QuestionGenerationSettings(_Section):
     # Hard policy: persona preferences can shape a question only inside these limits.
     max_deliverables: int = Field(default=2, ge=1, le=MAX_DELIVERABLES)
     max_sources: int = Field(default=1, ge=0, le=2)
-    max_success_criteria: int = Field(default=2, ge=1, le=MAX_SUCCESS_CRITERIA)
+    max_success_criteria: int = Field(default=6, ge=1, le=MAX_SUCCESS_CRITERIA)
     max_words: int = Field(default=40, ge=5, le=200)
     allowed_complexities: list[QuestionComplexity] = Field(
         default_factory=lambda: [QuestionComplexity.SIMPLE, QuestionComplexity.MEDIUM],

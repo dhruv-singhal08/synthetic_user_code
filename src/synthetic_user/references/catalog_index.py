@@ -317,18 +317,26 @@ class LookupSession:
         self.index = index
         self.trace: list[LookupTraceEntry] = []
 
-    def run(self, request: LookupRequest, origin: LookupOrigin) -> LookupResult:
+    def run(self, request: LookupRequest, origin: LookupOrigin) -> LookupTraceEntry:
+        """Run one lookup and trace it with its evidence id (LOOKUP:<n>, in trace order) and
+        round (0 = precomputed by code, 1 = the judge's requested batch)."""
         result, cached = self.index.run(request)
-        self.trace.append(
-            LookupTraceEntry(origin=origin, request=request, result=result, cached=cached)
+        entry = LookupTraceEntry(
+            origin=origin,
+            request=request,
+            result=result,
+            cached=cached,
+            evidence_id=f"LOOKUP:{len(self.trace) + 1}",
+            round=0 if origin is LookupOrigin.DETERMINISTIC else 1,
         )
-        return result
+        self.trace.append(entry)
+        return entry
 
     def run_all(
         self, requests: Sequence[LookupRequest], origin: LookupOrigin
-    ) -> list[LookupResult]:
+    ) -> list[LookupTraceEntry]:
         """Run a batch once each (duplicate requests in the batch are answered once)."""
-        done: dict[str, LookupResult] = {}
+        done: dict[str, LookupTraceEntry] = {}
         for request in requests:
             key = request.key()
             if key not in done:

@@ -22,6 +22,7 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import CapabilityClassification, Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+from tests_support import failed_check
 
 DENIAL = {"outcome": "denied", "message": "This request is unsupported."}
 ANSWER = {"outcome": "answered", "text": "Spend for tenant DUMMY: 120 USD in Q1."}
@@ -241,7 +242,7 @@ async def test_exempted_difference_never_fails_and_is_named_in_the_reason(
         "tenant DUMMY",
         severity="critical",
         description="The answer is not filtered to the requested tenant.",
-        exempted_by="Do not penalize the environment-specific tenant DUMMY filter.",
+        exempted_by="G1",
     )
     reply = _reply(
         {"status": "completed", "reason": "r"},
@@ -261,7 +262,10 @@ async def test_exempted_difference_never_fails_and_is_named_in_the_reason(
     assert len(llm.calls) == 1  # no additional LLM call
     assert '"exempted_by"' in llm.calls[0].user  # offered only when the run has guidance
     assert result.verdict is Verdict.PASS and not result.bug_candidates
-    assert result.findings[0].exempted_by == GUIDANCE
+    assert result.findings[0].exempted_by == GUIDANCE  # the id resolved to its exact text
+    assert result.findings[0].exempted_by_id == "G1"
+    guidance = [g.guidance_id for g in result.metrics["relevance"].guidance_applied]
+    assert guidance == ["METRIC:relevance", "G1"]
     assert result.verdict_reason == (
         "Passed: every scored metric met its expectations. Exceptions applied (evaluation "
         "guidance): Do not penalize the environment-specific tenant DUMMY filter - The answer "
@@ -272,8 +276,8 @@ async def test_exempted_difference_never_fails_and_is_named_in_the_reason(
 @pytest.mark.parametrize(
     ("guidance", "exempted_by", "relevance", "feedback"),
     [
-        (GUIDANCE, GUIDANCE, 0.5, "its only findings are exempted"),
-        (GUIDANCE, "Ignore every filter.", 1, "exact text of an approved exception"),
+        (GUIDANCE, "G1", 0.5, "its only findings are exempted"),
+        (GUIDANCE, "Ignore every filter.", 1, "must be the id of an evaluation guidance item"),
         (None, "Ignore every filter.", 1, "exempted_by must be null"),
     ],
 )
@@ -291,7 +295,11 @@ async def test_exemptions_are_checked(
     bad = _reply(
         {"status": "completed", "reason": "r"},
         response_classification="answered",
-        metrics={"relevance": score(relevance)},
+        metrics={
+            "relevance": score(
+                relevance, checks=[failed_check("relevance")] if relevance < 1 else []
+            )
+        },
         findings=[finding("relevance", "tenant DUMMY", exempted_by=exempted_by)],
     )
     good = _reply({"status": "completed", "reason": "r"}, response_classification="answered")
@@ -318,9 +326,9 @@ async def test_a_genuine_violation_next_to_an_exception_still_fails(
     reply = _reply(
         {"status": "completed", "reason": "r"},
         response_classification="answered",
-        metrics={"relevance": score(0.5)},
+        metrics={"relevance": score(0.5, checks=[failed_check("relevance")])},
         findings=[
-            finding("relevance", "tenant DUMMY", exempted_by=GUIDANCE),
+            finding("relevance", "tenant DUMMY", exempted_by="G1"),
             finding("relevance", "in Q1", description="Only Q1 is answered."),
         ],
     )

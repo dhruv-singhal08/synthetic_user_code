@@ -1,6 +1,7 @@
 """Assemble the Retrieval/Grounding Judge prompt; the text itself is in ``retrieval_prompt.yaml``.
 
-The judge sees the question, its expectations, the answer, the normalized ranked chunks, the
+The judge sees the question, its success criteria and the question-specific expectations of
+its metrics, the answer, the normalized ranked chunks, the
 exposed citations (with their resolution) and tool results - never the whole reference.
 """
 
@@ -16,6 +17,7 @@ from synthetic_user.models.execution import RetrievedContext, ToolCall
 from synthetic_user.models.metrics import EvidenceKind, MetricDefinition
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.run import EvaluationGuidance
 from synthetic_user.nodes.evaluator.judge_common import (
     EvaluableResponse,
     bounded,
@@ -46,8 +48,8 @@ class RetrievalJudgeInput:
     context: RetrievedContext
     tool_trace: Sequence[ToolCall] | None
     artifact_max_chars: int
-    # Optional run-level evaluation guidance (D237); None -> prompt unchanged.
-    guidance: str | None = None
+    # Optional run-level evaluation guidance (D237); None -> no guidance section.
+    guidance: EvaluationGuidance | None = None
 
     def checklist(self) -> list[str]:
         """The required-information items of the judged metrics (empty when none)."""
@@ -60,7 +62,7 @@ class RetrievalJudgeInput:
         return list(dict.fromkeys(items))
 
     def generated(self, metric_id: str) -> dict[str, Any] | None:
-        return self.question.expectations.success_criteria.generated(metric_id)
+        return self.question.context.generated(metric_id)
 
     @property
     def checks_citations(self) -> bool:
@@ -134,8 +136,7 @@ def build_retrieval_prompt(data: RetrievalJudgeInput) -> tuple[str, str]:
     question = data.question
     expected = {
         "question": question.utterance,
-        "expected_behavior": question.expectations.expected_behavior,
-        "success_criteria": question.expectations.success_criteria.general,
+        "success_criteria": [c.model_dump(mode="json") for c in question.context.success_criteria],
     }
     user = PROMPTS.text(
         "user",

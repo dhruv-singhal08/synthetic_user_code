@@ -20,14 +20,11 @@ from synthetic_user.models.base import NonEmptyStr, StrictModel, find_duplicates
 
 METRIC_ID_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
 EXPECTATION_FIELD_PATTERN = r"^[a-z][a-z0-9_]{1,63}$"
-# Keys of a question's success_criteria that are not metric ids (D240): a metric never takes
-# one of these ids, so every other key of success_criteria is a metric id.
-GENERAL_CRITERIA_KEY = "general"
-CHEAT_SHEET_KEY = "cheat_sheet"
 # The category of the finding made from the General Judge's goal-completion assessment (D243):
-# not a metric, so a metric never takes this id either.
+# not a metric, so a metric never takes this id. "general" / "cheat_sheet" were success_criteria
+# keys of the D240 contract and stay reserved so stored metric configurations keep their meaning.
 GOAL_COMPLETION_CATEGORY = "goal_completion"
-RESERVED_METRIC_IDS = frozenset({GENERAL_CRITERIA_KEY, CHEAT_SHEET_KEY, GOAL_COMPLETION_CATEGORY})
+RESERVED_METRIC_IDS = frozenset({"general", "cheat_sheet", GOAL_COMPLETION_CATEGORY})
 # The 0 / 0.5 / 1 scale shared by every judged metric.
 JUDGED_SCALE = (0.0, 0.5, 1.0)
 METRIC_CONFIG_SCHEMA_VERSION = 1
@@ -161,6 +158,12 @@ class MetricDefinition(StrictModel):
     asks_factual_verification: bool = False
     # Whether the provisional verdict policy reads this metric.
     counts_toward_verdict: bool = True
+    # Evaluation Context (reforming): what the metric compares, how it is verified and whether
+    # the question's Success Criteria are mapped to it. None = derived from the evidence the
+    # metric needs (custom metrics and metric configurations frozen before these fields).
+    comparison_basis: NonEmptyStr | None = None
+    verification_method: NonEmptyStr | None = None
+    uses_success_criteria: bool | None = None
     availability: MetricAvailability = MetricAvailability.AVAILABLE
     unavailable_reason: NonEmptyStr | None = None
     # Custom metrics: the user's exact words and where they came from (text / workbook row).
@@ -209,6 +212,46 @@ class MetricDefinition(StrictModel):
         if EvidenceKind.SQL not in evidence:
             return EvaluationTarget.NON_SQL
         return EvaluationTarget.BOTH if evidence - {EvidenceKind.SQL} else EvaluationTarget.SQL
+
+    @property
+    def maps_criteria(self) -> bool:
+        """The question's Success Criteria are mapped to this metric (Metric Mapping). Default:
+        every General Judge metric (custom ones included); retrieval metrics judge chunks."""
+        if self.uses_success_criteria is not None:
+            return self.uses_success_criteria
+        return self.judge_group is JudgeGroup.GENERAL
+
+    @property
+    def basis(self) -> str:
+        """The comparison basis, from the catalog or derived from the evidence it needs."""
+        if self.comparison_basis is not None:
+            return self.comparison_basis
+        if self.judge_group is JudgeGroup.RETRIEVAL_GROUNDING:
+            return "criteria_vs_retrieved_context"
+        return _DERIVED_BASIS[self.evaluation_target]
+
+    @property
+    def method(self) -> str:
+        """How the metric is verified, from the catalog or derived from its evidence."""
+        if self.verification_method is not None:
+            return self.verification_method
+        if self.judge_group is JudgeGroup.RETRIEVAL_GROUNDING:
+            return "retrieved_context_review"
+        return _DERIVED_METHOD[self.evaluation_target]
+
+
+_DERIVED_BASIS = {
+    EvaluationTarget.SQL: "criteria_vs_sql",
+    EvaluationTarget.BOTH: "criteria_vs_response_and_sql",
+    EvaluationTarget.NON_SQL: "criteria_vs_response",
+    EvaluationTarget.UNKNOWN: "criteria_vs_response",
+}
+_DERIVED_METHOD = {
+    EvaluationTarget.SQL: "static_sql_analysis",
+    EvaluationTarget.BOTH: "response_review_and_static_sql_analysis",
+    EvaluationTarget.NON_SQL: "response_review",
+    EvaluationTarget.UNKNOWN: "response_review",
+}
 
 
 class CustomMetricInput(StrictModel):

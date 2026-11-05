@@ -94,7 +94,11 @@ def _q(utterance: str) -> dict[str, Any]:
         "plan": {"deliverables": [{"action": "rank", "subject": "employees by card spend"}]},
         "intent": {"task_type": "ranking"},
         "question_characteristics": {"style": "precise", "ambiguity_level": "low"},
-        "expectations": {"expected_behavior": "answers", "success_criteria": ["answers"]},
+        "evaluation_context": {
+            "success_criteria": [{"id": "C1", "requirement": "answers"}],
+            # every selected criteria metric gets a mapping (code maps the others)
+            "metric_mapping": {m: {"criteria": ["C1"]} for m in TEST_METRICS},
+        },
     }
 
 

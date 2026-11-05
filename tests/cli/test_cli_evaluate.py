@@ -21,6 +21,7 @@ from synthetic_user.models.run import GenerationMode, RunManifest
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact, save_run_manifest
+from tests_support import evaluation_context, pack_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID = "RUN_20261013_120000_abcd"
@@ -57,37 +58,37 @@ def config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-def _questions(scenarios: list[Scenario], pack: ReferencePack | None = None) -> list[QuestionCase]:
-    """Grounded questions; ``pack`` is the cheat sheet copied into success_criteria (D240)."""
+def _question_dicts(
+    scenarios: list[Scenario], pack: ReferencePack | None = None
+) -> list[dict[str, Any]]:
+    """Grounded questions; ``pack`` is the Reference Spec of their Evaluation Context."""
     return [
-        QuestionCase.model_validate(
-            {
-                "question_id": f"Q_00{i}",
-                "scenario_id": scenarios[0].id,
-                "persona_id": "finance_controller",
-                "mode": "grounded",
-                "reference_pack_id": scenarios[0].reference_pack_id,
-                "utterance": text,
-                "intended_goal": scenarios[0].business_goal,
-                "intent": {"task_type": "ranking"},
-                "question_characteristics": {
-                    "style": "precise",
-                    "ambiguity_level": "low",
-                    "complexity": "simple",
-                },
-                "expectations": {
-                    "expected_behavior": "Return a query ranking the top spenders.",
-                    "success_criteria": {
-                        "general": ["names the top spenders"],
-                        "cheat_sheet": pack.model_dump(mode="json") if pack else None,
-                    },
-                },
-            }
-        )
+        {
+            "question_id": f"Q_00{i}",
+            "scenario_id": scenarios[0].id,
+            "persona_id": "finance_controller",
+            "mode": "grounded",
+            "reference_pack_id": scenarios[0].reference_pack_id,
+            "utterance": text,
+            "intended_goal": scenarios[0].business_goal,
+            "intent": {"task_type": "ranking"},
+            "question_characteristics": {
+                "style": "precise",
+                "ambiguity_level": "low",
+                "complexity": "simple",
+            },
+            "evaluation_context": evaluation_context(
+                ["names the top spenders"], reference_spec=pack_spec(pack) if pack else None
+            ),
+        }
         for i, text in enumerate(
             ["Top card spenders?", "Biggest spenders by currency?", "Unasked"], 1
         )
     ]
+
+
+def _questions(scenarios: list[Scenario], pack: ReferencePack | None = None) -> list[QuestionCase]:
+    return [QuestionCase.model_validate(q) for q in _question_dicts(scenarios, pack)]
 
 
 def _executions() -> list[ExecutionRecord]:
@@ -215,7 +216,7 @@ def test_grounded_question_without_its_cheat_sheet_is_refused(
     _llm(monkeypatch, judge)
     q = _write(
         tmp_path / "questions.json",
-        [x.model_dump(mode="json") for x in _questions(sample_scenarios)],
+        _question_dicts(sample_scenarios),  # grounded, without its Reference Spec
     )
     e = _write(
         tmp_path / "executions.json",
@@ -232,7 +233,7 @@ def test_grounded_question_without_its_cheat_sheet_is_refused(
         ],
     )
     assert result.exit_code == 1
-    assert "success_criteria has no cheat_sheet" in result.output
+    assert "does not match reference pack" in result.output
 
 
 def test_evaluate_run_mode_updates_manifest(

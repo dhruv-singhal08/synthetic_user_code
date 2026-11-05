@@ -4,11 +4,16 @@ Scenarios without an accepted question still get one row (question columns blank
 evaluation uses is shown (design v3); the full detail stays in the JSON artifacts.
 
 Cell format (readable in Excel): a cell holding several items lists them as bullet points,
-one per line ("• item"); a single item is written as is. success_criteria is one JSON cell
-(D240). Each selected metric has three
-columns: ``<id>`` (score 0..1, or empty when not scored), ``<id>_status`` (scored /
-not_applicable / cannot_generate / evidence_unavailable / inconclusive / evaluation_error /
-unavailable) and ``<id>_reason``. Metric columns follow the run's frozen metric selection
+one per line ("• item"); a single item is written as is. The question's Evaluation Context is
+three cells: success_criteria ("C1: ..."), reference_spec (the pack id and its requirement ids)
+and metric_mapping (JSON); a legacy question shows its stored expectations instead. Each
+selected metric has six columns: ``<id>`` (score 0..1, or empty when not scored),
+``<id>_status`` (scored / not_applicable / cannot_generate / evidence_unavailable /
+inconclusive / evaluation_error / unavailable), ``<id>_reason``, ``<id>_checks`` (one line per
+check-level decision with its evidence ids), ``<id>_coverage`` (counts, comparison basis and
+verification method) and ``<id>_guidance`` (the guidance applied and how it influenced the
+decision). The verdict columns add the failed / unresolved requirements, the lookups and the
+evaluation's limitations. Metric columns follow the run's frozen metric selection
 (legacy runs: the metric ids their evaluations recorded).
 """
 
@@ -33,12 +38,7 @@ from synthetic_user.models.execution import (
     ExecutionRecord,
     ResponseArtifact,
 )
-from synthetic_user.models.metrics import CHEAT_SHEET_KEY, GENERAL_CRITERIA_KEY
-from synthetic_user.models.question import (
-    MetricExpectationStatus,
-    QuestionCase,
-    SuccessCriteria,
-)
+from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import ReferencePack, render_join
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
@@ -46,10 +46,14 @@ from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 BULLET = "• "
 
 SCENARIO_COLUMNS = ["scenario_id", "mode", "scenario_title", "business_goal", "capability"]
-# success_criteria is ONE structured (JSON) cell (D240): "general" (the question's criteria),
-# one key per metric with a question-specific expectation and "cheat_sheet" (the scenario's
-# tables (with columns) or documents, and its joins and rules).
-QUESTION_COLUMNS = ["question_id", "question", "expected_behavior", "success_criteria"]
+# The question's Evaluation Context (reforming, Part 4): criteria, Reference Spec, Metric Mapping.
+QUESTION_COLUMNS = [
+    "question_id",
+    "question",
+    "success_criteria",
+    "reference_spec",
+    "metric_mapping",
+]
 EXECUTION_COLUMNS = [
     "product_outcome",
     "product_response_type",  # the product's own type, as returned (D242)
@@ -65,13 +69,18 @@ VERDICT_COLUMNS = [
     "final_verdict",
     "verdict_reason",
     "goal_completion",  # the General Judge's independent goal check (D243)
+    "failed_requirements",
+    "unresolved_requirements",
+    "evidence_lookups",
+    "limitations",
     "bug_ids",
     "evaluation_notes",
 ]
+METRIC_SUFFIXES = ("_status", "_reason", "_checks", "_coverage", "_guidance")
 
 
 def metric_columns(metric_ids: Sequence[str]) -> list[str]:
-    return [col for m in metric_ids for col in (m, f"{m}_status", f"{m}_reason")]
+    return [col for m in metric_ids for col in (m, *(f"{m}{s}" for s in METRIC_SUFFIXES))]
 
 
 def columns_for(metric_ids: Sequence[str]) -> list[str]:
@@ -117,8 +126,8 @@ def build_rows(
         scenario_questions = [q for q in questions if q.scenario_id == scenario.id]
         if not scenario_questions:
             # Before questions exist the row still shows the scenario's cheat sheet.
-            cheat_sheet = {CHEAT_SHEET_KEY: _pack_view(pack)} if pack is not None else {}
-            rows.append(_complete({**base, "success_criteria": _json(cheat_sheet)}, columns))
+            spec = _json(_pack_view(pack)) if pack is not None else ""
+            rows.append(_complete({**base, "reference_spec": spec}, columns))
             continue
         for question in scenario_questions:
             row = {**base, **_question_cells(question)}
@@ -168,18 +177,21 @@ def _pack_view(pack: ReferencePack) -> dict[str, list[str]]:
     return {"items": items, "rules": rules}
 
 
-def _criteria_view(criteria: SuccessCriteria) -> dict[str, Any]:
-    """The structured success_criteria as shown: a generated metric expectation shows its value,
-    any other its status and reason; the cheat sheet shows its items and rules."""
-    view: dict[str, Any] = {GENERAL_CRITERIA_KEY: list(criteria.general)}
-    for metric_id, x in criteria.metrics.items():
-        view[metric_id] = (
-            x.value
-            if x.status is MetricExpectationStatus.GENERATED
-            else {"status": x.status.value, "reason": x.reason}
-        )
-    if criteria.cheat_sheet is not None:
-        view[CHEAT_SHEET_KEY] = _pack_view(criteria.cheat_sheet)
+def _mapping_view(q: QuestionCase) -> dict[str, Any]:
+    """Each metric's mapping as shown: criteria, reference requirements, comparison basis and
+    the question-specific expectation (its value when generated, else its status and reason)."""
+    view: dict[str, Any] = {}
+    for metric_id, m in q.context.metric_mapping.items():
+        entry: dict[str, Any] = {
+            "criteria": m.criteria,
+            "reference_requirements": m.reference_requirements,
+            "comparison_basis": m.comparison_basis,
+        }
+        if (x := m.expectation) is not None:
+            entry["expectation"] = (
+                x.value if x.value is not None else {"status": x.status.value, "reason": x.reason}
+            )
+        view[metric_id] = entry
     return view
 
 
@@ -188,12 +200,29 @@ def _json(value: dict[str, Any]) -> str:
 
 
 def _question_cells(q: QuestionCase) -> dict[str, str]:
-    e = q.expectations
+    if q.evaluation_context is None:  # legacy question: display only
+        return {
+            "question_id": q.question_id,
+            "question": q.utterance,
+            "success_criteria": _json({"legacy_expectations": q.legacy_expectations}),
+        }
+    context = q.evaluation_context
+    spec = context.reference_spec
     return {
         "question_id": q.question_id,
         "question": q.utterance,
-        "expected_behavior": e.expected_behavior,
-        "success_criteria": _json(_criteria_view(e.success_criteria)),
+        "success_criteria": bullets([f"{c.id}: {c.requirement}" for c in context.success_criteria]),
+        "reference_spec": _json(
+            {
+                "pack_id": spec.pack_id,
+                "reference_id": spec.reference_id,
+                "requirements": [f"{r.id}: {r.text}" for r in spec.requirements()],
+                **_pack_view(spec.pack),
+            }
+        )
+        if spec is not None
+        else "",
+        "metric_mapping": _json(_mapping_view(q)),
     }
 
 
@@ -255,10 +284,31 @@ def _metric_cells(ev: EvaluationResult, metric_id: str) -> dict[str, str]:
         reason = f"{reason} - '{result.evidence}'"
     if result.missing_requirement and result.status is not MetricStatus.SCORED:
         reason = f"{reason} (missing: {result.missing_requirement})"
+    coverage = result.coverage
     return {
         metric_id: f"{result.score:g}" if result.score is not None else "",
         f"{metric_id}_status": result.status.value,
         f"{metric_id}_reason": reason,
+        f"{metric_id}_checks": bullets(
+            [
+                f"{c.check_id} {c.requirement_id} {c.status.value}"
+                + (f" [{', '.join(c.observed_evidence_ids)}]" if c.observed_evidence_ids else "")
+                + f": {c.reason}"
+                for c in result.checks
+            ]
+        ),
+        f"{metric_id}_coverage": (
+            f"assigned {coverage.assigned}, evaluated {coverage.evaluated}, passed "
+            f"{coverage.passed}, failed {coverage.failed}, not applicable "
+            f"{coverage.not_applicable}, unresolved {coverage.unresolved}, derived "
+            f"{coverage.derived}; basis {result.comparison_basis}; method "
+            f"{result.verification_method}"
+            if coverage is not None
+            else ""
+        ),
+        f"{metric_id}_guidance": bullets(
+            [f"{g.guidance_id} ({g.guidance_type}): {g.influence}" for g in result.guidance_applied]
+        ),
     }
 
 
@@ -291,9 +341,26 @@ def _evaluation_cells(ev: EvaluationResult, metric_ids: Sequence[str]) -> dict[s
             if ev.goal_completion is not None
             else ""
         ),
+        "failed_requirements": bullets(ev.failed_requirements),
+        "unresolved_requirements": bullets(ev.unresolved_requirements),
+        "evidence_lookups": _lookups_cell(ev),
+        "limitations": bullets(ev.limitations),
         "bug_ids": bullets([b.bug_id for b in ev.bug_candidates]),
         "evaluation_notes": bullets(list(ev.notes)),
     }
     for metric_id in metric_ids:
         cells.update(_metric_cells(ev, metric_id))
     return cells
+
+
+def _lookups_cell(ev: EvaluationResult) -> str:
+    record = ev.reference_checks
+    if record is None:
+        return ""
+    lines = [
+        f"{e.evidence_id or '-'} round {e.round} {e.request.tool.value}: {e.status}"
+        + (" (used)" if e.used_in_judgment else "")
+        for e in record.lookup_trace
+    ]
+    head = f"additional_lookup_performed = {str(bool(record.additional_lookup_performed)).lower()}"
+    return bullets([head, *lines])

@@ -23,11 +23,17 @@ from synthetic_user.models.evaluation import (
     RetrievalJudgeDraft,
 )
 from synthetic_user.models.execution import AnsweredResponse, RetrievedChunk, RetrievedContext
-from synthetic_user.models.question import MetricExpectationDraft, QuestionBatchDraft, QuestionCase
+from synthetic_user.models.question import (
+    MetricExpectationDraft,
+    MetricMappingDraft,
+    QuestionBatchDraft,
+    QuestionCase,
+)
 from synthetic_user.models.reference import CatalogPackDraft, DocumentPackDraft, ReferenceKind
 from synthetic_user.models.scenario import ScenarioBatchDraft
 from synthetic_user.nodes.evaluator.general_prompt import judge_example
 from synthetic_user.nodes.evaluator.retrieval_prompt import RetrievalJudgeInput, retrieval_example
+from synthetic_user.nodes.question.context import ContextRequest
 from synthetic_user.nodes.question.prompt import question_example
 from synthetic_user.nodes.scenario.prompt import scenario_example
 from synthetic_user.prompts.contracts import render_contract
@@ -75,23 +81,37 @@ def test_scenario_example_matches_the_model(kind: ReferenceKind | None) -> None:
         _assert_matches(scenario["reference_pack"], DocumentPackDraft, "pack")
 
 
-QUESTION_EXAMPLE = question_example(())
+QUESTION_EXAMPLE = question_example(ContextRequest())
 GENERAL = [d for d in builtin_definitions() if d.judge_group == "general"]
 
 
 def test_question_example_matches_the_model() -> None:
     _assert_matches(QUESTION_EXAMPLE, QuestionBatchDraft, "questions")
-    assert QUESTION_EXAMPLE["questions"][0]["expectations"]["metric_expectations"] == {}
+    context = QUESTION_EXAMPLE["questions"][0]["evaluation_context"]
+    assert context["metric_mapping"] == {}
+    assert context["success_criteria"][0]["id"] == "C1"
 
 
-def test_question_example_lists_only_metrics_that_need_expectations() -> None:
-    config = builtin_metric_config(["relevance", "context_recall", "tool_correctness"])
-    needing = [d for d in config.definitions if d.needs_expectations]
-    example = question_example(needing)
-    entries = example["questions"][0]["expectations"]["metric_expectations"]
-    assert sorted(entries) == ["context_recall", "tool_correctness"]
-    _assert_matches(entries["tool_correctness"], MetricExpectationDraft, "expectation")
-    assert set(entries["tool_correctness"]["value"]) == {
+def test_question_example_maps_criteria_metrics_and_expectation_metrics() -> None:
+    config = builtin_metric_config(
+        ["relevance", "context_recall", "tool_correctness", "schema_faithfulness"]
+    )
+    by_id = {d.metric_id: d for d in config.definitions}
+    request = ContextRequest(
+        selected=list(config.definitions),
+        criteria_metrics=[by_id["relevance"], by_id["tool_correctness"]],
+        requested=[by_id["context_recall"], by_id["tool_correctness"]],
+    )
+    example = question_example(request)
+    entries = example["questions"][0]["evaluation_context"]["metric_mapping"]
+    # schema_faithfulness takes no criteria and no expectation: code maps it
+    assert list(entries) == ["relevance", "context_recall", "tool_correctness"]
+    assert entries["relevance"]["expectation"] is None and entries["relevance"]["criteria"]
+    assert entries["context_recall"]["criteria"] == []
+    _assert_matches(entries["tool_correctness"], MetricMappingDraft, "mapping")
+    expectation = entries["tool_correctness"]["expectation"]
+    _assert_matches(expectation, MetricExpectationDraft, "expectation")
+    assert set(expectation["value"]) == {
         "expected_tools",
         "expected_data_sources",
         "expected_arguments",
@@ -101,7 +121,7 @@ def test_question_example_lists_only_metrics_that_need_expectations() -> None:
 @pytest.mark.parametrize("classify", [True, False])
 def test_general_judge_example_matches_the_model(classify: bool) -> None:
     example = judge_example(GENERAL, needs_classification=classify)
-    expected = {"metrics", "criteria", "findings", "goal_completion", "overall_verdict"}
+    expected = {"metrics", "findings", "goal_completion", "overall_verdict"}
     if classify:
         expected |= {"response_classification", "classification_note"}
     assert set(example) == expected
@@ -154,14 +174,16 @@ def _question() -> QuestionCase:
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {
-                "expected_behavior": "Compare both months.",
-                "success_criteria": {
-                    "general": ["covers both months"],
+            "evaluation_context": {
+                "success_criteria": [{"id": "C1", "requirement": "covers both months"}],
+                "metric_mapping": {
                     "context_recall": {
-                        "status": "generated",
-                        "value": {"required_information": ["January", "February"]},
-                    },
+                        "comparison_basis": "required_information_vs_chunks",
+                        "expectation": {
+                            "status": "generated",
+                            "value": {"required_information": ["January", "February"]},
+                        },
+                    }
                 },
             },
         }
@@ -211,5 +233,6 @@ def test_compiler_example_matches_the_model() -> None:
 )
 def test_contracts_stay_short(example: dict[str, Any]) -> None:
     contract = render_contract(example)
-    assert len(contract.splitlines()) < 130  # + goal_completion (D243)
+    # + goal_completion (D243), + check-level decisions shown once (reforming)
+    assert len(contract.splitlines()) < 180  # six general metrics in this example
     assert "$defs" not in contract and json.loads(contract.split("\n", 1)[1]) == example

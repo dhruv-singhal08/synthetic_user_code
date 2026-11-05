@@ -46,7 +46,7 @@ from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON
 from synthetic_user.nodes.evaluator.retrieval_judge import reciprocal_rank
 from synthetic_user.nodes.evaluator.verdict import SeverityVerdictPolicy
-from tests_support import scripted_retrieval_reply
+from tests_support import evaluation_context, failed_check, pack_spec, scripted_retrieval_reply
 
 CRITERIA = ["names the employees ranked by total card spend", "covers the requested time period"]
 JOIN = "c.employee_id = e.employee_id"
@@ -98,10 +98,6 @@ def finding(category: str, evidence: str | None = None, **extra: Any) -> dict[st
 def general(metrics: dict[str, Any], **extra: Any) -> dict[str, Any]:
     reply: dict[str, Any] = {
         "metrics": metrics,
-        "criteria": [
-            {"criterion": c, "status": "met", "rationale": "ok", "metric_id": None}
-            for c in CRITERIA
-        ],
         "findings": [],
         "overall_verdict": "pass",
         "goal_completion": {"status": "completed", "reason": "the goal is met"},
@@ -150,14 +146,14 @@ def _question(
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {
-                "expected_behavior": "Return SQL ranking employees by card spend.",
-                "success_criteria": {
-                    "general": CRITERIA,
-                    "cheat_sheet": pack.model_dump(mode="json") if pack else None,
-                    **metric_expectations,
+            "evaluation_context": evaluation_context(
+                CRITERIA,
+                mapping={
+                    metric_id: {"comparison_basis": "test", "expectation": expectation}
+                    for metric_id, expectation in metric_expectations.items()
                 },
-            },
+                reference_spec=pack_spec(pack) if pack else None,
+            ),
         }
     )
 
@@ -256,7 +252,11 @@ async def test_correct_sql_passes_all_selected_metrics_in_one_general_call(
         "answered",
         "general_judge",
     )
-    assert [c.tag for c in result.criteria_results] == ["CRIT-01", "CRIT-02"]
+    relevance = result.metrics["relevance"]
+    assert relevance.comparison_basis == "question_vs_response"
+    assert relevance.verification_method == "response_review"
+    assert [g.guidance_id for g in relevance.guidance_applied] == ["METRIC:relevance"]
+    assert result.limitations[0].startswith("Static SQL analysis only")
     prompt = llm.calls[0].user
     # parser output is supporting evidence: base identifiers, aliases kept apart, joins
     assert '"base_tables": [' in prompt and '"card_transactions"' in prompt
@@ -279,7 +279,9 @@ async def test_rule_violation_fails_with_bug(
     sample_reference: Reference,
 ) -> None:
     reply = all_pass(*SQL_METRICS)
-    reply["metrics"]["rules_adherence"] = score(0, "wrong join", evidence=JOIN)
+    reply["metrics"]["rules_adherence"] = score(
+        0, "wrong join", evidence=JOIN, checks=[failed_check("rules_adherence", "SQL:1")]
+    )
     reply["findings"] = [finding("rules_adherence", JOIN)]
     result, _ = await evaluate(app_config, sample_product, case, sample_reference, ANSWER, [reply])
     assert result.verdict is Verdict.FAIL
@@ -884,7 +886,9 @@ async def test_tool_correctness_uses_the_exposed_trace_and_definitions(
     prompt = llm.calls[0].user
     assert "Authoritative tool definitions" in prompt and "Exposed tool trace" in prompt
     assert "a correctly targeted tool that returned an error is not wrong by itself" in prompt
-    assert '"expected_tools": [\n      "aggregate_feedback"' in prompt
+    contract = prompt.split("and its comparison basis:\n", 1)[1].split("\n\n", 1)[0]
+    assert '"question_specific_expectation"' in contract
+    assert '"expected_tools": [\n        "aggregate_feedback"' in contract
     assert statuses(result) == {"tool_correctness": 1.0}
 
 

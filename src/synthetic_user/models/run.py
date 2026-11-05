@@ -29,13 +29,52 @@ def mode_mismatch(mode: GenerationMode, has_reference: bool, what: str) -> str |
     return None
 
 
+class GuidanceType(StrEnum):
+    """What a guidance item does to an evaluation decision (reforming, Part 5)."""
+
+    EVALUATION_REQUIREMENT = "evaluation_requirement"  # an extra mandatory check
+    INTERPRETATION_RULE = "interpretation_rule"  # how to read a metric, a term or the reference
+    EXCEPTION = "exception"  # an approved difference that is never a defect
+    SCORING_POLICY = "scoring_policy"  # how a metric is scored
+    EVIDENCE_POLICY = "evidence_policy"  # what evidence suffices / what cannot be verified
+
+
+GUIDANCE_ID_PATTERN = r"^G\d+$"
+
+
+class GuidanceItem(StrictModel):
+    """One item of the user's evaluation guidance: an exact, verbatim excerpt of the text the
+    user gave (never rewritten), classified by one structuring call when the guidance is saved.
+    ``metrics`` = the metric ids it concerns; [] = every metric."""
+
+    guidance_id: NonEmptyStr = Field(pattern=GUIDANCE_ID_PATTERN)
+    type: GuidanceType
+    metrics: list[NonEmptyStr] = Field(default_factory=list)
+    text: NonEmptyStr
+    # Where the excerpt is in the guidance: "<source> line a-b" (code computes it).
+    location: NonEmptyStr
+
+
 class EvaluationGuidance(StrictModel):
     """Optional free-text evaluation guidance of a run (typed or a .txt / .md / .yaml file),
-    kept as the plain text the user gave. Read only by the evaluation judges (D237)."""
+    kept as the plain text the user gave. Read only by the evaluation judges (D237). ``items``
+    is its structured form (one LLM call per guidance version, every line covered verbatim);
+    empty until it was structured."""
 
     text: NonEmptyStr
     source: NonEmptyStr  # "typed in the UI" or the uploaded / configured file name
     sha256: NonEmptyStr = Field(pattern=r"^[0-9a-f]{64}$")
+    items: list[GuidanceItem] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> Self:
+        ids = [item.guidance_id for item in self.items]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"guidance item ids must be unique: {ids}")
+        return self
+
+    def item(self, guidance_id: str) -> GuidanceItem | None:
+        return next((i for i in self.items if i.guidance_id == guidance_id), None)
 
 
 class RunManifest(StrictModel):

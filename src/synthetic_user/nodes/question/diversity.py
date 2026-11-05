@@ -10,10 +10,11 @@ No LLM call and no embeddings. Two questions are near-duplicates only when BOTH 
   word substitution of the same request is caught, while the same structure asked in clearly
   different terminology is not.
 
-A second check catches expectations copied from a sibling: different requested outputs (task
-type, deliverable actions or limits) with word-for-word the same expected_behavior. Questions
-that differ only in filters, style or ambiguity may legitimately share a generic expected
-behaviour ("... for the requested period"), so they are not flagged. Problems feed the
+A second check catches success criteria copied from a sibling: different requested outputs
+(task type, deliverable actions or limits) with word-for-word the same success criteria.
+Questions that differ only in filters, style or ambiguity may legitimately share generic
+criteria ("... for the requested period"), so they are not flagged. Legacy stored questions
+(no Evaluation Context) are compared on their utterance and plan only. Problems feed the
 existing bounded retry; whatever persists is rejected per question with the reason (the first
 question of a pair is kept).
 """
@@ -42,7 +43,8 @@ class QuestionShape:
     outputs: tuple[object, ...]  # the requested outputs: task type, deliverables, limits
     structure: tuple[object, ...]  # the request + how it is asked (style, ambiguity)
     words: frozenset[str]
-    expected_behavior: str
+    # The success criteria texts, normalized (empty for a legacy question: never compared).
+    criteria: tuple[str, ...]
 
 
 def shape_of(question: QuestionDraft | QuestionCase, label: str) -> QuestionShape | None:
@@ -68,7 +70,7 @@ def shape_of(question: QuestionDraft | QuestionCase, label: str) -> QuestionShap
             traits.ambiguity_level.value,
         ),
         words=_content_words(text),
-        expected_behavior=_norm(question.expectations.expected_behavior),
+        criteria=_criteria(question),
     )
 
 
@@ -129,12 +131,20 @@ def _near_duplicate(
 
 def _copied_expectation(shape: QuestionShape, others: Sequence[QuestionShape]) -> str | None:
     for other in others:
-        if other.outputs != shape.outputs and other.expected_behavior == (shape.expected_behavior):
+        if shape.criteria and other.outputs != shape.outputs and other.criteria == shape.criteria:
             return (
-                f"expected_behavior is copied word for word from {other.label} although the "
-                "requested outputs differ: derive it from this question's own utterance"
+                f"success_criteria are copied word for word from {other.label} although the "
+                "requested outputs differ: derive them from this question's own utterance"
             )
     return None
+
+
+def _criteria(question: QuestionDraft | QuestionCase) -> tuple[str, ...]:
+    if isinstance(question, QuestionDraft):
+        texts = [c.requirement for c in question.evaluation_context.success_criteria]
+    else:
+        texts = question.criteria_texts
+    return tuple(_norm(text) for text in texts)
 
 
 def _content_words(text: str) -> frozenset[str]:

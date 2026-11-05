@@ -101,7 +101,35 @@ def _scenario(**overrides: Any) -> dict[str, Any]:
     }
 
 
+PACK: dict[str, Any] = {
+    "pack_id": "RP_SCN_001",
+    "scenario_id": "SCN_001",
+    "reference_id": "catalog-0123abcd",
+    "kind": "data_catalog",
+    "tables": [
+        {
+            "name": "card_transactions",
+            "why": "spend",
+            "rules": ["Keep currencies separate."],
+            "columns": [{"name": "amount"}],
+        }
+    ],
+    "rules": [{"id": "R1", "rule": "Never sum across currencies."}],
+}
+SPEC = {"pack_id": "RP_SCN_001", "reference_id": "catalog-0123abcd", "pack": PACK}
+
+
+def _context(**overrides: Any) -> dict[str, Any]:
+    return {
+        "success_criteria": [{"id": "C1", "requirement": "ranks employees by spend"}],
+        "reference_spec": SPEC,
+        "metric_mapping": {},
+        **overrides,
+    }
+
+
 def _question(**overrides: Any) -> dict[str, Any]:
+    grounded = overrides.get("reference_pack_id", "RP_SCN_001") is not None
     return {
         "question_id": "Q_001",
         "scenario_id": "SCN_001",
@@ -116,10 +144,7 @@ def _question(**overrides: Any) -> dict[str, Any]:
             "ambiguity_level": "medium",
             "complexity": "simple",
         },
-        "expectations": {
-            "expected_behavior": "Rank employees by card spend, per currency.",
-            "success_criteria": {"general": ["ranks employees by spend"]},
-        },
+        "evaluation_context": _context(reference_spec=SPEC if grounded else None),
         **overrides,
     }
 
@@ -449,73 +474,120 @@ def test_profile_era_artifacts_stay_readable() -> None:
     assert question.reference_pack_id is None
 
 
-def test_success_criteria_is_one_structure_keyed_by_metric() -> None:
-    """D240: general criteria, the cheat sheet and one key per metric expectation."""
+def test_evaluation_context_holds_criteria_reference_spec_and_mapping() -> None:
+    """reforming Part 4: success criteria (C ids), the scenario's pack as Reference Spec and
+    one Metric Mapping entry per metric (criteria, reference requirements, basis, expectation)."""
     question = QuestionCase.model_validate(
         _question(
-            expectations={
-                "expected_behavior": "b",
-                "success_criteria": {
-                    "general": ["c"],
-                    "context_recall": {
-                        "status": "generated",
-                        "value": {"required_information": ["Q1"]},
+            evaluation_context=_context(
+                success_criteria=[
+                    {"id": "C1", "requirement": "ranks employees by spend"},
+                    {"id": "C2", "requirement": "covers last month"},
+                ],
+                metric_mapping={
+                    "relevance": {"criteria": ["C1", "C2"], "comparison_basis": "q_vs_r"},
+                    "rules_adherence": {
+                        "reference_requirements": ["TABLE-RULE-01.01", "RULE-R1"],
+                        "comparison_basis": "rules_vs_sql",
+                        "evidence_types": ["sql"],
                     },
-                    "tool_correctness": {"status": "not_applicable", "reason": "no tools"},
+                    "context_recall": {
+                        "comparison_basis": "required_information_vs_chunks",
+                        "expectation": {
+                            "status": "generated",
+                            "value": {"required_information": ["Q1"]},
+                        },
+                    },
                 },
-            }
+            )
         )
     )
-    criteria = question.expectations.success_criteria
-    assert criteria.general == ["c"] and criteria.cheat_sheet is None
-    assert set(criteria.metrics) == {"context_recall", "tool_correctness"}
-    assert criteria.generated("context_recall") == {"required_information": ["Q1"]}
-    assert criteria.generated("tool_correctness") is None
-    dumped = question.model_dump(mode="json")["expectations"]["success_criteria"]
-    assert list(dumped) == ["general", "cheat_sheet", "context_recall", "tool_correctness"]
+    context = question.context
+    assert context.pack is not None and context.pack.pack_id == "RP_SCN_001"
+    spec = context.reference_spec
+    assert spec is not None
+    assert [r.id for r in spec.requirements()] == [
+        "reference_spec.schema",
+        "TABLE-01",
+        "COLUMN-01.01",
+        "TABLE-RULE-01.01",
+        "RULE-R1",
+    ]
+    assert context.requirement_text("C2") == "covers last month"
+    assert context.requirement_text("RULE-R1") == "Never sum across currencies."
+    assert context.generated("context_recall") == {"required_information": ["Q1"]}
+    assert context.generated("relevance") is None
+    assert question.criteria_texts == ["ranks employees by spend", "covers last month"]
+    assert "expected_behavior" not in question.model_dump_json()
+
+
+def test_a_legacy_question_is_kept_for_display_only() -> None:
+    """Questions stored before the Evaluation Context load with their expectations kept
+    verbatim; they are never executed or evaluated (user decision)."""
+    legacy = _question(
+        expectations={
+            "expected_behavior": "Rank employees by card spend, per currency.",
+            "success_criteria": {"general": ["ranks employees by spend"]},
+        }
+    )
+    del legacy["evaluation_context"]
+    question = QuestionCase.model_validate(legacy)
+    assert question.is_legacy and question.criteria_texts == []
+    assert question.legacy_expectations is not None
+    assert question.legacy_expectations["expected_behavior"].startswith("Rank employees")
+    with pytest.raises(ValueError, match="kept for display only"):
+        _ = question.context
+    with pytest.raises(ValidationError, match="exactly one of"):
+        QuestionCase.model_validate({**legacy, "evaluation_context": _context()})
 
 
 @pytest.mark.parametrize(
-    "expectations",
+    "evaluation_context",
     [
-        {"expected_behavior": "answers"},  # criteria required
-        {"expected_behavior": "answers", "success_criteria": ["a"]},  # a structure, not a list
-        {"expected_behavior": "answers", "success_criteria": {"general": []}},
-        {"expected_behavior": "answers", "success_criteria": {"general": list("abcde")}},  # max 4
-        {"success_criteria": {"general": ["a"]}},  # expected_behavior required
-        {"expected_behavior": "a", "success_criteria": {"general": ["a"]}, "clarification": "x"},
-        {"expected_behavior": "a", "success_criteria": {"context_recall": {"status": "x"}}},
-        {
-            "expected_behavior": "a",
-            "success_criteria": {"general": ["a"], "metric_expectations": {}},  # not a metric
-        },
-        {
-            "expected_behavior": "a",
-            "success_criteria": {"general": ["a"], "Bad Key": {"status": "not_applicable"}},
-        },
-        {
-            "expected_behavior": "a",
-            "success_criteria": {
-                "general": ["a"],
-                "context_recall": {"status": "generated", "value": None},
-            },
-        },
-        {
-            "expected_behavior": "a",
-            "success_criteria": {"general": ["a"], "context_recall": {"status": "cannot_generate"}},
-        },
-        {
-            "expected_behavior": "a",
-            "success_criteria": {
-                "general": ["a"],
-                "context_recall": {"status": "not_applicable", "value": {"x": 1}},
-            },
-        },
+        _context(success_criteria=[]),  # criteria required
+        _context(success_criteria=[{"id": "C2", "requirement": "a"}]),  # ids C1..Cn in order
+        _context(
+            success_criteria=[{"id": "C1", "requirement": "a"}, {"id": "C1", "requirement": "b"}]
+        ),
+        _context(expected_behavior="answers"),  # no separate expected_behavior any more
+        _context(metric_mapping={"Bad Key": {"comparison_basis": "x"}}),
+        _context(metric_mapping={"relevance": {"criteria": ["C9"], "comparison_basis": "x"}}),
+        _context(
+            metric_mapping={
+                "rules_adherence": {"reference_requirements": ["RULE-R9"], "comparison_basis": "x"}
+            }
+        ),
+        _context(metric_mapping={"relevance": {"criteria": ["C1", "C1"], "comparison_basis": "x"}}),
+        _context(
+            metric_mapping={
+                "context_recall": {
+                    "comparison_basis": "x",
+                    "expectation": {"status": "generated", "value": None},
+                }
+            }
+        ),
+        _context(
+            metric_mapping={
+                "context_recall": {
+                    "comparison_basis": "x",
+                    "expectation": {"status": "cannot_generate"},
+                }
+            }
+        ),
+        _context(
+            metric_mapping={
+                "context_recall": {
+                    "comparison_basis": "x",
+                    "expectation": {"status": "not_applicable", "value": {"x": 1}},
+                }
+            }
+        ),
+        _context(reference_spec={**SPEC, "pack_id": "RP_SCN_002"}),  # identity kept
     ],
 )
-def test_question_expectations_shape(expectations: dict[str, Any]) -> None:
+def test_evaluation_context_shape(evaluation_context: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):
-        QuestionCase.model_validate(_question(expectations=expectations))
+        QuestionCase.model_validate(_question(evaluation_context=evaluation_context))
 
 
 def _metric(score: float | None = 1.0, status: str = "scored") -> dict[str, Any]:

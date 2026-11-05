@@ -21,6 +21,7 @@ from synthetic_user.models.evaluation import (
 )
 from synthetic_user.models.execution import AnsweredResponse, DeniedResponse
 from synthetic_user.models.metrics import MetricDefinition
+from synthetic_user.models.run import EvaluationGuidance, GuidanceItem, GuidanceType
 from synthetic_user.prompts.contracts import choices
 from synthetic_user.prompts.templates import prompts_beside
 
@@ -67,9 +68,39 @@ def missing_finding_message(metric: str, score: float) -> str:
     )
 
 
-def guidance_block(guidance: str | None) -> str:
-    """The EVALUATION GUIDANCE section, or "" without guidance (prompt unchanged, D237)."""
-    return PROMPTS.text("evaluation_guidance", guidance=guidance) if guidance else ""
+def guidance_block(guidance: EvaluationGuidance | None) -> str:
+    """The EVALUATION GUIDANCE section: the user's guidance as verbatim items with their ids,
+    or "" without guidance (prompt unchanged, D237)."""
+    if guidance is None:
+        return ""
+    items = "\n".join(
+        PROMPTS.text(
+            "guidance_item",
+            guidance_id=item.guidance_id,
+            type=item.type.value,
+            metrics=", ".join(item.metrics) or PROMPTS.text("guidance_all_metrics"),
+            location=item.location,
+            text=item.text,
+        )
+        for item in guidance_items(guidance)
+    )
+    return PROMPTS.text("evaluation_guidance", guidance=items)
+
+
+def guidance_items(guidance: EvaluationGuidance) -> list[GuidanceItem]:
+    """The structured items; guidance that was never structured (e.g. built directly in a
+    test or an old manifest) is ONE verbatim item G1 covering the whole text - nothing is
+    dropped or invented."""
+    if guidance.items:
+        return list(guidance.items)
+    return [
+        GuidanceItem(
+            guidance_id="G1",
+            type=GuidanceType.INTERPRETATION_RULE,
+            text=guidance.text,
+            location=f"{guidance.source} (whole text)",
+        )
+    ]
 
 
 def severity_rule() -> str:
@@ -143,12 +174,12 @@ def check_scores_and_findings(
     expected: Sequence[str],
     quotable: str,
     *,
-    guidance: str | None = None,
+    guidance_ids: Sequence[str] = (),
 ) -> list[str]:
     """Shared structural checks: exactly the expected metric keys, quotes found in the source,
     finding categories among the judged metrics, a finding for every score below 1 and, for an
-    exempted finding, its exception copied from the run's evaluation guidance (D243): an
-    exempted difference alone never explains a score below 1."""
+    exempted finding, the id of a user guidance item (D243): an exempted difference alone never
+    explains a score below 1."""
     errors: list[str] = []
     wanted = set(expected)
     if missing := sorted(wanted - set(metrics)):
@@ -173,10 +204,17 @@ def check_scores_and_findings(
                 f"finding {index}: evidence {finding.evidence!r} is not in the source ({COPY_HINT})"
             )
         if finding.exempted_by is not None:
-            if guidance is None:
+            if not guidance_ids:
                 errors.append(PROMPTS.text("exempted_without_guidance", index=index))
-            elif not quoted(finding.exempted_by, guidance):
-                errors.append(PROMPTS.text("exempted_not_quoted", index=index, hint=COPY_HINT))
+            elif finding.exempted_by.strip() not in guidance_ids:
+                errors.append(
+                    PROMPTS.text(
+                        "exempted_not_quoted",
+                        index=index,
+                        ids=list(guidance_ids),
+                        value=repr(finding.exempted_by),
+                    )
+                )
     explained = {f.category for f in findings if f.exempted_by is None}
     for name, judged in metrics.items():
         if name not in wanted or judged.score is None or judged.score >= 1:

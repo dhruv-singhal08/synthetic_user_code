@@ -37,8 +37,10 @@ from synthetic_user.core.exceptions import (
 )
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator, new_run_id
 from synthetic_user.core.trace import RUN_LOG, trace_step
+from synthetic_user.guidance.structurer import GuidanceStructurer
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.tracing import TracingLLMClient
+from synthetic_user.metrics.catalog import builtin_ids
 from synthetic_user.metrics.registry import resolve_metric_config
 from synthetic_user.models.base import NonEmptyStr, StrictModel
 from synthetic_user.models.evaluation import BugCandidate, EvaluationResult
@@ -73,6 +75,9 @@ class Step(StrEnum):
 
 
 STEP_ORDER: tuple[Step, ...] = tuple(Step)
+# The run's evaluation guidance with its structured items (cached by the text's sha256: one
+# structuring call per guidance version). Not a step artifact: guidance may change any time.
+STRUCTURED_GUIDANCE = "evaluation_guidance.json"
 
 # Manifest artifact key -> file name, per run step (the reference is an input, not an artifact).
 STEP_ARTIFACTS: dict[Step, dict[str, str]] = {
@@ -476,6 +481,7 @@ class SyntheticUserPipeline:
         scenarios = self._load_scenarios(run_id)
         questions = self._load_questions(run_id)
         validate_run(scenarios=scenarios, questions=questions)
+        _refuse_legacy(questions)
         if start_from_question is not None and not 1 <= start_from_question <= len(questions):
             raise ArtifactIntegrityError(
                 f"start_from_question must be between 1 and {len(questions)}"
@@ -581,6 +587,9 @@ class SyntheticUserPipeline:
             kpis = self._store.read_model(self._file(run_id, "kpis"), RunKpis)
             return EvaluateStep(evaluations, bugs, kpis, reused=True)
 
+        _refuse_legacy(questions)
+        # Structured once per guidance version (cached), only when evaluations are (re)made.
+        guidance = await self.structure_guidance(run_id, guidance)
         scenario_by_id = {s.id: s for s in scenarios}
         question_by_id = {q.question_id: q for q in questions}
         cases = []
@@ -617,6 +626,40 @@ class SyntheticUserPipeline:
             manifest.model_copy(update={"evaluation_guidance": guidance}), Step.EVALUATE
         )
         return EvaluateStep(evaluations, bugs, kpis, reused=False)
+
+    async def structure_guidance(
+        self, run_id: str, guidance: EvaluationGuidance | None
+    ) -> EvaluationGuidance | None:
+        """The guidance with its verbatim items G1, G2, ...: from the run's cache when this
+        version was structured before, else ONE structuring call (traced in run.log) whose
+        result is cached. Errors propagate: unstructured guidance is never used silently."""
+        if guidance is None or guidance.items:
+            return guidance
+        relative = run_artifact(run_id, STRUCTURED_GUIDANCE)
+        if self._store.exists(relative):
+            cached = self._store.read_model(relative, EvaluationGuidance)
+            if cached.sha256 == guidance.sha256 and cached.items:
+                return guidance.model_copy(update={"items": cached.items})
+        metric_ids = (
+            self.load_metric_config(run_id).selected_metric_ids
+            if self._store.exists(self._file(run_id, "metric_config"))
+            else list(builtin_ids())
+        )
+        structurer = GuidanceStructurer(
+            self._llm, self._log, max_retries=self._settings.llm.max_validation_retries
+        )
+        if self._settings.trace.enabled:
+            with trace_step(
+                self._store.path_for(run_artifact(run_id, RUN_LOG)),
+                run_id,
+                "evaluation_guidance",
+                max_field_chars=self._settings.trace.max_field_chars,
+            ):
+                structured = await structurer.structure(guidance, metric_ids)
+        else:
+            structured = await structurer.structure(guidance, metric_ids)
+        self._store.write_model(relative, structured)
+        return structured
 
     # --- full run ----------------------------------------------------------------------
 
@@ -797,6 +840,18 @@ class SyntheticUserPipeline:
         if not self._store.exists(relative):
             return []
         return self._store.read_models(relative, ReferencePack)
+
+
+def _refuse_legacy(questions: Sequence[QuestionCase]) -> None:
+    """Questions stored before the Evaluation Context are display-only (user decision)."""
+    legacy = [q.question_id for q in questions if q.is_legacy]
+    if legacy:
+        raise ArtifactIntegrityError(
+            f"{len(legacy)} question(s) ({', '.join(legacy[:5])}"
+            f"{', ...' if len(legacy) > 5 else ''}) were generated before the Evaluation "
+            "Context (expected_behavior / old success_criteria): they are kept for display only. "
+            "Regenerate the questions step to execute or evaluate them."
+        )
 
 
 def _guidance_sha(guidance: EvaluationGuidance | None) -> str | None:

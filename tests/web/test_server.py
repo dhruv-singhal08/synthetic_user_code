@@ -439,7 +439,7 @@ def test_full_flow_with_mock_product_fills_one_csv(client: TestClient) -> None:
     after_scenarios = _steps(client, run_id, "reference", "scenarios")
     assert len(after_scenarios["rows"]) == 3
     assert all(r["scenario_id"] and not r["question_id"] for r in after_scenarios["rows"])
-    sheet = json.loads(after_scenarios["rows"][0]["success_criteria"])["cheat_sheet"]
+    sheet = json.loads(after_scenarios["rows"][0]["reference_spec"])
     assert "employees (full_name)" in sheet["items"]
     assert after_scenarios["detail"]["reference_packs"] == 3
     assert [p["pack_id"] for p in after_scenarios["reference_packs"]] == [
@@ -718,7 +718,8 @@ def test_ungrounded_run_has_no_reference_pack(client: TestClient) -> None:
     body = _steps(client, run_id, "scenarios", "questions")
     assert body["rows"] and all(r["mode"] == "ungrounded" for r in body["rows"])
     assert body["reference_packs"] == []
-    assert all("cheat_sheet" not in json.loads(r["success_criteria"]) for r in body["rows"])
+    assert all(r["reference_spec"] == "" for r in body["rows"])
+    assert all("C1: " in r["success_criteria"] for r in body["rows"] if r["question_id"])
     assert all(r["question"] for r in body["rows"])
 
 
@@ -755,7 +756,7 @@ def test_edit_reference_pack(client: TestClient) -> None:
     assert body["pack"]["edited"] is True
     assert body["state"]["steps_done"] == ["reference", "scenarios"]  # questions are stale
     assert all(not r["question_id"] for r in body["rows"])
-    sheet = json.loads(body["rows"][0]["success_criteria"])["cheat_sheet"]
+    sheet = json.loads(body["rows"][0]["reference_spec"])
     assert sheet["items"] == ["employees (full_name)"]
     missing = client.put(f"/api/runs/{run_id}/reference_packs/RP_SCN_009", json=draft)
     assert missing.status_code == 404
@@ -770,6 +771,16 @@ def test_evaluation_guidance_is_editable_any_time_and_used_by_evaluate(
     assert typed.status_code == 200, typed.text
     body = typed.json()
     assert body["evaluation_guidance"]["text"] == "Approved: tenant filters."
+    # structured by ONE call when saved: verbatim items with ids, shown back to the UI
+    assert body["evaluation_guidance"]["items"] == [
+        {
+            "guidance_id": "G1",
+            "type": "exception",
+            "metrics": [],
+            "text": "Approved: tenant filters.",
+            "location": "typed in the UI line 1",
+        }
+    ]
     assert body["state"]["sources"]["evaluation_guidance"] == "typed in the UI"
     both = client.post(url, data={"guidance_text": "x"}, files={"guidance_file": ("g.md", b"y")})
     assert both.status_code == 400 and "not more" in both.text

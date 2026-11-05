@@ -34,6 +34,7 @@ def test_every_node_has_its_prompt_file() -> None:
     names = {path.relative_to(PACKAGE).as_posix() for path in PROMPT_FILES}
     assert names == {
         "adapters/mock_llm_prompt.yaml",
+        "guidance/structurer_prompt.yaml",
         "metrics/compiler_prompt.yaml",
         "nodes/evaluator/general_prompt.yaml",
         "nodes/evaluator/judge_common_prompt.yaml",
@@ -61,6 +62,7 @@ def test_prompt_python_holds_no_prompt_text() -> None:
         *PACKAGE.glob("nodes/*/*prompt.py"),
         PACKAGE / "adapters" / "mock_llm_prompt.py",
         PACKAGE / "metrics" / "compiler_prompt.py",
+        PACKAGE / "guidance" / "structurer_prompt.py",
     ]
     for path in builders:
         source = path.read_text(encoding="utf-8")

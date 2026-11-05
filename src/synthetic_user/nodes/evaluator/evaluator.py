@@ -14,9 +14,14 @@ Judge (retrieval metrics + chunk labels for MRR). A group without applicable met
 call; zero LLM metrics -> zero calls. MRR is computed by code. The final verdict comes from the
 provisional ``VerdictPolicy`` (verdict.py); the judge's own opinion is stored as llm_verdict.
 Verdict: ``verdict.py`` (D241) - decided from the findings' severity, always with a reason.
-Bug candidates: one per failed evaluation, from findings with severity >= medium and supported
-evidence (never an ``unresolved`` finding). LLM calls run under ``llm.max_concurrency``; ids are
-assigned afterwards in order.
+Bug candidates: one per root cause, from the verdict's failing findings (D244).
+
+Traceability (reforming): every metric result carries its comparison basis, the requirements
+the question's Metric Mapping assigned, check-level decisions with evidence ids, coverage, the
+guidance applied and the verification method; the evaluation carries its limitations and its
+failed / unresolved requirements, and run.log gets one EVALUATION TRACE block per question
+(traceability.py). A question without an Evaluation Context (legacy) is refused. LLM calls run
+under ``llm.max_concurrency``; ids are assigned afterwards in order.
 
 SQL against a data catalog (D230/D231): each SQL artifact is parsed once, reconciled with the
 cheat sheet AND the full catalog (exact lookups through one ``CatalogIndex`` per catalog
@@ -46,7 +51,6 @@ from synthetic_user.models.evaluation import (
     GOAL_PROBLEM_SEVERITY,
     GOAL_ROOT_CAUSE,
     ClassificationSource,
-    CriterionResult,
     EvaluationResult,
     EvaluationStatus,
     EvidenceStatus,
@@ -57,6 +61,8 @@ from synthetic_user.models.evaluation import (
     JudgedScore,
     MetricResult,
     MetricStatus,
+    RequirementSource,
+    RequirementStatus,
     RootCause,
     RootCauseMechanism,
     Severity,
@@ -72,7 +78,7 @@ from synthetic_user.models.execution import (
 from synthetic_user.models.lookup import (
     IdentifierStatus,
     LookupOrigin,
-    LookupResult,
+    LookupTraceEntry,
     ReferenceCheckRecord,
 )
 from synthetic_user.models.metrics import (
@@ -85,7 +91,7 @@ from synthetic_user.models.metrics import (
     ResolvedMetricConfig,
 )
 from synthetic_user.models.product import ProductDescription
-from synthetic_user.models.question import QuestionCase
+from synthetic_user.models.question import LEGACY_QUESTION_MESSAGE, QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.run import EvaluationGuidance, GenerationMode
 from synthetic_user.models.scenario import Scenario
@@ -102,8 +108,14 @@ from synthetic_user.nodes.evaluator.bugs import (
     assign_bugs,
     bug_groups,
 )
+from synthetic_user.nodes.evaluator.evidence import SQL_CLAUSES, sql_clause_id
 from synthetic_user.nodes.evaluator.general_judge import GeneralJudge, GeneralJudgement
-from synthetic_user.nodes.evaluator.general_prompt import GeneralJudgeInput, SqlEvidence
+from synthetic_user.nodes.evaluator.general_prompt import (
+    TEMPLATE_FINGERPRINT,
+    GeneralJudgeInput,
+    SqlEvidence,
+)
+from synthetic_user.nodes.evaluator.guidance import guidance_registry
 from synthetic_user.nodes.evaluator.judge_common import (
     matches_known_gap,
     normalise,
@@ -121,10 +133,18 @@ from synthetic_user.nodes.evaluator.retrieval_prompt import (
     RetrievalJudgeInput,
 )
 from synthetic_user.nodes.evaluator.trace_tags import (
-    criterion_tag,
     link_finding_tags,
     merge_finding_tags,
     trace_catalog,
+)
+from synthetic_user.nodes.evaluator.traceability import (
+    InvocationRecord,
+    TraceInputs,
+    log_evaluation,
+    mark_used_lookups,
+    rule_texts,
+    summarise,
+    trace_metrics,
 )
 from synthetic_user.nodes.evaluator.verdict import SeverityVerdictPolicy, VerdictPolicy
 from synthetic_user.references.catalog_index import CatalogIndex, LookupSession
@@ -157,9 +177,10 @@ class EvaluationCase:
 
     @property
     def pack(self) -> ReferencePack | None:
-        """The cheat sheet the question was generated with (its success_criteria key, D240);
-        grounded questions only."""
-        return self.question.expectations.success_criteria.cheat_sheet
+        """The cheat sheet the question was generated with (its Reference Spec); grounded
+        questions only. None for a legacy question (refused by the evaluator)."""
+        context = self.question.evaluation_context
+        return context.pack if context is not None else None
 
 
 @dataclass
@@ -170,6 +191,8 @@ class _Judgements:
     retrieval: RetrievalJudgement | None = None
     notes: list[str] = field(default_factory=list)
     reference_checks: ReferenceCheckRecord | None = None
+    sql: list[SqlEvidence] = field(default_factory=list)
+    general_input: GeneralJudgeInput | None = None
 
 
 class Evaluator:
@@ -204,6 +227,12 @@ class Evaluator:
         )
         # Run-level guidance for every judge call (no extra call); None -> prompts unchanged.
         self._guidance = evaluation_guidance
+        # Every citable guidance id: the user's items, METRIC:<id> rubrics, POLICY:<name>.
+        self._guidance_refs = guidance_registry(
+            metric_config.definitions,
+            evaluation_guidance,
+            catalog_version=metric_config.catalog_version,
+        )
         if evaluation_guidance is not None:
             logger.info(
                 "Evaluation guidance applied to every judge call: %s (sha256 %s, %d chars)",
@@ -220,6 +249,10 @@ class Evaluator:
                     for d in custom
                 ),
             )
+
+    @property
+    def metric_config(self) -> ResolvedMetricConfig:
+        return self._config
 
     async def evaluate(self, case: EvaluationCase, product: ProductDescription) -> EvaluationResult:
         return (await self.evaluate_many([case], product))[0]
@@ -277,6 +310,7 @@ class Evaluator:
         calls: list[Any] = []
         if plan.general:
             sql = self._sql_evidence(response, plan, case.pack)
+            result.sql = sql
             session = (
                 LookupSession(self._catalog)
                 if self._catalog is not None and any(i.reconciliation for i in sql)
@@ -306,10 +340,12 @@ class Evaluator:
                 max_lookup_requests=lookup_settings.max_requests
                 if session is not None and lookup_settings.enabled
                 else 0,
-                guidance=self._guidance.text if self._guidance else None,
+                guidance=self._guidance,
+                guidance_refs=self._guidance_refs,
                 capability=case.scenario.capability,
                 capability_rationale=case.scenario.capability_rationale,
             )
+            result.general_input = general_input
             calls.append(self._run_general(case, general_input, semaphore, result, session))
         if plan.retrieval_call:
             retrieval_input = RetrievalJudgeInput(
@@ -321,7 +357,7 @@ class Evaluator:
                 context=evidence.context,
                 tool_trace=evidence.tool_trace,
                 artifact_max_chars=artifact_max_chars,
-                guidance=self._guidance.text if self._guidance else None,
+                guidance=self._guidance,
             )
             calls.append(self._run_retrieval(case, retrieval_input, semaphore, result))
         started = time.perf_counter()
@@ -403,7 +439,7 @@ class Evaluator:
         case: EvaluationCase,
         sql: Sequence[SqlEvidence],
         session: LookupSession | None,
-    ) -> list[LookupResult]:
+    ) -> list[LookupTraceEntry]:
         """Run the lookups code can already see are needed (one batch), and log the
         reconciliation (parse outcome, extra / invalid / unresolved identifiers)."""
         reconciliations = [i.reconciliation for i in sql if i.reconciliation is not None]
@@ -535,20 +571,22 @@ class Evaluator:
             for metric_id in self._config.selected_metric_ids
             if metric_id in results
         }
-        criteria_results = (
-            [
-                CriterionResult(tag=criterion_tag(index), **result.model_dump())
-                for index, result in enumerate(general.draft.criteria, start=1)
+        general_scores = general.draft.metrics if general and general.draft else {}
+        failed_criteria = {
+            metric_id: [
+                c.requirement_id.strip()
+                for c in judged.checks
+                if c.status is RequirementStatus.FAILED
+                and c.source is RequirementSource.SUCCESS_CRITERIA
             ]
-            if general is not None and general.draft is not None
-            else []
-        )
+            for metric_id, judged in general_scores.items()
+        }
         drafts = [
             *(general.draft.findings if general and general.draft else []),
             *(retrieval.draft.findings if retrieval and retrieval.draft else []),
         ]
         findings = [
-            self._finding(f.model_dump(), FindingSource.LLM, case, criteria_results, product)
+            self._finding(f.model_dump(), FindingSource.LLM, case, failed_criteria, product)
             for f in drafts
         ] + [
             self._finding(
@@ -565,7 +603,7 @@ class Evaluator:
                 },
                 FindingSource.DETERMINISTIC,
                 case,
-                criteria_results,
+                failed_criteria,
                 product,
             )
             for d in deterministic
@@ -579,7 +617,10 @@ class Evaluator:
                     {
                         "category": GOAL_COMPLETION_CATEGORY,
                         "description": goal.reason,
-                        "expected_behavior": case.question.expectations.expected_behavior,
+                        "expected_behavior": "; ".join(
+                            f"{c.id}: {c.requirement}"
+                            for c in case.question.context.success_criteria
+                        ),
                         "observed_behavior": goal.evidence or goal.reason,
                         "evidence": goal.evidence,
                         "severity": GOAL_PROBLEM_SEVERITY[goal.status],
@@ -591,10 +632,38 @@ class Evaluator:
                     },
                     FindingSource.LLM,
                     case,
-                    criteria_results,
+                    failed_criteria,
                     product,
                 )
             )
+        lookups = judgements.reference_checks.lookup_trace if judgements.reference_checks else []
+        exemptions: dict[str, list[str]] = {}
+        for finding in findings:
+            if finding.exempted_by_id is not None:
+                exemptions.setdefault(finding.category, []).append(finding.exempted_by_id)
+        metrics = trace_metrics(
+            metrics,
+            TraceInputs(
+                question=case.question,
+                definitions=self._definitions,
+                guidance_refs=self._guidance_refs,
+                general_scores=general_scores,
+                retrieval=retrieval.draft if retrieval is not None else None,
+                rule_texts=rule_texts(lookups),
+                exemptions=exemptions,
+            ),
+        )
+        reference_checks = mark_used_lookups(judgements.reference_checks, metrics)
+        summary = summarise(
+            metrics,
+            self._definitions,
+            sql_parse=[
+                (k, item.structure.parsed, item.structure.diagnostics)
+                for k, item in enumerate(judgements.sql, start=1)
+            ],
+            reference_checks=reference_checks,
+            notes=[general.error] if general is not None and general.error else [],
+        )
         decision = self._policy.decide(metrics, findings, self._definitions, goal)
         verdict = decision.verdict
         groups = bug_groups(
@@ -606,18 +675,63 @@ class Evaluator:
             classification_source=source,
             classification_note=classification_note,
             verdict=verdict,
-            verdict_reason=decision.reason,
+            verdict_reason=_with_unresolved(decision.reason, summary.unresolved),
             verdict_policy=self._policy.name,
             evaluation_status=EvaluationStatus.EVALUATED,
             metrics=metrics,
-            criteria_results=criteria_results,
             findings=findings,
             llm_verdict=general.draft.overall_verdict if general and general.draft else None,
             goal_completion=goal,
             notes=list(dict.fromkeys(notes)),
-            reference_checks=judgements.reference_checks,
+            reference_checks=reference_checks,
+            limitations=summary.limitations,
+            failed_requirements=summary.failed,
+            unresolved_requirements=summary.unresolved,
+        )
+        log_evaluation(
+            result,
+            case.question,
+            selected=self._config.selected_metric_ids,
+            evidence_preparation=_evidence_preparation(case, judgements),
+            invocations=self._invocations(case, judgements),
         )
         return result, groups
+
+    def _invocations(self, case: EvaluationCase, judgements: _Judgements) -> list[InvocationRecord]:
+        records: list[InvocationRecord] = []
+        general, data = judgements.general, judgements.general_input
+        if general is not None and data is not None:
+            for call in range(1, general.calls + 1):
+                records.append(
+                    InvocationRecord(
+                        invocation_id=f"{case.question.question_id}:general:{call}",
+                        judge="general",
+                        metrics=[d.metric_id for d in data.definitions],
+                        attempts=general.attempts[call - 1 : call],
+                        evidence_supplied=general.evidence_ids
+                        if call == general.calls
+                        else data.registry().ids(),
+                        guidance_supplied=[g for g, ref in self._guidance_refs.items() if ref.user],
+                        template_fingerprint=TEMPLATE_FINGERPRINT,
+                        error=general.error if call == general.calls else None,
+                    )
+                )
+        if judgements.retrieval is not None:
+            records.append(
+                InvocationRecord(
+                    invocation_id=f"{case.question.question_id}:retrieval:1",
+                    judge="retrieval_grounding",
+                    metrics=[
+                        d.metric_id for d in [*judgements.plan.retrieval, *judgements.plan.computed]
+                    ],
+                    evidence_supplied=[
+                        f"CHUNK:{c.chunk_id}" for c in judgements.evidence.context.chunks
+                    ],
+                    guidance_supplied=[g for g, ref in self._guidance_refs.items() if ref.user],
+                    error=judgements.retrieval.error,
+                )
+            )
+        return records
 
     def _subject_resolver(self, case: EvaluationCase) -> SubjectResolver:
         """A root-cause subject counts for grouping only when it is verifiable: found in the
@@ -807,15 +921,21 @@ class Evaluator:
         data: dict[str, Any],
         source: FindingSource,
         case: EvaluationCase,
-        criteria_results: list[CriterionResult],
+        failed_criteria: dict[str, list[str]],
         product: ProductDescription,
     ) -> Finding:
+        exempted = data.get("exempted_by")
+        if exempted is not None:
+            # The judge cites a guidance item id; the stored finding keeps its exact text.
+            ref = self._guidance_refs.get(str(exempted).strip())
+            if ref is not None:
+                data = {**data, "exempted_by": ref.instruction, "exempted_by_id": ref.guidance_id}
         draft = Finding.model_validate(
             {"finding_id": "F_000", "source": source, "related_tags": [], **data}
         )
         tags = merge_finding_tags(
             list(data.get("related_tags", [])),
-            link_finding_tags(draft, case.question, case.pack, criteria_results),
+            link_finding_tags(draft, case.question, case.pack, failed_criteria),
             case.question,
             case.pack,
         )
@@ -839,6 +959,10 @@ def _check_links(case: EvaluationCase, reference: Reference | None) -> None:
         case.pack,
         case.execution,
     )
+    if question.is_legacy:
+        raise ArtifactIntegrityError(
+            LEGACY_QUESTION_MESSAGE.format(question_id=question.question_id)
+        )
     problems = []
     if execution.question_id != question.question_id:
         problems.append(f"execution is for {execution.question_id}, not {question.question_id}")
@@ -848,7 +972,7 @@ def _check_links(case: EvaluationCase, reference: Reference | None) -> None:
     if pack is None and question.reference_pack_id is not None:
         problems.append(
             f"{question.question_id} uses reference pack {question.reference_pack_id} but its "
-            "success_criteria has no cheat_sheet (regenerate the questions)"
+            "evaluation_context has no reference_spec (regenerate the questions)"
         )
     elif question.reference_pack_id != pack_id:
         problems.append(f"question uses reference pack {question.reference_pack_id}, not {pack_id}")
@@ -862,3 +986,77 @@ def _check_links(case: EvaluationCase, reference: Reference | None) -> None:
             )
     if problems:
         raise ArtifactIntegrityError("Mismatched evaluation inputs: " + "; ".join(problems))
+
+
+def _with_unresolved(reason: str, unresolved: list[str]) -> str:
+    """The verdict reason plus the unresolved checks: visible, the verdict is unchanged."""
+    if not unresolved:
+        return reason
+    return f"{reason} Unresolved checks (verdict unchanged): {'; '.join(unresolved)}."
+
+
+def _evidence_preparation(case: EvaluationCase, judgements: _Judgements) -> dict[str, Any]:
+    """Section B of the EVALUATION TRACE: what code prepared before the judges (ids, parse and
+    reconciliation outcomes, tool calls, context) - no raw payloads beyond the SQL clauses."""
+    sql: list[dict[str, Any]] = []
+    for k, item in enumerate(judgements.sql, start=1):
+        s = item.structure
+        entry: dict[str, Any] = {
+            "artifact_id": f"SQL:{k}",
+            "parse_status": "parsed" if s.parsed else "parse_failed",
+            "parser_warnings": s.diagnostics,
+        }
+        if s.parsed:
+            entry["parsed_structure"] = {
+                "base_tables": s.base_tables,
+                "base_columns": [
+                    f"{c.table}.{c.column}" if c.table else c.column for c in s.base_columns
+                ],
+                **{
+                    attribute: [
+                        f"{sql_clause_id(k, clause, i)} {expression}"
+                        for i, expression in enumerate(getattr(s, attribute), start=1)
+                    ]
+                    for clause, attribute in SQL_CLAUSES
+                },
+                "joins": [
+                    f"{sql_clause_id(k, 'JOIN', i)} {j.kind} {j.target} {j.predicate or ''}".strip()
+                    for i, j in enumerate(s.joins, start=1)
+                ],
+            }
+        rec = item.reconciliation
+        if rec is not None:
+            entry["catalog_reconciliation"] = {
+                "evidence_id": f"RECON:{k}",
+                **{
+                    status.value: [i.identifier for i in rec.with_status(status)]
+                    for status in IdentifierStatus
+                },
+                "joins": [f"{j.left} = {j.right}: {j.status.value}" for j in rec.joins],
+                "rules_not_in_pack": rec.rules_not_in_pack,
+            }
+        sql.append(entry)
+    evidence = judgements.evidence
+    trace = evidence.tool_trace
+    return {
+        "sql_artifacts": sql or "none",
+        "tool_calls": [
+            {
+                "evidence_id": f"TOOL:{c.order}",
+                "name": c.name,
+                "operation": c.operation,
+                "arguments": c.arguments,
+                "result_available": c.result is not None,
+                "error": c.error,
+            }
+            for c in trace
+        ]
+        if trace is not None
+        else "no tool trace exposed",
+        "retrieved_chunks": [f"CHUNK:{c.chunk_id}" for c in evidence.context.chunks],
+        "missing_evidence": {
+            metric_id: result.rationale
+            for metric_id, result in judgements.plan.preset.items()
+            if result.status is MetricStatus.EVIDENCE_UNAVAILABLE
+        },
+    }

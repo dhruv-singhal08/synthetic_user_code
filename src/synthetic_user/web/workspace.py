@@ -61,7 +61,7 @@ from synthetic_user.models.scenario import RejectedScenario, Scenario
 from synthetic_user.nodes.evaluator.kpis import consolidate_findings
 from synthetic_user.nodes.evaluator.no_sql import NO_SQL_REASON, no_sql_execution, run_expects_sql
 from synthetic_user.nodes.evaluator.trace_tags import attach_trace_links
-from synthetic_user.pipeline import RunInputs, Step, steps_from
+from synthetic_user.pipeline import STRUCTURED_GUIDANCE, RunInputs, Step, steps_from
 from synthetic_user.references.loader import GUIDE_SUFFIXES, parse_reference
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import RUNS_DIR, run_artifact
@@ -515,26 +515,39 @@ class Workspace:
 
     # --- evaluation guidance (judges only; editable at any time) ---------------------------
 
-    def update_evaluation_guidance(
-        self, state: UiRunState, *, text: str, upload: Upload | None, remove: bool
-    ) -> UiRunState:
-        """Replace (or remove) the run's evaluation guidance: typed text OR a .txt / .md / .yaml
-        file, stored as given. Not part of the frozen metric selection, so it may change after
-        scenarios exist; the next evaluate step uses it (D237)."""
+    def pending_guidance(
+        self, *, text: str, upload: Upload | None, remove: bool
+    ) -> EvaluationGuidance | None:
+        """The guidance a save request would store, validated exactly like the save (None for
+        a removal or empty text), so it can be structured BEFORE anything is stored."""
         typed = text.strip()
         if sum((bool(typed), upload is not None, remove)) > 1:
             raise InputAssetError(
                 "Give the evaluation guidance as typed text or as a file (or remove it), not more"
             )
         max_chars = self._settings.evaluation.max_guidance_chars
-        new: Upload | None = None
         if upload is not None:
             if len(upload.content) > self._settings.web.max_upload_bytes:
                 raise InputAssetError(f"{upload.filename}: file is too large")
-            parse_evaluation_guidance(upload.content, source=upload.filename, max_chars=max_chars)
+            return parse_evaluation_guidance(
+                upload.content, source=upload.filename, max_chars=max_chars
+            )
+        if typed:
+            return parse_evaluation_guidance(typed, source=TYPED_GUIDANCE, max_chars=max_chars)
+        return None
+
+    def update_evaluation_guidance(
+        self, state: UiRunState, *, text: str, upload: Upload | None, remove: bool
+    ) -> UiRunState:
+        """Replace (or remove) the run's evaluation guidance: typed text OR a .txt / .md / .yaml
+        file, stored as given. Not part of the frozen metric selection, so it may change after
+        scenarios exist; the next evaluate step uses it (D237)."""
+        self.pending_guidance(text=text, upload=upload, remove=remove)
+        typed = text.strip()
+        new: Upload | None = None
+        if upload is not None:
             new = upload
         elif typed:
-            parse_evaluation_guidance(typed, source=TYPED_GUIDANCE, max_chars=max_chars)
             new = Upload(TYPED_GUIDANCE_FILE, typed.encode("utf-8"))
         saved = self._single_file(state.run_id, EVALUATION_GUIDANCE)
         if saved is not None:
@@ -553,14 +566,22 @@ class Workspace:
         return updated
 
     def evaluation_guidance(self, run_id: str) -> EvaluationGuidance | None:
+        """The saved guidance, with its structured items when this version was structured
+        (the pipeline's cache, keyed by the text's sha256)."""
         saved = self._single_file(run_id, EVALUATION_GUIDANCE)
         if saved is None:
             return None
-        return parse_evaluation_guidance(
+        guidance = parse_evaluation_guidance(
             saved.read_bytes(),
             source=TYPED_GUIDANCE if saved.name == TYPED_GUIDANCE_FILE else saved.name,
             max_chars=self._settings.evaluation.max_guidance_chars,
         )
+        cache = run_artifact(run_id, STRUCTURED_GUIDANCE)
+        if guidance is not None and self._store.exists(cache):
+            cached = self._store.read_model(cache, EvaluationGuidance)
+            if cached.sha256 == guidance.sha256:
+                return guidance.model_copy(update={"items": cached.items})
+        return guidance
 
     def unlock_evaluation(self, state: UiRunState) -> UiRunState:
         """Make the evaluation editable again; refused once scenarios froze the metric config."""

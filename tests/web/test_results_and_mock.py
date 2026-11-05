@@ -19,6 +19,7 @@ from synthetic_user.models.question import QuestionCase
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario
 from synthetic_user.web.results_csv import build_rows, bullets, columns_for, to_csv
+from tests_support import evaluation_context, pack_spec
 
 
 def _question(scenario: Scenario, pack: ReferencePack | None = None) -> QuestionCase:
@@ -27,8 +28,8 @@ def _question(scenario: Scenario, pack: ReferencePack | None = None) -> Question
             "question_id": "Q_001",
             "scenario_id": scenario.id,
             "persona_id": scenario.persona_id,
-            "mode": "grounded",
-            "reference_pack_id": scenario.reference_pack_id,
+            "mode": "grounded" if pack else "ungrounded",
+            "reference_pack_id": pack.pack_id if pack else None,
             "utterance": "Top spenders?",
             "intended_goal": scenario.business_goal,
             "intent": {"task_type": "ranking"},
@@ -37,13 +38,13 @@ def _question(scenario: Scenario, pack: ReferencePack | None = None) -> Question
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {
-                "expected_behavior": "Rank the top spenders.",
-                "success_criteria": {
-                    "general": ["names the top spenders"],
-                    "cheat_sheet": pack.model_dump(mode="json") if pack else None,
+            "evaluation_context": evaluation_context(
+                ["names the top spenders"],
+                mapping={
+                    "relevance": {"criteria": ["C1"], "comparison_basis": "question_vs_response"}
                 },
-            },
+                reference_spec=pack_spec(pack) if pack else None,
+            ),
         }
     )
 
@@ -83,22 +84,25 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
         "sql:\nSELECT 1",
         "12",
     )
-    assert rows[0]["expected_behavior"] == "Rank the top spenders."
-    # One structured JSON cell: general criteria + the cheat sheet copied into the question.
-    assert json.loads(rows[0]["success_criteria"]) == {
-        "general": ["names the top spenders"],
-        "cheat_sheet": {
-            "items": ["card_transactions (amount, currency_code)", "employees (full_name)"],
-            "rules": [
-                "join card_transactions.employee_id -> employees.employee_id (verified)",
-                "card_transactions: Amounts are in the transaction currency; amounts in "
-                "different currencies must not be summed directly.",
-                "R1: Amounts in different currency_code values must not be summed directly.",
-            ],
-        },
+    assert "expected_behavior" not in rows[0]
+    # The Evaluation Context: criteria with ids, the Reference Spec and the Metric Mapping.
+    assert rows[0]["success_criteria"] == "C1: names the top spenders"
+    spec = json.loads(rows[0]["reference_spec"])
+    assert (spec["pack_id"], spec["reference_id"]) == ("RP_SCN_001", sample_packs[0].reference_id)
+    assert spec["items"] == ["card_transactions (amount, currency_code)", "employees (full_name)"]
+    assert (
+        "RULE-R1: Amounts in different currency_code values must not be summed directly."
+        in (spec["requirements"])
+    )
+    assert json.loads(rows[0]["metric_mapping"]) == {
+        "relevance": {
+            "criteria": ["C1"],
+            "reference_requirements": [],
+            "comparison_basis": "question_vs_response",
+        }
     }
     # A scenario without questions still shows its cheat sheet.
-    assert set(json.loads(rows[1]["success_criteria"])) == {"cheat_sheet"}
+    assert set(json.loads(rows[1]["reference_spec"])) == {"items", "rules"}
     assert rows[0]["answer_text"] == "Here are the top spenders."
     assert rows[1]["question_id"] == "" and rows[1]["scenario_id"] == "SCN_002"
     assert rows[0]["final_verdict"] == ""
@@ -106,28 +110,27 @@ def test_rows_one_per_question_and_blank_for_unasked_scenarios(
 
 def test_columns_follow_the_selected_metrics() -> None:
     columns = columns_for(["relevance", "custom_01", "mrr"])
-    assert columns[-14:] == [
-        "relevance",
-        "relevance_status",
-        "relevance_reason",
-        "custom_01",
-        "custom_01_status",
-        "custom_01_reason",
-        "mrr",
-        "mrr_status",
-        "mrr_reason",
+    per_metric = ["", "_status", "_reason", "_checks", "_coverage", "_guidance"]
+    assert columns[-27:] == [
+        *(f"{m}{suffix}" for m in ("relevance", "custom_01", "mrr") for suffix in per_metric),
         "final_verdict",
         "verdict_reason",
         "goal_completion",
+        "failed_requirements",
+        "unresolved_requirements",
+        "evidence_lookups",
+        "limitations",
         "bug_ids",
         "evaluation_notes",
     ]
     assert {"product_outcome", "response_classification", "success_criteria"} <= set(columns)
+    assert {"reference_spec", "metric_mapping"} <= set(columns)
     assert "product_response_type" in columns
     assert {"tool_calls", "retrieved_context"} <= set(columns)
     for removed in (
         "metric_expectations",
         "legacy_expectations",
+        "expected_behavior",
         "cheat_sheet",
         "cheat_sheet_rules",
         "golden_case_id",
@@ -339,13 +342,20 @@ def test_no_sql_note_explains_every_metric(sample_scenarios: list[Scenario]) -> 
 
 def test_metric_criteria_and_telemetry_columns(sample_scenarios: list[Scenario]) -> None:
     data = _question(sample_scenarios[0]).model_dump(mode="json")
-    data["expectations"]["success_criteria"].update(
+    data["evaluation_context"]["metric_mapping"].update(
         {
             "context_recall": {
-                "status": "generated",
-                "value": {"required_information": ["Q1 spend"]},
+                "comparison_basis": "required_information_vs_chunks",
+                "expectation": {
+                    "status": "generated",
+                    "value": {"required_information": ["Q1 spend"]},
+                },
             },
-            "tool_correctness": {"status": "cannot_generate", "reason": "no tools"},
+            "tool_correctness": {
+                "criteria": ["C1"],
+                "comparison_basis": "criteria_vs_tool_trace",
+                "expectation": {"status": "cannot_generate", "reason": "no tools"},
+            },
         }
     )
     question = QuestionCase.model_validate(data)
@@ -370,10 +380,12 @@ def test_metric_criteria_and_telemetry_columns(sample_scenarios: list[Scenario])
         }
     )
     row = build_rows("RUN_1", sample_scenarios[:1], [question], [execution])[0]
-    assert json.loads(row["success_criteria"]) == {
-        "general": ["names the top spenders"],
-        "context_recall": {"required_information": ["Q1 spend"]},
-        "tool_correctness": {"status": "cannot_generate", "reason": "no tools"},
+    mapping = json.loads(row["metric_mapping"])
+    assert mapping["context_recall"]["expectation"] == {"required_information": ["Q1 spend"]}
+    assert mapping["tool_correctness"]["expectation"] == {
+        "status": "cannot_generate",
+        "reason": "no tools",
     }
+    assert mapping["tool_correctness"]["criteria"] == ["C1"]
     assert row["tool_calls"] == '1. aggregate({"source": "c"})'
     assert row["retrieved_context"] == "1 chunk(s) via context_api"

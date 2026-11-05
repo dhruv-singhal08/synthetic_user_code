@@ -268,7 +268,7 @@ def test_product_fields_reach_the_prompts(sample_persona: Persona) -> None:
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {"expected_behavior": "b", "success_criteria": {"general": ["c"]}},
+            "evaluation_context": {"success_criteria": [{"id": "C1", "requirement": "c"}]},
         }
     )
     # Every product is judged by the same General Judge with the full product contract.

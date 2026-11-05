@@ -9,6 +9,9 @@ banner; re-running a step appends again, so the file keeps the run's history. Bl
 - VALIDATION: whether that output was accepted, else the errors that led to a retry/reject.
 - PRODUCT CALL: the question sent to the product, the outcome and the recorded answer.
 - PRODUCT HTTP: the request body sent and the reply (http_json adapter).
+- EVALUATION TRACE: per question, the evaluation input (criteria, reference spec, metric
+  mapping, guidance), the evidence prepared, the judge invocations, the lookups, every metric's
+  check-level decisions and the final verdict with its limitations.
 - The pipeline's own log lines for the run (counts, warnings), in time order.
 
 Never contains secrets: HTTP header values are not written (names only).
@@ -206,6 +209,23 @@ def record_product_http(*, request: dict[str, Any], response: Any, error: str | 
         parts.append(_section("ERROR", error))
     else:
         parts.append(_section(f"RESPONSE (HTTP {response['status']})", response["body"]))
+    log.write_text("".join(parts))
+
+
+def record_evaluation(subject: str, detail: str, sections: list[tuple[str, Any]]) -> None:
+    """An EVALUATION TRACE block: the reconstructable lifecycle of one question's evaluation
+    (input contract, evidence preparation, judge invocations, lookups, metric decisions, final
+    verdict). Only ids, summaries and decisions: raw prompts are already in the LLM CALL
+    blocks and are not repeated here."""
+    log = _log.get()
+    if log is None:
+        return
+    token = _subject.set(subject)
+    try:
+        parts = [_head(log, log.next_seq(), "EVALUATION TRACE", detail)]
+    finally:
+        _subject.reset(token)
+    parts.extend(_section(title, value) for title, value in sections)
     log.write_text("".join(parts))
 
 

@@ -34,6 +34,7 @@ from synthetic_user.models.scenario import Scenario
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
 from synthetic_user.nodes.evaluator.bugs import consolidate_bugs
 from synthetic_user.nodes.evaluator.kpis import compute_kpis
+from tests_support import failed_check
 
 SQL_TEXT = SQL
 UTTERANCES = ("Who were our top 10 card spenders last quarter?", "Top card spenders in Q3?")
@@ -61,7 +62,8 @@ def _cases(scenario: Scenario, pack: ReferencePack, count: int) -> list[Evaluati
 def _reply(scores: dict[str, float], findings: list[dict[str, Any]]) -> dict[str, Any]:
     reply = all_pass(*SQL_METRICS)
     for metric_id, value in scores.items():
-        reply["metrics"][metric_id] = score(value)
+        checks = [failed_check(metric_id)] if value < 1 else []
+        reply["metrics"][metric_id] = score(value, checks=checks)
     reply["findings"] = findings
     return reply
 

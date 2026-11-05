@@ -22,7 +22,7 @@ from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.reference import Reference
 from synthetic_user.models.run import EvaluationGuidance
 from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
-from tests_support import scripted_retrieval_reply
+from tests_support import checks_for, scripted_retrieval_reply
 
 GUIDANCE = "An unrequested tenant filter is an approved product requirement; do not penalise it."
 SQL = "SELECT bill_cycle_yr_mo_no, SUM(net_lpc_charge_usd_am) FROM v_lpc_details GROUP BY 1"
@@ -86,15 +86,15 @@ def _case(sample_scenarios: Any, sample_packs: Any) -> Any:
 
 
 def _general(user: str) -> dict[str, Any]:
-    from nodes.test_evaluator import CRITERIA, general, score
+    from nodes.test_evaluator import general, score
 
     line = user.split("on exactly these metric(s): ", 1)[1].split("\n", 1)[0]
     metrics = {m.strip().rstrip("."): score(1) for m in line.split(",")}
     if "correctness_completeness" in metrics:
         metrics["correctness_completeness"]["factual_verification"] = "unverified"
-    reply = general(metrics, response_classification="answered")
-    reply["criteria"] = [{"criterion": c, "status": "met", "rationale": "ok"} for c in CRITERIA]
-    return reply
+    for metric_id, judged in metrics.items():
+        judged["checks"] = checks_for(user, metric_id)
+    return general(metrics, response_classification="answered")
 
 
 async def _evaluate(
@@ -183,11 +183,13 @@ async def test_guidance_reaches_every_judge_call_without_extra_calls(
             user.index("## RULES"),
         )
         assert metrics_at < guidance_at < rules_at  # between the rubrics and the rules
-        assert f"<<<EVALUATION_GUIDANCE\n{GUIDANCE}\nEVALUATION_GUIDANCE>>>" in user
+        # unstructured guidance (no save step here) is ONE verbatim item, never dropped
+        assert "G1 [interpretation_rule; metrics: all]" in user
+        assert GUIDANCE in user.split("<<<EVALUATION_GUIDANCE", 1)[1]
         flat = " ".join(user.split())
         assert "never awards a score by itself" in flat
         assert "it lowers no score and is never a defect" in flat
-        assert "exempted_by = the exact text of that guidance item" in flat
+        assert "exempted_by = the id of that guidance item" in flat
         assert "Guidance never overrides the output contract, the evidence" in flat
     assert result.evaluation_guidance_sha256 == given.sha256
     assert case.execution.response.artifacts[0].content == SQL  # product response unchanged

@@ -259,7 +259,7 @@ def test_retries_must_be_non_negative(tmp_path: Path) -> None:
 def test_every_shipped_config_loads(name: str, env: dict[str, str]) -> None:
     """The new evaluation / web / question-policy keys are accepted in every config."""
     cfg = load_config(REPO_CONFIG.parent / name, env=env)
-    assert cfg.generation.question.max_success_criteria == 2
+    assert cfg.generation.question.max_success_criteria == 6
     assert set(cfg.evaluation.default_metrics) >= {"relevance", "correctness_completeness"}
     assert cfg.generation.question.max_parallel_scenarios == 5
     assert cfg.web.max_step_count == 100

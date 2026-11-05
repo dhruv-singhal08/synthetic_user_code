@@ -81,7 +81,7 @@ generation:
     max_parallel_scenarios: 5           # internal: concurrent per-scenario question calls
     max_deliverables: 2                 # hard limit; filters do not count as deliverables
     max_sources: 1                      # sources allowed in one question plan
-    max_success_criteria: 2
+    max_success_criteria: 6                # a cap, never a target: as many as the question needs
     max_words: 40
     allowed_complexities: [simple, medium]
     allow_follow_ups: false

@@ -229,10 +229,57 @@ async def test_full_run_files_types_refs_and_outcomes(
     kpi_csv = (run_dir / "kpis.csv").read_text(encoding="utf-8")
     assert "Rules Adherence (mean),0,1" in kpi_csv and "Accuracy,0.5,2" in kpi_csv
     judged = by_outcome["answered"]
-    assert [c.tag for c in judged.criteria_results] == ["CRIT-01", "CRIT-02"]
     assert judged.metrics["correctness_completeness"].details["factual_verification"] == (
         "unverified"
     )
+    # every score is explained: basis, assigned requirements, checks with evidence, coverage
+    semantic = judged.metrics["semantic_correctness"]
+    assert semantic.comparison_basis == "criteria_vs_sql"
+    assert semantic.verification_method == "static_sql_analysis"
+    assert semantic.assigned_criteria == ["C1", "C2"]
+    assert [(c.requirement_id, c.status) for c in semantic.checks] == [
+        ("C1", "passed"),
+        ("C2", "passed"),
+    ]
+    assert semantic.checks[0].requirement == "names the employees ranked by total card spend"
+    assert semantic.coverage is not None and semantic.coverage.evaluated == 2
+    assert [g.guidance_id for g in semantic.guidance_applied] == ["METRIC:semantic_correctness"]
+    rules = judged.metrics["rules_adherence"]
+    assert rules.assigned_reference_requirements == ["TABLE-RULE-01.01", "RULE-R1"]
+    assert [(c.requirement_id, c.requirement_source, c.status) for c in rules.checks][-1] == (
+        "JOIN-01",
+        "derived",
+        "failed",
+    )
+    assert rules.coverage is not None and (rules.coverage.assigned, rules.coverage.derived) == (
+        2,
+        1,
+    )
+    schema = judged.metrics["schema_faithfulness"]
+    assert [(c.requirement_id, c.status) for c in schema.checks] == [
+        ("reference_spec.schema", "failed")
+    ]
+    assert "RECON:1" in schema.observed_evidence_ids
+    assert judged.failed_requirements == [
+        "rules_adherence: JOIN-01",
+        "schema_faithfulness: reference_spec.schema",
+    ]
+    assert any("not executed against a database" in item for item in judged.limitations)
+    assert judged.reference_checks is not None
+    assert judged.reference_checks.additional_lookup_performed is False
+    # run.log reconstructs every evaluation: input, evidence, invocation, lookups, decisions
+    for section in ("A. EVALUATION INPUT", "B. EVIDENCE PREPARATION", "C. JUDGE INVOCATIONS"):
+        assert section in log
+    for section in ("D. OPTIONAL EVIDENCE LOOKUPS", "E. METRIC DECISIONS", "F. FINAL VERDICT"):
+        assert section in log
+    assert f"EVALUATION TRACE  {judged.question_id}" in log
+    # the question carries its Evaluation Context (no expected_behavior)
+    question = next(q for q in questions if q.question_id == judged.question_id)
+    context = question.context
+    assert [c.id for c in context.success_criteria] == ["C1", "C2"]
+    assert context.reference_spec is not None
+    assert context.reference_spec.pack_id == question.reference_pack_id
+    assert set(context.metric_mapping) == set(config.selected_metric_ids)
 
     assert summary.steps_run == list(Step)
     assert summary.verdicts == {"pass": 1, "fail": 1, "inconclusive": 0, "recorded_only": 1}
@@ -547,12 +594,18 @@ async def test_changing_evaluation_guidance_reruns_only_evaluation(
     pipeline2, llm2, product2 = _pipeline(settings)
     summary = await pipeline2.run(guided, run_id=RUN_ID)
     assert summary.steps_run == [Step.EVALUATE] and product2.asked == []
-    assert llm2.calls and all("## EVALUATION GUIDANCE" in c.user for c in llm2.calls)
+    # ONE structuring call for this guidance version, then the judges with its items
+    structuring, *judges = llm2.calls
+    assert "You structure evaluation guidance" in structuring.system
+    assert judges and all("## EVALUATION GUIDANCE" in c.user for c in judges)
+    assert all("G1 [exception; metrics: all]" in c.user for c in judges)
     run_dir = settings.paths.artifacts_dir / "runs" / RUN_ID
     manifest = _load(run_dir, "manifest.json", TypeAdapter(RunManifest))
-    assert manifest.evaluation_guidance == guidance
+    assert guidance is not None and manifest.evaluation_guidance is not None
+    assert manifest.evaluation_guidance.sha256 == guidance.sha256
+    assert [i.guidance_id for i in manifest.evaluation_guidance.items] == ["G1"]
+    assert manifest.evaluation_guidance.items[0].text == "Approved: tenant filters."
     evaluations = _load(run_dir, "evaluations.json", TypeAdapter(list[EvaluationResult]))
-    assert guidance is not None
     assert {e.evaluation_guidance_sha256 for e in evaluations} == {guidance.sha256}
 
     pipeline3, llm3, _ = _pipeline(settings)

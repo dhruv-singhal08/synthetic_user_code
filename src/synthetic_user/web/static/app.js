@@ -70,21 +70,20 @@ const split = (value) => {
   if (!text.startsWith("• ")) return [text];
   return text.slice(2).split(/\n• /).map((item) => item.trim()).filter(Boolean);
 };
-// The structured success_criteria cell (JSON, D240): "general" (the question's criteria), one key
-// per metric with a question-specific expectation and "cheat_sheet" ({items, rules}).
-const criteriaOf = (row) => {
-  try { return JSON.parse(row.success_criteria || "{}") || {}; } catch (err) { return {}; }
+// The question's Evaluation Context cells: success_criteria ("C1: ..." bullets), reference_spec
+// (JSON: pack id, requirements, items, rules) and metric_mapping (JSON, per metric).
+const jsonCell = (value) => {
+  try { return JSON.parse(value || "{}") || {}; } catch (err) { return {}; }
 };
-const metricCriteria = (criteria) => Object.entries(criteria)
-  .filter(([key]) => key !== "general" && key !== "cheat_sheet")
-  .map(([id, value]) => {
-    // Not generated: {status, reason}; generated: the metric's own fields.
-    const notGenerated = value && Object.keys(value).sort().join() === "reason,status";
-    return `${metricLabel(id)}: ${notGenerated ? `${human(value.status)}${value.reason ? ` (${value.reason})` : ""}` : JSON.stringify(value)}`;
-  });
-const cheatSheetItems = (criteria) => {
-  const sheet = criteria.cheat_sheet;
-  return sheet ? [...(sheet.items || []), ...(sheet.rules || [])] : [];
+const mappingLines = (row) => Object.entries(jsonCell(row.metric_mapping)).map(([id, m]) => {
+  const parts = [...(m.criteria || []), ...(m.reference_requirements || [])];
+  const x = m.expectation;
+  const expectation = x == null ? "" : ` · expectation ${x.status ? `${human(x.status)}${x.reason ? ` (${x.reason})` : ""}` : JSON.stringify(x)}`;
+  return `${metricLabel(id)} (${human(m.comparison_basis || "")}): ${parts.length ? parts.join(", ") : "no mapped requirement"}${expectation}`;
+});
+const specItems = (row) => {
+  const spec = jsonCell(row.reference_spec);
+  return [...(spec.items || []), ...(spec.rules || [])];
 };
 function kvList(entries) {
   const dl = el("dl", { class: "kv-list" });
@@ -365,7 +364,7 @@ function renderGuidance() {
   const g = state.guidance;
   $("#guidance-status").textContent = !state.runId
     ? "Start the run first; guidance is saved per run."
-    : g ? `Saved: ${g.source} · ${g.text.length} characters · sha256 ${g.sha256.slice(0, 12)}` : "No guidance saved.";
+    : g ? `Saved: ${g.source} · ${g.text.length} characters · sha256 ${g.sha256.slice(0, 12)}${g.items && g.items.length ? ` · ${g.items.length} item(s): ${g.items.map((i) => `${i.guidance_id} ${human(i.type)}`).join(", ")}` : ""}` : "No guidance saved.";
   const given = $("#guidance-text").value.trim() || $("#guidance-file").files.length;
   $("#save-guidance").disabled = !state.runId || state.busy || !given;
   $("#remove-guidance").classList.toggle("hidden", !g);
@@ -781,24 +780,23 @@ async function runAll() {
 function renderContracts() {
   const rows = questionRows();
   $("#contracts-card").classList.toggle("hidden", !rows.length);
-  $("#contracts-table thead").replaceChildren(el("tr", {}, ["Question", "Expected behaviour", "Success criteria"].map((h) => el("th", { text: h }))));
+  $("#contracts-table thead").replaceChildren(el("tr", {}, ["Question", "Success criteria", "Metric mapping"].map((h) => el("th", { text: h }))));
   $("#contracts-table tbody").replaceChildren(...rows.map((row) => {
     const tr = el("tr", { tabindex: "0" },
       el("td", { class: "q" }, el("b", { text: row.question }), el("small", { text: row.question_id })),
-      el("td", { class: "wide" }, el("div", { class: "clamp", text: row.expected_behavior })),
-      el("td", {}, criteriaCell(criteriaOf(row))));
+      el("td", { class: "wide" }, list(split(row.success_criteria))),
+      el("td", {}, criteriaCell(row)));
     tr.addEventListener("click", () => openDrawer(row));
     tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(row); } });
     return tr;
   }));
 }
 
-function criteriaCell(criteria) {
-  const sheet = cheatSheetItems(criteria);
+function criteriaCell(row) {
+  const sheet = specItems(row);
   return list([
-    ...(criteria.general || []),
-    ...metricCriteria(criteria),
-    ...(sheet.length ? [`Cheat sheet: ${sheet.length} item(s) · see details`] : []),
+    ...mappingLines(row),
+    ...(sheet.length ? [`Reference Spec: ${sheet.length} item(s) · see details`] : []),
   ]);
 }
 
@@ -1051,7 +1049,7 @@ function renderBreakdown() {
 }
 
 function mainColumns() {
-  return [["question_id", "ID"], ["question", "Question"], ["expected_behavior", "Expected behaviour"], ["product_outcome", "Outcome"], ["response_classification", "Response kind"], ["final_verdict", "Verdict"],
+  return [["question_id", "ID"], ["question", "Question"], ["success_criteria", "Success criteria"], ["product_outcome", "Outcome"], ["response_classification", "Response kind"], ["final_verdict", "Verdict"],
     ...activeMetrics().map((m) => [m, metricLabel(m)]), ["bug_ids", "Bug"]];
 }
 
@@ -1110,7 +1108,7 @@ function renderTable() {
       if (key === "question") {
         return el("td", { class: "q" }, el("b", { text: value || row.scenario_title }), el("small", { text: value ? row.scenario_title : "Scenario without a question yet" }));
       }
-      if (key === "expected_behavior") return el("td", { class: "wide" }, el("div", { class: "clamp", text: value }));
+      if (key === "success_criteria") return el("td", { class: "wide" }, el("div", { class: "clamp", text: split(value).join("\n") }));
       if (key === "response_classification") return el("td", { class: "nowrap", text: human(value) });
       if (key === "final_verdict") return el("td", { class: "nowrap" }, value ? verdictPill(value) : "");
       if (key === "product_outcome") return el("td", { class: "nowrap" }, value ? el("span", { class: `outcome ${value}`, text: OUTCOME_LABELS[value] || value }) : "");
@@ -1159,9 +1157,9 @@ const tagChips = (tags) => (tags && tags.length ? el("span", { class: "tags" }, 
 function openDrawer(row) {
   const scenario = state.scenarios.find((s) => s.id === row.scenario_id);
   const question = state.questions.find((q) => q.question_id === row.question_id);
-  // A question carries the cheat sheet it was generated with (success_criteria.cheat_sheet).
-  const pack = (question && question.expectations.success_criteria.cheat_sheet)
-    || (scenario && state.packs.find((p) => p.pack_id === scenario.reference_pack_id));
+  // A question carries the pack it was generated with (evaluation_context.reference_spec).
+  const spec = question && question.evaluation_context && question.evaluation_context.reference_spec;
+  const pack = (spec && spec.pack) || (scenario && state.packs.find((p) => p.pack_id === scenario.reference_pack_id));
   const evaluation = state.evaluations.find((e) => e.question_id === row.question_id);
   const execution = state.executions.find((e) => e.question_id === row.question_id);
   $("#drawer-eyebrow").textContent = [row.question_id, row.scenario_id, row.mode, evaluation && evaluation.legacy_evaluation_profile ? `legacy ${evaluation.legacy_evaluation_profile}` : ""].filter(Boolean).join("  ·  ");
@@ -1169,12 +1167,16 @@ function openDrawer(row) {
   $("#drawer-verdict").replaceChildren(...(row.final_verdict ? [verdictPill(row.final_verdict)] : []));
   const parts = [];
   if (evaluation) parts.push(...evaluationSections(evaluation));
-  if (row.question_id) {
-    const structured = criteriaOf(row);
-    const criteria = (structured.general || []).map((c, i) => el("span", {}, el("code", { class: "tag", text: `CRIT-${String(i + 1).padStart(2, "0")}` }), " ", c));
-    parts.push(section("Question and expected behaviour", kvList([
-      ["Asked", row.question], ["Expected behaviour", row.expected_behavior], ["Success criteria", criteria],
-      ["Metric criteria", metricCriteria(structured)],
+  if (row.question_id && question && !question.evaluation_context) {
+    parts.push(section("Question (legacy)", callout("warn", "Display only.", "Generated before the Evaluation Context: regenerate the questions step to execute or evaluate it."),
+      el("pre", { text: JSON.stringify(question.legacy_expectations, null, 1) })));
+  } else if (row.question_id) {
+    const context = question ? question.evaluation_context : null;
+    const criteria = context ? context.success_criteria.map((c) => el("span", {}, el("code", { class: "tag", text: c.id }), " ", c.requirement)) : split(row.success_criteria);
+    parts.push(section("Question and evaluation context", kvList([
+      ["Asked", row.question], ["Success criteria", criteria],
+      ["Reference Spec", spec ? `${spec.pack_id} · ${spec.reference_id}` : "none (ungrounded)"],
+      ["Metric mapping", mappingLines(row)],
     ])));
   }
   if (execution && execution.turns && execution.turns.length > 2) {
@@ -1249,19 +1251,49 @@ function evaluationSections(ev) {
       el("div", { text: m.rationale }), m.evidence ? el("span", { class: "quote", text: m.evidence }) : null,
       (m.what_worked || []).length ? el("ul", { class: "worked" }, m.what_worked.map((x) => el("li", { text: x }))) : null,
       (m.what_didnt || []).length ? el("ul", { class: "didnt" }, m.what_didnt.map((x) => el("li", { text: x }))) : null,
-      details.length ? list(details) : null));
+      details.length ? list(details) : null,
+      traceTable(m)));
   }
   return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")],
     ev.verdict_reason ? el("p", { class: "verdict-reason", text: ev.verdict_reason }) : null, minis,
     el("h4", { text: "Why these scores" }), why,
     kvList([["Product outcome", human(ev.product_outcome)], ["Response kind", ev.response_classification ? `${human(ev.response_classification)} (${human(ev.classification_source)})` : ""],
       ["Goal completion", ev.goal_completion ? `${human(ev.goal_completion.status)}: ${ev.goal_completion.reason}` : ""],
-      ["Judge's own opinion", ev.llm_verdict ? verdictPill(ev.llm_verdict) : ""], ["Verdict policy", ev.verdict_policy], ["Notes", ev.notes]]))];
+      ["Judge's own opinion", ev.llm_verdict ? verdictPill(ev.llm_verdict) : ""], ["Verdict policy", ev.verdict_policy],
+      ["Failed requirements", ev.failed_requirements || []], ["Unresolved requirements", ev.unresolved_requirements || []],
+      ["Limitations", ev.limitations || []], ["Evidence lookups", lookupLines(ev)], ["Notes", ev.notes]]))];
+}
+
+// Check-level decisions of one metric: what was compared, against which requirements and
+// guidance, with which evidence, and the coverage (reforming: every score explained).
+function traceTable(m) {
+  if (!m.coverage && !(m.checks || []).length) return null;
+  const c = m.coverage;
+  const head = [
+    m.comparison_basis ? `Compared: ${human(m.comparison_basis)}` : "",
+    m.verification_method ? `Method: ${human(m.verification_method)}` : "",
+    c ? `Coverage: ${c.evaluated}/${c.assigned} evaluated · ${c.passed} passed · ${c.failed} failed · ${c.not_applicable} n/a · ${c.unresolved} unresolved${c.derived ? ` · ${c.derived} derived` : ""}` : "",
+  ].filter(Boolean);
+  const table = el("table", { class: "dtable" });
+  for (const ch of m.checks || []) {
+    table.append(el("tr", {}, el("td", { class: "fit" }, el("code", { class: "tag", text: ch.requirement_id }), " ", pill(ch.status, { passed: "pass", failed: "fail", unresolved: "warn" }[ch.status] || "neutral")),
+      el("td", {}, ch.requirement ? el("div", { text: ch.requirement }) : null, el("div", { class: "muted", text: ch.reason }),
+        tagChips([...(ch.observed_evidence_ids || []), ...(ch.guidance_ids || [])]))));
+  }
+  const guidance = (m.guidance_applied || []).map((g) => `${g.guidance_id} (${human(g.guidance_type)}, ${g.source}): ${g.influence}`);
+  return el("details", { class: "raw" }, el("summary", { text: `Checks (${(m.checks || []).length})` }), list(head), table, guidance.length ? kvList([["Guidance applied", guidance]]) : null);
+}
+
+function lookupLines(ev) {
+  const rc = ev.reference_checks;
+  if (!rc) return [];
+  return [`Additional lookup performed: ${rc.additional_lookup_performed ? "yes" : "no"}`,
+    ...(rc.lookup_trace || []).map((e) => `${e.evidence_id || "-"} round ${e.round} ${human(e.request.tool)}: ${human((e.result && e.result.status) || "done")}${e.used_in_judgment ? " (used)" : ""}`)];
 }
 
 function detailSections(ev) {
   const out = [];
-  if (ev.criteria_results.length) {
+  if ((ev.criteria_results || []).length) {  // evaluations written before check-level decisions
     const table = el("table", { class: "dtable" });
     for (const c of ev.criteria_results) {
       table.append(el("tr", {}, el("td", { class: "fit" }, c.tag ? el("code", { class: "tag", text: c.tag }) : null, " ", pill(c.status, c.status)),

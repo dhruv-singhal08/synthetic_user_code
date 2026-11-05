@@ -44,7 +44,7 @@ generation:
     question_count: 1
     max_deliverables: 2                 # hard limit; filters do not count as deliverables
     max_sources: 1                      # one data source per question by default
-    max_success_criteria: 2
+    max_success_criteria: 6                # a cap, never a target: as many as the question needs
     max_words: 40
     allowed_complexities: [simple, medium]
     allow_follow_ups: false

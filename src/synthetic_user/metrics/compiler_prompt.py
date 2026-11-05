@@ -23,7 +23,7 @@ PROMPTS = prompts_beside(__file__, "compiler_prompt.yaml")
 SYSTEM = PROMPTS.text("system")
 # Judge groups a compiled custom metric may use (no safe deterministic custom implementation).
 COMPILABLE_JUDGE_GROUPS = (JudgeGroup.GENERAL, JudgeGroup.RETRIEVAL_GROUNDING)
-UNIVERSAL_QUESTION_FIELDS = ("utterance", "expected_behavior", "success_criteria")
+UNIVERSAL_QUESTION_FIELDS = ("utterance", "success_criteria")
 PRODUCT_FIELDS = {
     "name",
     "description",

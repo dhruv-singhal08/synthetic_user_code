@@ -641,3 +641,30 @@
   description; first attempt keyed on mechanism and over-split into 7 (fixed, regression test).
 - NOT verified: the UI bug list in a real browser (JS syntax-checked). Observation: the judge
   passed an extra market breakdown the question did not ask for (Q_003 of the scratch check).
+
+## Evaluation Context and evidence-backed scores (2026-11-05) - reforming.md
+
+Files changed: models/question.py (EvaluationContext, ReferenceSpec, MetricMapping, legacy
+questions), models/evaluation.py (RequirementCheck, CheckCoverage, GuidanceApplication,
+limitations), models/run.py (GuidanceItem), models/lookup.py (lookup traceability),
+models/metrics.py + metrics/catalog.yaml (comparison basis, verification method),
+nodes/question/{context.py (was expectations.py), prompt.py/.yaml, generator.py, diversity.py},
+nodes/evaluator/{evidence.py, guidance.py, traceability.py (new), general_judge.py,
+general_prompt.py/.yaml, judge_common.py/.yaml, retrieval_*.py, evaluator.py, trace_tags.py,
+applicability.py, benchmark.py}, nodes/executor/prompt.py, guidance/ (new structurer),
+pipeline.py, references/catalog_index.py, core/trace.py, web/{server.py, workspace.py,
+results_csv.py, static/app.js}, cli.py, config (max_success_criteria 6), tests (+ two new files),
+tests/fixtures/fake_llm_script.json. Decisions D245-D249.
+
+- Commands: `ruff check .` / `ruff format --check .` / `mypy src` / `pytest -q`: all pass,
+  830 passed (baseline 814). Offline demo `synthetic-user run --config app.fake.yaml`: run.log
+  shows the EVALUATION TRACE A-F per question.
+- Verified (offline): question generation with mapping integrity + id normalisation +
+  generation_failure; judge validation of missing / invented / inconsistent checks; coverage,
+  guidance resolution, code checks for non-judged metrics; unresolved visible with the verdict
+  unchanged; guidance structuring (verbatim, coverage, cache once per sha); legacy questions
+  refused at execute / evaluate; CSV columns; UI save shows structured items.
+- NOT verified: live Gemini / SafeChain runs of the new question and judge contracts (longer
+  judge output: checks per metric); the UI drawer in a real browser (JS syntax-checked with
+  JavaScriptCore); sqlglot on Amex Artifactory unchanged.
+- Open: stored runs must regenerate questions to be evaluated again (user decision).

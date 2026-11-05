@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -23,7 +22,14 @@ from synthetic_user.references.loader import load_reference, parse_reference
 from synthetic_user.references.pack import build_pack
 from synthetic_user.storage.json_store import JsonArtifactStore
 from synthetic_user.storage.runs import run_artifact
-from tests_support import AGENT_CONTEXT, TOOL_CATALOG, goal_for, scripted_retrieval_reply
+from tests_support import (
+    AGENT_CONTEXT,
+    TOOL_CATALOG,
+    checks_for,
+    failed_check,
+    goal_for,
+    scripted_retrieval_reply,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_CONFIG = REPO_ROOT / "config" / "app.yaml"
@@ -249,10 +255,12 @@ def scripted_judge(
 ) -> Judge:
     """A FakeLLM responder for both judge prompts.
 
-    General Judge: every requested metric scores 1 (criteria copied from the prompt), except
+    General Judge: every requested metric scores 1 (a passed check for every requirement its
+    evaluation contract assigns), except
     answers containing ``fail_on``: then ``failing`` (default: semantic_correctness when
     requested, else correctness_completeness, else the first metric) scores 0 with a supported
-    finding. The response classification is returned when the prompt asks for it.
+    finding and a failed derived check. The response classification is returned when the
+    prompt asks for it.
     Retrieval Judge: every requested metric 1, every chunk relevant, checklist covered.
     """
 
@@ -260,8 +268,6 @@ def scripted_judge(
         if "Retrieval and Grounding Judge" in system:
             return scripted_retrieval_reply(user)
         metrics = general_metrics_in(user)
-        block = user.split("What was asked and what is expected:\n", 1)[1].split("\n\n", 1)[0]
-        criteria = json.loads(block)["success_criteria"]
         answer = user.split("Product response (", 1)[1]
         bad = fail_on is not None and fail_on in answer
         target = failing or next(
@@ -273,6 +279,9 @@ def scripted_judge(
         scores: dict[str, Any] = {}
         for metric in metrics:
             score = dict(failed if bad and metric == target else ok)
+            score["checks"] = checks_for(user, metric)
+            if bad and metric == target:
+                score["checks"].append(failed_check(metric))
             if (
                 f"- {metric} (" in user
                 and "[factual verification required]"
@@ -282,7 +291,6 @@ def scripted_judge(
             scores[metric] = score
         reply: dict[str, Any] = {
             "metrics": scores,
-            "criteria": [{"criterion": c, "status": "met", "rationale": "fine"} for c in criteria],
             "findings": [
                 {
                     "category": target,

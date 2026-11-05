@@ -16,33 +16,55 @@ user: |
   Product contract:
   ${product}
 
-  What was asked and what is expected:
+  What was asked and what is expected (success criteria with their ids):
   ${expected}
+
+  Evaluation contract of each listed metric (the question's Metric Mapping): the success
+  criteria and Reference Spec requirements that metric must check, and its comparison basis:
+  ${mapping}
   ${sections}
   Traceability catalog (stable tags for related_tags):
   ${trace_catalog}
 
-  Product response (${response_kind}):
+  Product response (${response_kind}) - evidence id RESPONSE; non-SQL artifacts ARTIFACT:<n> in
+  order; SQL artifacts SQL:<k> (their parsed clauses are listed with ids above):
   ${response}
 
   ## METRICS
   ${metric_rules}
   ${guidance}
+  Built-in evaluator guidance (cite by id; METRIC:<metric id> = that metric's rubric above):
+  ${builtin_guidance}
+
   ## RULES
   - Score each listed metric 0, 0.5 or 1 (null only when it genuinely cannot be decided from
     the evidence). Keep metrics independent: a problem belongs to the metric whose comparison
     it violates, not to every metric.
-  - criteria: one entry per success criterion (copy each criterion text exactly), status
-    met | partly | not_met | unverifiable, and metric_id = the listed metric it feeds (or null).
-    Judge semantic outcomes, not exact wording; a reasonable equivalent is met. unverifiable is
-    neutral: it must not lower a score or create a finding by itself.
+  - checks (inside each metric): one entry for EVERY requirement the evaluation contract lists
+    for that metric, never omitting one: requirement_id copied exactly, source success_criteria
+    (a C id) or reference_spec (a Reference Spec id), status passed | failed | not_applicable |
+    unresolved, evidence_ids = the evidence ids you actually inspected (only ids shown above:
+    RESPONSE, ARTIFACT:<n>, SQL:<k>, SQL:<k>:<CLAUSE>:<i>, RECON:<k>, LOOKUP:<n>, TOOL:<n>,
+    TURN:<n>), guidance_ids = guidance that changed this decision, and the reason. Judge
+    semantic outcomes, not exact wording; a reasonable equivalent passes. not_applicable = the
+    requirement cannot concern this metric for this response (e.g. a criterion the SQL cannot
+    express); unresolved = the evidence cannot settle it (never a pass, and it does not lower a
+    score by itself). A partly met requirement is failed (say what is missing).
+  - Derived checks (source derived) record anything else a score relies on: a catalog rule
+    found by a lookup or the reconciliation (requirement_id = its rule id), an extra check or
+    exception an evaluation guidance item requires (its id), or a problem the metric's rubric
+    covers that no listed requirement names (METRIC:<metric id>). Never invent requirements.
+  - A metric scored 1 has no failed check; a metric scored 0 or 0.5 has at least one failed
+    check. guidance_applied (inside each metric) lists every user guidance item or POLICY id
+    that materially influenced the score (applicability = why it applies here, influence =
+    what it changed); the metric's own rubric is recorded by code, do not list it.
   - Never assert factual accuracy without trusted evidence (the cheat sheet, tool results or
     retrieved context shown above). ${factual_rule}
   - A response saying the product cannot do something is not an error: judge whether the
-    limitation is justified by the product contract and the expectations.
+    limitation is justified by the product contract and the success criteria.
   ${goal_rule}
   - Every metric scored 0 or 0.5 needs a finding with that metric as category. evidence (in
-    scores, criteria and findings) is ONE short contiguous fragment copied character for
+    scores and findings) is ONE short contiguous fragment copied character for
     character from the response, its artifacts or the tool trace - or null. evidence_status:
     supported (the quote shows it), weak or unsupported.
   ${severity_rule}
@@ -74,11 +96,6 @@ factual_rule_on: >-
 factual_rule_off: When content cannot be verified, say so in the rationale.
 
 factual_marker: " [factual verification required]"
-
-section_metric_expectations: |
-
-  Question-specific expectations of the listed metrics:
-  ${expectations}
 
 section_cheat_sheet: |
 
@@ -129,7 +146,7 @@ section_reconciliation: |
   with a finding; not_established is an unresolved finding. Do not claim runtime efficiency or performance
   from SQL text alone.
   An issue the evidence cannot settle either way (e.g. a filter the question did not request
-  that neither the product contract, the expectations nor an applicable rule establishes;
+  that neither the product contract, the success criteria nor an applicable rule establishes;
   contradictory rules) is a finding with "unresolved": true, quoting the evidence: it does not
   lower a score by itself and is never assumed authorised or wrong.
   evidence is still copied ONLY from the product response (e.g. the identifier or clause as
@@ -238,12 +255,21 @@ judge_example:
   response_classification: "<answered | unable_to_answer>"
   classification_note: "<one line>"
 
-criterion_example:
-  criterion: "<a success criterion, copied exactly>"
-  status: "${criterion_statuses}"
-  rationale: "<why>"
-  evidence: "<one short exact fragment from the response, or null>"
-  metric_id: "${metric_ids}"
+check_example:
+  requirement_id: "<a C id or Reference Spec id listed for this metric, or a derived id>"
+  source: "${sources}"
+  status: "${statuses}"
+  evidence_ids: ["<evidence id inspected, e.g. RESPONSE or SQL:1:FILTER:1>"]
+  guidance_ids: ["<guidance id that changed this decision; empty if none>"]
+  reason: "<why, citing the evidence>"
+
+checks_as_above: "<one check per requirement listed for this metric, shaped as above>"
+guidance_as_above: "<shaped as above; empty if none>"
+
+guidance_applied_example:
+  guidance_id: "<a user guidance id (G1, ...) or a POLICY id>"
+  applicability: "<why it applies to this question and response>"
+  influence: "<what it changed in this metric's decision>"
 
 factual_example: "${factual_values}"
 

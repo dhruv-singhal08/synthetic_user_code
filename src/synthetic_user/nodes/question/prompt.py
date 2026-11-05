@@ -4,20 +4,21 @@ ONE scenario per prompt. Both modes: persona (read as prompts/persona.py says) +
 scenario. The persona alone decides HOW the question is asked; the scenario says only WHAT the
 user wants (D204). Grounded adds the scenario's cheat sheet (Reference Pack), the usage
 instructions and - when a selected metric needs them - the authoritative tool definitions, for
-the model's understanding only. Each question owns its expectations: the universal
-expected_behavior + 1-4 success_criteria, plus metric_expectations ONLY for the selected
-metrics whose definition needs a question-specific value.
+the model's understanding only. Each question owns its Evaluation Context: the success
+criteria (C1..Cn) and a metric_mapping entry for every selected metric that maps criteria (their
+ids) or needs a question-specific expectation (its value); code adds the Reference Spec and the
+rest of the mapping (context.py). Without a valid question the model returns a
+generation_failure instead of fabricating requirements.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from synthetic_user.models.base import AmbiguityLevel
-from synthetic_user.models.metrics import ExpectationFieldType, MetricDefinition
+from synthetic_user.models.metrics import ExpectationFieldType
 from synthetic_user.models.persona import Persona
 from synthetic_user.models.product import ProductDescription
 from synthetic_user.models.question import (
@@ -30,6 +31,7 @@ from synthetic_user.models.question import (
 )
 from synthetic_user.models.reference import Reference, ReferencePack
 from synthetic_user.models.scenario import Scenario, TaskType
+from synthetic_user.nodes.question.context import ContextRequest
 from synthetic_user.prompts.contracts import choices, render_contract
 from synthetic_user.prompts.persona import question_persona_block
 from synthetic_user.prompts.templates import prompts_beside
@@ -86,30 +88,42 @@ class QuestionPromptOptions:
     previous_questions: tuple[str, ...] = ()
 
 
-def question_example(metrics: Sequence[MetricDefinition]) -> dict[str, Any]:
+def question_example(request: ContextRequest) -> dict[str, Any]:
     example: dict[str, Any] = PROMPTS.data(
         "question_example",
         deliverable_actions=choices(DeliverableAction),
         task_types=choices(TaskType),
         styles=choices(QuestionStyle),
         ambiguity_levels=choices(AmbiguityLevel),
-        max_success_criteria=MAX_SUCCESS_CRITERIA,
     )
-    if metrics:
-        expectations = example["questions"][0]["expectations"]
-        entry = PROMPTS.data(
+    mapped = request.mapped
+    if mapped:
+        context = example["questions"][0]["evaluation_context"]
+        expectation = PROMPTS.data(
             "metric_expectation_example", statuses=choices(MetricExpectationStatus)
         )
-        expectations["metric_expectations"] = {
-            m.metric_id: {
-                "status": entry["status"],
-                "value": {
-                    f.name: _FIELD_PLACEHOLDERS[f.type] for f in m.question_expectation_schema
-                },
-                "reason": entry["reason"],
-            }
-            for m in metrics
-        }
+        criteria_ids = {d.metric_id for d in request.criteria_metrics}
+        requested_ids = {d.metric_id for d in request.requested}
+        mapping: dict[str, Any] = {}
+        for m in mapped:
+            entry: dict[str, Any] = (
+                dict(PROMPTS.data("metric_mapping_example"))
+                if m.metric_id in criteria_ids
+                else {"criteria": []}
+            )
+            entry["expectation"] = (
+                {
+                    "status": expectation["status"],
+                    "value": {
+                        f.name: _FIELD_PLACEHOLDERS[f.type] for f in m.question_expectation_schema
+                    },
+                    "reason": expectation["reason"],
+                }
+                if m.metric_id in requested_ids
+                else None
+            )
+            mapping[m.metric_id] = entry
+        context["metric_mapping"] = mapping
     return example
 
 
@@ -117,27 +131,44 @@ def _allowed(flag: bool) -> str:
     return PROMPTS.text("allowed" if flag else "not_allowed")
 
 
-def _metric_rules(metrics: Sequence[MetricDefinition]) -> str:
-    if not metrics:
+def _metric_rules(request: ContextRequest) -> str:
+    mapped = request.mapped
+    if not mapped:
         return PROMPTS.text("no_metric_rules")
+    criteria_ids = {d.metric_id for d in request.criteria_metrics}
+    requested_ids = {d.metric_id for d in request.requested}
     requirements = "\n".join(
         PROMPTS.text(
             "metric_requirement",
             metric_id=m.metric_id,
             display_name=m.display_name,
-            instructions=m.generation_instructions or m.description,
-            fields="; ".join(
+            criteria_rule=(
+                PROMPTS.text("metric_criteria_rule", basis=m.basis)
+                if m.metric_id in criteria_ids
+                else PROMPTS.text("metric_no_criteria_rule")
+            ),
+            expectation_rule=(
                 PROMPTS.text(
-                    "metric_field",
-                    name=f.name,
-                    type=f.type.value,
-                    required=PROMPTS.text("field_required" if f.required else "field_optional"),
-                    description=f.description,
+                    "metric_expectation_rule",
+                    instructions=m.generation_instructions or m.description,
+                    fields="; ".join(
+                        PROMPTS.text(
+                            "metric_field",
+                            name=f.name,
+                            type=f.type.value,
+                            required=PROMPTS.text(
+                                "field_required" if f.required else "field_optional"
+                            ),
+                            description=f.description,
+                        )
+                        for f in m.question_expectation_schema
+                    ),
                 )
-                for f in m.question_expectation_schema
+                if m.metric_id in requested_ids
+                else ""
             ),
         )
-        for m in metrics
+        for m in mapped
     )
     return PROMPTS.text("metric_rules", metrics=requirements)
 
@@ -165,16 +196,17 @@ def build_question_prompt(
     scenario: Scenario,
     grounding: tuple[ReferencePack, Reference] | None,
     options: QuestionPromptOptions,
-    metrics: Sequence[MetricDefinition] = (),
+    request: ContextRequest | None = None,
     *,
     tool_definitions: Reference | None = None,
 ) -> tuple[str, str]:
     """Return (system, user) asking for ``options.count`` questions for ``scenario``.
 
     ``grounding`` (pack + reference) is given for grounded scenarios, None for ungrounded.
-    ``metrics`` = the selected metrics whose question-specific expectation is requested.
+    ``request`` = what the metric_mapping must hold for the run's selected metrics.
     ``tool_definitions`` = the reference whose agent_context a requested metric needs.
     """
+    request = request or ContextRequest()
     product_json = product.model_dump(mode="json", include=PRODUCT_FIELDS)
     scenario_json = scenario.model_dump(mode="json", include=SCENARIO_FIELDS)
     ambiguity_rule = PROMPTS.text(
@@ -198,9 +230,10 @@ def build_question_prompt(
             instructions=reference.instructions_text(),
             tools=tools,
         )
-        missing = PROMPTS.text("grounded_missing")
+        missing = PROMPTS.text("grounded_missing", failure=PROMPTS.text("generation_failure"))
     else:
-        reference_block, missing = tools, PROMPTS.text("ungrounded_missing")
+        reference_block = tools
+        missing = PROMPTS.text("ungrounded_missing", failure=PROMPTS.text("generation_failure"))
 
     user = PROMPTS.text(
         "core",
@@ -220,9 +253,9 @@ def build_question_prompt(
         identifiers_rule=PROMPTS.text(
             "identifiers_technical" if options.technical_persona else "identifiers_plain"
         ),
-        metric_rules=_metric_rules(metrics),
+        metric_rules=_metric_rules(request),
         diversity=_diversity(options),
-        contract=render_contract(question_example(metrics)),
+        contract=render_contract(question_example(request)),
         missing=missing,
     )
     return SYSTEM, user

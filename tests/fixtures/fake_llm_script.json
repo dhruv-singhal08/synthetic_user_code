@@ -2,6 +2,51 @@
   "rules": [
     {
       "contains": [
+        "You structure evaluation guidance",
+        "exceptions: [tenant]"
+      ],
+      "response": {
+        "items": [
+          {
+            "type": "exception",
+            "metrics": [],
+            "text": "exceptions: [tenant]"
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You structure evaluation guidance",
+        "Approved: x."
+      ],
+      "response": {
+        "items": [
+          {
+            "type": "exception",
+            "metrics": [],
+            "text": "Approved: x."
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You structure evaluation guidance",
+        "Approved: tenant filters."
+      ],
+      "response": {
+        "items": [
+          {
+            "type": "exception",
+            "metrics": [],
+            "text": "Approved: tenant filters."
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
         "You compile user-written evaluation metrics"
       ],
       "response": {
@@ -180,7 +225,9 @@
     {
       "contains": [
         "You role-play",
-        "Top spenders by employee"
+        "Top spenders by employee",
+        "- semantic_correctness (Semantic Correctness)",
+        "- correctness_completeness (Correctness and Completeness)"
       ],
       "response": {
         "questions": [
@@ -205,12 +252,40 @@
               "style": "precise",
               "ambiguity_level": "low"
             },
-            "expectations": {
-              "expected_behavior": "Return the top 10 employees by total card spend for the last three months. If amounts use several currencies, keep them separate. Refusing is not acceptable.",
+            "evaluation_context": {
               "success_criteria": [
-                "names the employees ranked by total card spend",
-                "covers the requested time period"
-              ]
+                {
+                  "id": "C1",
+                  "requirement": "names the employees ranked by total card spend"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "covers the requested time period"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "semantic_correctness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
             }
           }
         ]
@@ -219,7 +294,124 @@
     {
       "contains": [
         "You role-play",
-        "Monthly spend trend by merchant category"
+        "Top spenders by employee",
+        "- correctness_completeness (Correctness and Completeness)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "Who were our top 10 card spenders over the last three months?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "rank",
+                  "subject": "employees by total card spend",
+                  "sources": [],
+                  "limit": 10
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "ranking"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "names the employees ranked by total card spend"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "covers the requested time period"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Top spenders by employee",
+        "- relevance (Relevance)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "Who were our top 10 card spenders over the last three months?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "rank",
+                  "subject": "employees by total card spend",
+                  "sources": [],
+                  "limit": 10
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "ranking"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "names the employees ranked by total card spend"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "covers the requested time period"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Monthly spend trend by merchant category",
+        "- semantic_correctness (Semantic Correctness)",
+        "- correctness_completeness (Correctness and Completeness)"
       ],
       "response": {
         "questions": [
@@ -244,12 +436,40 @@
               "style": "precise",
               "ambiguity_level": "low"
             },
-            "expectations": {
-              "expected_behavior": "Show card spend per merchant category for each month of this year, or ask a clarifying question when the request is ambiguous.",
+            "evaluation_context": {
               "success_criteria": [
-                "shows card spend per merchant category for each month",
-                "covers the requested period"
-              ]
+                {
+                  "id": "C1",
+                  "requirement": "shows card spend per merchant category for each month"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "covers the requested period"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "semantic_correctness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
             }
           }
         ]
@@ -258,7 +478,124 @@
     {
       "contains": [
         "You role-play",
-        "Card spend forecast"
+        "Monthly spend trend by merchant category",
+        "- correctness_completeness (Correctness and Completeness)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "How has our monthly card spend per merchant category changed this year?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "trend",
+                  "subject": "monthly card spend per merchant category",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "trend"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "shows card spend per merchant category for each month"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "covers the requested period"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Monthly spend trend by merchant category",
+        "- relevance (Relevance)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "How has our monthly card spend per merchant category changed this year?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "trend",
+                  "subject": "monthly card spend per merchant category",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "trend"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "shows card spend per merchant category for each month"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "covers the requested period"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Card spend forecast",
+        "- semantic_correctness (Semantic Correctness)",
+        "- correctness_completeness (Correctness and Completeness)"
       ],
       "response": {
         "questions": [
@@ -283,12 +620,40 @@
               "style": "precise",
               "ambiguity_level": "low"
             },
-            "expectations": {
-              "expected_behavior": "Say that forecasting is not supported yet; do not invent future figures.",
+            "evaluation_context": {
               "success_criteria": [
-                "states clearly whether a forecast can be produced",
-                "does not present invented future figures as facts"
-              ]
+                {
+                  "id": "C1",
+                  "requirement": "states clearly whether a forecast can be produced"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "does not present invented future figures as facts"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "semantic_correctness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
             }
           }
         ]
@@ -297,7 +662,124 @@
     {
       "contains": [
         "You role-play",
-        "Hotel limit for a Paris trip"
+        "Card spend forecast",
+        "- correctness_completeness (Correctness and Completeness)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "Can you forecast our card spend for next quarter?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "explain",
+                  "subject": "next-quarter card spend forecast",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "states clearly whether a forecast can be produced"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "does not present invented future figures as facts"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Card spend forecast",
+        "- relevance (Relevance)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "Can you forecast our card spend for next quarter?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "explain",
+                  "subject": "next-quarter card spend forecast",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "states clearly whether a forecast can be produced"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "does not present invented future figures as facts"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Hotel limit for a Paris trip",
+        "- semantic_correctness (Semantic Correctness)",
+        "- correctness_completeness (Correctness and Completeness)"
       ],
       "response": {
         "questions": [
@@ -322,12 +804,40 @@
               "style": "precise",
               "ambiguity_level": "low"
             },
-            "expectations": {
-              "expected_behavior": "State the nightly hotel limit that applies in Paris and whether taxes are included.",
+            "evaluation_context": {
               "success_criteria": [
-                "states the nightly hotel limit that applies",
-                "says whether taxes are included"
-              ]
+                {
+                  "id": "C1",
+                  "requirement": "states the nightly hotel limit that applies"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "says whether taxes are included"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "semantic_correctness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
             }
           }
         ]
@@ -336,7 +846,124 @@
     {
       "contains": [
         "You role-play",
-        "Approve my expense report"
+        "Hotel limit for a Paris trip",
+        "- correctness_completeness (Correctness and Completeness)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "How much can I spend per night on a hotel in Paris?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "lookup",
+                  "subject": "nightly hotel limit for Paris",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "states the nightly hotel limit that applies"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "says whether taxes are included"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Hotel limit for a Paris trip",
+        "- relevance (Relevance)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "How much can I spend per night on a hotel in Paris?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "lookup",
+                  "subject": "nightly hotel limit for Paris",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "states the nightly hotel limit that applies"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "says whether taxes are included"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Approve my expense report",
+        "- semantic_correctness (Semantic Correctness)",
+        "- correctness_completeness (Correctness and Completeness)"
       ],
       "response": {
         "questions": [
@@ -361,12 +988,155 @@
               "style": "precise",
               "ambiguity_level": "low"
             },
-            "expectations": {
-              "expected_behavior": "Decline: the assistant cannot approve reports; say where approval is done.",
+            "evaluation_context": {
               "success_criteria": [
-                "says clearly that it cannot approve reports",
-                "explains where approval is done"
-              ]
+                {
+                  "id": "C1",
+                  "requirement": "says clearly that it cannot approve reports"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "explains where approval is done"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "semantic_correctness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Approve my expense report",
+        "- correctness_completeness (Correctness and Completeness)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "Can you approve my expense report for me?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "explain",
+                  "subject": "expense report approval",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "says clearly that it cannot approve reports"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "explains where approval is done"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                },
+                "correctness_completeness": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "contains": [
+        "You role-play",
+        "Approve my expense report",
+        "- relevance (Relevance)"
+      ],
+      "response": {
+        "questions": [
+          {
+            "utterance": "Can you approve my expense report for me?",
+            "plan": {
+              "deliverables": [
+                {
+                  "action": "explain",
+                  "subject": "expense report approval",
+                  "sources": [],
+                  "limit": null
+                }
+              ],
+              "filters": [],
+              "is_follow_up": false
+            },
+            "intent": {
+              "task_type": "other"
+            },
+            "question_characteristics": {
+              "style": "precise",
+              "ambiguity_level": "low"
+            },
+            "evaluation_context": {
+              "success_criteria": [
+                {
+                  "id": "C1",
+                  "requirement": "says clearly that it cannot approve reports"
+                },
+                {
+                  "id": "C2",
+                  "requirement": "explains where approval is done"
+                }
+              ],
+              "metric_mapping": {
+                "relevance": {
+                  "criteria": [
+                    "C1",
+                    "C2"
+                  ],
+                  "expectation": null
+                }
+              }
             }
           }
         ]
@@ -386,7 +1156,30 @@
             "what_worked": [
               "states that forecasting is unsupported"
             ],
-            "what_didnt": []
+            "what_didnt": [],
+            "checks": [
+              {
+                "requirement_id": "C1",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "States that forecasting is not supported."
+              },
+              {
+                "requirement_id": "C2",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "No future figures are given."
+              }
+            ],
+            "guidance_applied": []
           },
           "correctness_completeness": {
             "score": 1,
@@ -395,24 +1188,32 @@
               "no invented figures"
             ],
             "what_didnt": [],
-            "factual_verification": "not_applicable"
+            "factual_verification": "not_applicable",
+            "checks": [
+              {
+                "requirement_id": "C1",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "States that forecasting is not supported."
+              },
+              {
+                "requirement_id": "C2",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "No future figures are given."
+              }
+            ],
+            "guidance_applied": []
           }
         },
-        "criteria": [
-          {
-            "criterion": "states clearly whether a forecast can be produced",
-            "status": "met",
-            "rationale": "Says forecasting is not supported.",
-            "evidence": "Forecasting is not supported yet.",
-            "metric_id": "correctness_completeness"
-          },
-          {
-            "criterion": "does not present invented future figures as facts",
-            "status": "met",
-            "rationale": "No figures given.",
-            "metric_id": "correctness_completeness"
-          }
-        ],
         "findings": [],
         "overall_verdict": "pass",
         "goal_completion": {
@@ -436,7 +1237,30 @@
             "what_worked": [
               "ranks employees by spend"
             ],
-            "what_didnt": []
+            "what_didnt": [],
+            "checks": [
+              {
+                "requirement_id": "C1",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Selects full_name ordered by total spend."
+              },
+              {
+                "requirement_id": "C2",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Filters the last 3 months."
+              }
+            ],
+            "guidance_applied": []
           },
           "correctness_completeness": {
             "score": 1,
@@ -445,7 +1269,30 @@
               "ranking, period and limit present"
             ],
             "what_didnt": [],
-            "factual_verification": "unverified"
+            "factual_verification": "unverified",
+            "checks": [
+              {
+                "requirement_id": "C1",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Selects full_name ordered by total spend."
+              },
+              {
+                "requirement_id": "C2",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Filters the last 3 months."
+              }
+            ],
+            "guidance_applied": []
           },
           "semantic_correctness": {
             "score": 1,
@@ -453,7 +1300,30 @@
             "what_worked": [
               "ranks employees by SUM(amount)"
             ],
-            "what_didnt": []
+            "what_didnt": [],
+            "checks": [
+              {
+                "requirement_id": "C1",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Selects full_name ordered by total spend."
+              },
+              {
+                "requirement_id": "C2",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Filters the last 3 months."
+              }
+            ],
+            "guidance_applied": []
           },
           "rules_adherence": {
             "score": 0,
@@ -462,7 +1332,41 @@
             "what_worked": [],
             "what_didnt": [
               "uses merchant_id instead of employee_id"
-            ]
+            ],
+            "checks": [
+              {
+                "requirement_id": "TABLE-RULE-01.01",
+                "source": "reference_spec",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "The table rule is not violated by the SQL."
+              },
+              {
+                "requirement_id": "RULE-R1",
+                "source": "reference_spec",
+                "status": "passed",
+                "evidence_ids": [
+                  "SQL:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Amounts are not combined across currencies in one value."
+              },
+              {
+                "requirement_id": "JOIN-01",
+                "source": "derived",
+                "status": "failed",
+                "evidence_ids": [
+                  "SQL:1",
+                  "RECON:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Joins over merchant_id = employee_id instead of the documented relationship card_transactions.employee_id = employees.employee_id."
+              }
+            ],
+            "guidance_applied": []
           },
           "schema_faithfulness": {
             "score": 0,
@@ -473,23 +1377,23 @@
             ],
             "what_didnt": [
               "joins over a relationship the reference does not list"
-            ]
+            ],
+            "checks": [
+              {
+                "requirement_id": "reference_spec.schema",
+                "source": "reference_spec",
+                "status": "failed",
+                "evidence_ids": [
+                  "SQL:1",
+                  "RECON:1"
+                ],
+                "guidance_ids": [],
+                "reason": "Every identifier exists, but the join uses a relationship the reference does not list."
+              }
+            ],
+            "guidance_applied": []
           }
         },
-        "criteria": [
-          {
-            "criterion": "names the employees ranked by total card spend",
-            "status": "met",
-            "rationale": "Selects full_name ordered by total spend.",
-            "metric_id": "semantic_correctness"
-          },
-          {
-            "criterion": "covers the requested time period",
-            "status": "met",
-            "rationale": "Filters the last 3 months.",
-            "metric_id": "semantic_correctness"
-          }
-        ],
         "findings": [
           {
             "category": "rules_adherence",
@@ -541,7 +1445,30 @@
             "what_worked": [
               "answers the question"
             ],
-            "what_didnt": []
+            "what_didnt": [],
+            "checks": [
+              {
+                "requirement_id": "C1",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "States the limit."
+              },
+              {
+                "requirement_id": "C2",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "Mentions taxes."
+              }
+            ],
+            "guidance_applied": []
           },
           "correctness_completeness": {
             "score": 1,
@@ -550,23 +1477,32 @@
               "limit and taxes stated"
             ],
             "what_didnt": [],
-            "factual_verification": "unverified"
+            "factual_verification": "unverified",
+            "checks": [
+              {
+                "requirement_id": "C1",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "States the limit."
+              },
+              {
+                "requirement_id": "C2",
+                "source": "success_criteria",
+                "status": "passed",
+                "evidence_ids": [
+                  "RESPONSE"
+                ],
+                "guidance_ids": [],
+                "reason": "Mentions taxes."
+              }
+            ],
+            "guidance_applied": []
           }
         },
-        "criteria": [
-          {
-            "criterion": "states the nightly hotel limit that applies",
-            "status": "met",
-            "rationale": "States the limit.",
-            "metric_id": "correctness_completeness"
-          },
-          {
-            "criterion": "says whether taxes are included",
-            "status": "met",
-            "rationale": "Mentions taxes.",
-            "metric_id": "correctness_completeness"
-          }
-        ],
         "findings": [],
         "overall_verdict": "pass",
         "goal_completion": {

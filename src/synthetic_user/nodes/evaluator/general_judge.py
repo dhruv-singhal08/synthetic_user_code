@@ -7,10 +7,13 @@ criterion, and - only when the adapter exposes no typed response kind for an ans
 returns the response classification within the same call (no extra classifier call).
 
 Validation is structural: exactly the requested metric keys, 0 / 0.5 / 1 scores, every quote
-found in the response / artifacts / tool trace, every success criterion listed once, a finding
-for every score below 1, a factual-verification state where the metric asks for one, and no
-schema finding that names an SQL output alias, CTE or function (from the parser, not a regex),
-and a goal-completion assessment consistent with the response kind (D243).
+found in the response / artifacts / tool trace, a check-level decision for EVERY requirement the
+question's Metric Mapping assigns to each scored metric (no silent omission), every evidence id
+and guidance id resolvable (no invented evidence or guidance), a derived check only for a
+resolvable rule / guidance / rubric id, a score of 1 without a failed check and a score below 1
+with one, a finding for every score below 1, a factual-verification state where the metric asks
+for one, no schema finding that names an SQL output alias, CTE or function (from the parser,
+not a regex), and a goal-completion assessment consistent with the response kind (D243).
 Invalid output is retried (bounded); exhausted retries or a provider failure produce
 ``evaluation_error`` results with the reason, never a guessed score.
 
@@ -25,8 +28,8 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from synthetic_user.core.exceptions import LLMOutputValidationError, LLMProviderError
 from synthetic_user.llm.base import LLMClient
@@ -36,6 +39,8 @@ from synthetic_user.models.evaluation import (
     GOAL_PROBLEM_SEVERITY,
     GeneralJudgeDraft,
     JoinBasis,
+    RequirementSource,
+    RequirementStatus,
 )
 from synthetic_user.models.execution import DeniedResponse, ResponseClassification
 from synthetic_user.models.lookup import LookupOrigin
@@ -65,6 +70,10 @@ class GeneralJudgement:
     notes: list[str] = field(default_factory=list)
     calls: int = 0  # structured calls made (1, or 2 after a lookup request)
     lookup_requests: int = 0  # lookups the judge requested (0 when it scored at once)
+    # LLM attempts per structured call (validation retries included), in call order.
+    attempts: list[int] = field(default_factory=list)
+    # The evidence ids the final (scoring) call could cite.
+    evidence_ids: list[str] = field(default_factory=list)
 
 
 def quotable_text(data: GeneralJudgeInput) -> str:
@@ -91,7 +100,11 @@ def check_general(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: s
         return ["overall_verdict is required"]
     ids = [d.metric_id for d in data.definitions]
     errors = check_scores_and_findings(
-        draft.metrics, draft.findings, ids, quotable, guidance=data.guidance
+        draft.metrics,
+        draft.findings,
+        ids,
+        quotable,
+        guidance_ids=[g for g, ref in data.guidance_refs.items() if ref.user],
     )
     if data.needs_classification and draft.response_classification is None:
         errors.append("response_classification is required (answered | unable_to_answer)")
@@ -101,27 +114,94 @@ def check_general(draft: GeneralJudgeDraft, data: GeneralJudgeInput, quotable: s
             continue
         if definition.asks_factual_verification and judged.factual_verification is None:
             errors.append(f"{definition.metric_id}: factual_verification is required")
-    wanted = {_criterion_key(c): c for c in data.question.expectations.success_criteria.general}
-    got = [_criterion_key(r.criterion) for r in draft.criteria]
-    missing = [c for key, c in wanted.items() if key not in got]
-    extra = [r.criterion for r in draft.criteria if _criterion_key(r.criterion) not in wanted]
-    repeated = sorted({g for g in got if got.count(g) > 1})
-    if missing or extra or repeated:
-        errors.append(
-            f"criteria must list each success criterion once: missing {missing}, "
-            f"unknown {extra}, repeated {repeated}"
-        )
-    for result in draft.criteria:
-        if result.metric_id is not None and result.metric_id not in ids:
-            errors.append(f"criterion {result.criterion!r}: metric_id must be one of {ids} or null")
-        if result.evidence and not quoted(result.evidence, quotable):
-            errors.append(
-                f"criterion {result.criterion!r}: evidence {result.evidence!r} is not in the "
-                f"response ({COPY_HINT})"
-            )
+    errors.extend(check_problems(draft, data))
     errors.extend(_non_base_identifier_findings(draft, data))
     errors.extend(_unaddressed_undocumented_joins(draft, data))
     errors.extend(_goal_problems(draft, data, quotable))
+    return errors
+
+
+def derived_ids(data: GeneralJudgeInput) -> set[str]:
+    """What a derived check may name: a guidance id, a metric rubric (METRIC:<id>), a catalog
+    rule id the reconciliation or a lookup surfaced, or a Reference Spec requirement."""
+    ids = set(data.guidance_refs)
+    for item in data.sql:
+        if item.reconciliation is not None:
+            ids.update(item.reconciliation.rules_not_in_pack)
+    for entry in [*data.catalog_lookups, *(data.requested_lookups or ())]:
+        ids.update(getattr(rule, "rule_id", "") for rule in getattr(entry.result, "rules", []))
+    spec = data.question.context.reference_spec
+    if spec is not None:
+        ids.update(r.id for r in spec.requirements())
+    return {i for i in ids if i}
+
+
+def check_problems(draft: GeneralJudgeDraft, data: GeneralJudgeInput) -> list[str]:
+    """Check-level decisions (reforming, Parts 8 and 10): every requirement the Metric Mapping
+    assigns to a judged metric is decided exactly once with the right source, derived checks
+    name a resolvable id, evidence and guidance ids resolve, and the score agrees with the
+    checks (a 1 never hides a failed check; a 0 / 0.5 names one). Code never sets a score."""
+    registry = data.registry()
+    derivable = derived_ids(data)
+    errors: list[str] = []
+    for definition in data.definitions:
+        metric_id = definition.metric_id
+        judged = draft.metrics.get(metric_id)
+        if judged is None:
+            continue
+        assigned = data.assigned(metric_id)
+        criteria = (
+            set(data.question.context.metric_mapping[metric_id].criteria)
+            if (metric_id in data.question.context.metric_mapping)
+            else set()
+        )
+        decided: list[str] = []
+        for check in judged.checks:
+            rid = check.requirement_id.strip()
+            if check.source is RequirementSource.DERIVED:
+                if rid not in derivable:
+                    errors.append(
+                        f"{metric_id}: derived check {rid!r} names no catalog rule, guidance id, "
+                        "Reference Spec id or METRIC:<id> shown above"
+                    )
+                continue
+            decided.append(rid)
+            if rid not in assigned:
+                errors.append(
+                    f"{metric_id}: check {rid!r} is not assigned to this metric (assigned: "
+                    f"{assigned}); use source derived only for an extra check"
+                )
+            elif (rid in criteria) != (check.source is RequirementSource.SUCCESS_CRITERIA):
+                errors.append(f"{metric_id}: check {rid!r} has the wrong source")
+        if missing := [r for r in assigned if r not in decided]:
+            errors.append(
+                f"{metric_id}: checks must decide every assigned requirement; missing {missing}"
+            )
+        if repeated := sorted({r for r in decided if decided.count(r) > 1}):
+            errors.append(f"{metric_id}: requirements decided more than once: {repeated}")
+        cited = [*judged.evidence_ids, *(i for c in judged.checks for i in c.evidence_ids)]
+        if unknown := registry.unknown(cited):
+            errors.append(
+                f"{metric_id}: unknown evidence ids {sorted(set(unknown))}; cite only ids shown "
+                "above (RESPONSE, ARTIFACT:<n>, SQL:..., RECON:<k>, LOOKUP:<n>, TOOL:<n>, TURN:<n>)"
+            )
+        guidance = [
+            *(g.guidance_id for g in judged.guidance_applied),
+            *(i for c in judged.checks for i in c.guidance_ids),
+        ]
+        if unknown := [g for g in guidance if g not in data.guidance_refs]:
+            errors.append(f"{metric_id}: unknown guidance ids {sorted(set(unknown))}")
+        failed = any(c.status is RequirementStatus.FAILED for c in judged.checks)
+        if judged.score == 1 and failed:
+            errors.append(
+                f"{metric_id} is scored 1 but a check failed: score it below 1, or correct the "
+                "check (a passed check never hides a failed requirement)"
+            )
+        if judged.score is not None and judged.score < 1 and not failed:
+            errors.append(
+                f"{metric_id} is scored {judged.score:g} without a failed check: mark the "
+                "requirement that fails (or a derived check), or score it 1 if nothing fails"
+            )
     return errors
 
 
@@ -248,9 +328,29 @@ def _non_base_identifier_findings(draft: GeneralJudgeDraft, data: GeneralJudgeIn
     return errors
 
 
-def _criterion_key(text: str) -> str:
-    """Tolerate an LLM adding an ellipsis inside otherwise verbatim notation."""
-    return normalise(re.sub(r"\s*\.\.\.\s*", "", text))
+class _CountingLLM:
+    """Counts the LLM attempts of the current structured call (retries included) for the
+    evaluation trace; everything else is passed through unchanged."""
+
+    def __init__(self, llm: LLMClient, attempts: list[int]) -> None:
+        self._llm = llm
+        self._attempts = attempts
+
+    @property
+    def provider_name(self) -> str:
+        return self._llm.provider_name
+
+    @property
+    def model_name(self) -> str:
+        return self._llm.model_name
+
+    async def generate_json(self, system: str, user: str) -> dict[str, Any]:
+        self._attempts[-1] += 1
+        return await self._llm.generate_json(system, user)
+
+    async def generate_text(self, system: str, user: str) -> str:
+        self._attempts[-1] += 1
+        return await self._llm.generate_text(system, user)
 
 
 class GeneralJudge:
@@ -287,9 +387,11 @@ class GeneralJudge:
         system, user = build_general_prompt(data)
         quotable = quotable_text(data)
         judgement.calls += 1
+        judgement.attempts.append(0)
+        judgement.evidence_ids = data.registry().ids()
         try:
             return await generate_structured(
-                self._llm,
+                _CountingLLM(self._llm, judgement.attempts),
                 system,
                 user,
                 GeneralJudgeDraft,

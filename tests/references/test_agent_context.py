@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from synthetic_user.models.evaluation import EvaluationResult
@@ -15,7 +13,7 @@ from synthetic_user.nodes.evaluator.trace_tags import (
     trace_catalog,
 )
 from synthetic_user.references.loader import parse_reference
-from tests_support import AGENT_CONTEXT, TOOL_CATALOG
+from tests_support import AGENT_CONTEXT, TOOL_CATALOG, evaluation_context, pack_spec
 
 
 def test_agent_context_rejects_unknown_sources_and_duplicate_aliases() -> None:
@@ -77,15 +75,15 @@ def _question(pack: ReferencePack) -> QuestionCase:
                 "ambiguity_level": "low",
                 "complexity": "simple",
             },
-            "expectations": {
-                "expected_behavior": "Rank employees.",
-                "success_criteria": {"general": ["names the employees ranked by spend"]},
-            },
+            "evaluation_context": evaluation_context(
+                ["names the employees ranked by spend"], reference_spec=pack_spec(pack)
+            ),
         }
     )
 
 
-def _evaluation(**criterion: Any) -> EvaluationResult:
+def _evaluation(metric_id: str = "schema_faithfulness") -> EvaluationResult:
+    """A failed evaluation: criterion C1 failed in ``metric_id``."""
     return EvaluationResult.model_validate(
         {
             "schema_version": 2,
@@ -97,14 +95,22 @@ def _evaluation(**criterion: Any) -> EvaluationResult:
             "mode": "grounded",
             "verdict": "fail",
             "evaluation_status": "evaluated",
-            "criteria_results": [
-                {
-                    "criterion": "names the employees ranked by spend",
-                    "status": "not_met",
-                    "rationale": "missing",
-                    **criterion,
+            "metrics": {
+                metric_id: {
+                    "status": "scored",
+                    "score": 0.5,
+                    "rationale": "r",
+                    "checks": [
+                        {
+                            "check_id": "CHECK:001",
+                            "requirement_source": "success_criteria",
+                            "requirement_id": "C1",
+                            "status": "failed",
+                            "reason": "missing",
+                        }
+                    ],
                 }
-            ],
+            },
             "findings": [
                 {
                     "finding_id": "F_001",
@@ -125,17 +131,16 @@ def test_trace_catalog_and_finding_links(sample_packs: list[ReferencePack]) -> N
     pack = sample_packs[0]
     question = _question(pack)
     tags = [item.tag for item in trace_catalog(question, pack)]
-    assert tags[:3] == ["CRIT-01", "TABLE-01", "COLUMN-01.01"] and "JOIN-01" in tags
+    assert tags[:3] == ["C1", "TABLE-01", "COLUMN-01.01"] and "JOIN-01" in tags
     assert "RULE-R1" in tags
     # Judge-suggested tags survive only when they exist in this question's catalog.
     assert merge_finding_tags(["JOIN-01", "TABLE-99"], [], question, pack) == ["JOIN-01"]
 
     linked = attach_trace_links(_evaluation(), question, pack)
-    assert linked.criteria_results[0].tag == "CRIT-01"
     assert "SCHEMA-UNLISTED" in linked.findings[0].related_tags
     assert any(tag.startswith("TABLE-") for tag in linked.findings[0].related_tags)
-    # A failed criterion is linked to the finding of the metric it feeds (no regex guess).
-    assert "CRIT-01" in linked.findings[0].related_tags
+    # A failed criterion check is linked to the finding of the same metric (no regex guess).
+    assert "C1" in linked.findings[0].related_tags
 
 
 def test_failed_criterion_of_another_metric_is_not_linked(
@@ -143,4 +148,4 @@ def test_failed_criterion_of_another_metric_is_not_linked(
 ) -> None:
     pack = sample_packs[0]
     linked = attach_trace_links(_evaluation(metric_id="relevance"), _question(pack), pack)
-    assert "CRIT-01" not in linked.findings[0].related_tags
+    assert "C1" not in linked.findings[0].related_tags

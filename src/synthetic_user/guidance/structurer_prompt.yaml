@@ -1,0 +1,61 @@
+# Prompt text for the evaluation-guidance structurer (structurer.py): ONE call when the user
+# saves evaluation guidance. structurer_prompt.py fills every ${placeholder}; a literal dollar
+# sign is written $$.
+
+system: >-
+  You structure evaluation guidance written by the people who evaluate a conversational
+  product. You split it into items without losing or changing any information: every item's
+  text is copied character for character from the guidance. You reply with a single JSON object
+  and nothing else.
+
+user: |
+  ## TASK
+  Split the evaluation guidance below into items. Each item is ONE instruction (or one tightly
+  connected group of sentences) that can be cited on its own when an evaluation applies it.
+
+  ## INPUT
+  Evaluation guidance (${source}), with line numbers for reference only (they are not part of
+  the text):
+  <<<EVALUATION_GUIDANCE
+  ${numbered}
+  EVALUATION_GUIDANCE>>>
+
+  Metric ids of this run (for "metrics"):
+  ${metric_ids}
+
+  ## RULES
+  - text: a contiguous excerpt copied character for character from the guidance (without the
+    line numbers). Never rewrite, summarise, translate, merge or reorder text. A heading may be
+    included at the start of the item it introduces.
+  - Together the items must cover EVERY non-empty line of the guidance: nothing may be lost.
+    When unsure where to split, keep the lines together in one item.
+  - type: evaluation_requirement (an extra check the evaluation must make), interpretation_rule
+    (how to read a metric, a term, the reference or the product), exception (an approved
+    difference that is not a defect, e.g. an accepted filter, placeholder or naming), scoring_policy
+    (how a score is given) or evidence_policy (what evidence is enough, or what cannot be
+    verified).
+  - metrics: the metric ids from the list above that the item concerns; [] when it concerns
+    every metric or does not name one. Never invent metric ids.
+  - Items in the order of the guidance.
+
+  ## OUTPUT CONTRACT
+  ${contract}
+
+  ## PROHIBITED
+  - Changing, shortening or paraphrasing the guidance text; adding guidance that is not there.
+  - Any text outside the JSON object.
+
+example:
+  items:
+    - type: "${types}"
+      metrics: ["<metric id from the list, or empty>"]
+      text: "<an exact, contiguous excerpt of the guidance>"
+
+# Retry feedback (structurer.py).
+not_verbatim: >-
+  item ${index}: its text is not an exact excerpt of the guidance; copy the lines character for
+  character (without line numbers)
+unknown_metrics: >-
+  item ${index}: unknown metric ids ${metrics} (use only the listed ids, or [])
+lines_not_covered: >-
+  lines ${lines} of the guidance are not in any item: every non-empty line must be covered

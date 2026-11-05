@@ -97,6 +97,65 @@ class MetricStatus(StrEnum):
 NON_SCORED_STATUSES = tuple(s for s in MetricStatus if s is not MetricStatus.SCORED)
 
 
+class RequirementSource(StrEnum):
+    """Where a checked requirement comes from."""
+
+    SUCCESS_CRITERIA = "success_criteria"  # a criterion id (C1, C2, ...)
+    REFERENCE_SPEC = "reference_spec"  # a Reference Spec requirement id (trace tag)
+    # A check the judge added: a catalog rule found by a lookup, an extra check or exception
+    # required by evaluation guidance, or a problem the metric's rubric covers that no mapped
+    # requirement names. requirement_id is that rule / guidance / rubric id.
+    DERIVED = "derived"
+
+
+class RequirementStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+    # The evidence cannot settle it either way: visible in coverage and limitations, never a
+    # pass (the verdict policy is unchanged: only an unresolved FINDING makes it inconclusive).
+    UNRESOLVED = "unresolved"
+
+
+class RequirementCheck(StrictModel):
+    """One check-level decision of one metric."""
+
+    check_id: NonEmptyStr = Field(pattern=r"^CHECK:\d{3,}$")
+    requirement_source: RequirementSource
+    requirement_id: NonEmptyStr
+    # The requirement as written (criterion text, reference text, rule or guidance text).
+    requirement: NonEmptyStr | None = None
+    status: RequirementStatus
+    observed_evidence_ids: list[NonEmptyStr] = Field(default_factory=list)
+    guidance_ids: list[NonEmptyStr] = Field(default_factory=list)
+    reason: NonEmptyStr
+
+
+class CheckCoverage(StrictModel):
+    """Counts over one metric's checks. ``assigned`` = requirements the Metric Mapping gave the
+    metric; ``evaluated`` = assigned requirements with a decision other than unresolved."""
+
+    assigned: int = Field(ge=0)
+    evaluated: int = Field(ge=0)
+    passed: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    not_applicable: int = Field(ge=0)
+    unresolved: int = Field(ge=0)
+    derived: int = Field(default=0, ge=0)
+
+
+class GuidanceApplication(StrictModel):
+    """Guidance that influenced a metric decision: a user guidance item (G1, ...) or built-in
+    evaluator guidance (METRIC:<id> rubric, POLICY:<name>)."""
+
+    guidance_id: NonEmptyStr
+    guidance_type: NonEmptyStr
+    source: NonEmptyStr
+    instruction: NonEmptyStr  # the exact guidance text, or a resolvable source reference
+    applicability: NonEmptyStr | None = None  # why it applied (the judge's words)
+    influence: NonEmptyStr  # how it influenced the decision
+
+
 class MetricResult(StrictModel):
     status: MetricStatus
     score: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -112,6 +171,17 @@ class MetricResult(StrictModel):
     evidence_refs: list[NonEmptyStr] = Field(default_factory=list)
     # Metric-specific transparency (e.g. MRR first relevant rank, recall checklist coverage).
     details: dict[NonEmptyStr, JsonValue] = Field(default_factory=dict)
+    # Traceability (reforming, Part 10): what was compared against what, the requirements
+    # assigned by the question's Metric Mapping, the guidance applied, the check-level
+    # decisions and their coverage. Empty / None in artifacts written before it.
+    comparison_basis: NonEmptyStr | None = None
+    verification_method: NonEmptyStr | None = None
+    assigned_criteria: list[NonEmptyStr] = Field(default_factory=list)
+    assigned_reference_requirements: list[NonEmptyStr] = Field(default_factory=list)
+    guidance_applied: list[GuidanceApplication] = Field(default_factory=list)
+    checks: list[RequirementCheck] = Field(default_factory=list)
+    observed_evidence_ids: list[NonEmptyStr] = Field(default_factory=list)
+    coverage: CheckCoverage | None = None
 
     @model_validator(mode="after")
     def _score_iff_scored(self) -> Self:
@@ -168,6 +238,8 @@ class Finding(StrictModel):
     # A difference covered by an approved exception of the evaluation guidance (D243): the
     # exact guidance text it relies on. Recorded and shown, never a defect, a fail or a bug.
     exempted_by: NonEmptyStr | None = None
+    # The guidance item id of that exception (G1, ...); None in older artifacts.
+    exempted_by_id: NonEmptyStr | None = None
     # The judge's root-cause reading (D244); None in older artifacts or when not given.
     root_cause: RootCause | None = None
 
@@ -202,6 +274,9 @@ class CriterionStatus(StrEnum):
 
 
 class CriterionResult(StrictModel):
+    """Per-criterion result of evaluations written before check-level decisions (read and
+    shown only; new evaluations record ``MetricResult.checks``)."""
+
     tag: NonEmptyStr | None = None
     criterion: NonEmptyStr
     status: CriterionStatus
@@ -285,6 +360,12 @@ class EvaluationResult(StrictModel):
     reference_checks: ReferenceCheckRecord | None = None
     # sha256 of the run's evaluation guidance the judges saw (D237); None = no guidance.
     evaluation_guidance_sha256: NonEmptyStr | None = None
+    # What the evaluation could not establish (static SQL analysis, parse failures, missing
+    # tool traces, unresolved checks, unavailable lookups, ...), stated explicitly.
+    limitations: list[NonEmptyStr] = Field(default_factory=list)
+    # Requirements whose check failed / stayed unresolved, as "<metric>: <requirement id>".
+    failed_requirements: list[NonEmptyStr] = Field(default_factory=list)
+    unresolved_requirements: list[NonEmptyStr] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -386,6 +467,21 @@ class FactualVerification(StrEnum):
     NOT_APPLICABLE = "not_applicable"  # nothing factual to verify (e.g. a justified decline)
 
 
+class CheckDraft(StrictModel):
+    requirement_id: NonEmptyStr
+    source: RequirementSource
+    status: RequirementStatus
+    evidence_ids: list[NonEmptyStr] = Field(default_factory=list)
+    guidance_ids: list[NonEmptyStr] = Field(default_factory=list)
+    reason: NonEmptyStr
+
+
+class GuidanceApplicationDraft(StrictModel):
+    guidance_id: NonEmptyStr
+    applicability: NonEmptyStr
+    influence: NonEmptyStr
+
+
 class JudgedScore(StrictModel):
     score: float | None = Field(
         description="exactly 0, 0.5 or 1: 1 = fully, 0.5 = partly, 0 = not at all; "
@@ -401,6 +497,10 @@ class JudgedScore(StrictModel):
     what_worked: list[NonEmptyStr] = Field(default_factory=list)
     what_didnt: list[NonEmptyStr] = Field(default_factory=list)
     factual_verification: FactualVerification | None = None
+    # General Judge only: one decision per mapped requirement (+ derived checks) and the
+    # guidance that influenced the score. Code numbers the checks and resolves every id.
+    checks: list[CheckDraft] = Field(default_factory=list)
+    guidance_applied: list[GuidanceApplicationDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _three_levels(self) -> Self:
@@ -423,14 +523,6 @@ class FindingDraft(StrictModel):
     unresolved: bool = False
     exempted_by: NonEmptyStr | None = None
     root_cause: RootCause | None = None
-
-
-class CriterionDraft(StrictModel):
-    criterion: NonEmptyStr
-    status: CriterionStatus
-    rationale: NonEmptyStr
-    evidence: str | None = None
-    metric_id: NonEmptyStr | None = None
 
 
 class JoinBasis(StrEnum):
@@ -501,7 +593,6 @@ class GeneralJudgeDraft(StrictModel):
     response_classification: Literal["answered", "unable_to_answer"] | None = None
     classification_note: NonEmptyStr | None = None
     metrics: dict[NonEmptyStr, JudgedScore] = Field(default_factory=dict)
-    criteria: list[CriterionDraft] = Field(default_factory=list)
     findings: list[FindingDraft] = Field(default_factory=list)
     # Required on a scoring reply; checked by the General Judge (absent on a lookup request).
     overall_verdict: Verdict | None = None

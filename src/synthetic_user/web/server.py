@@ -325,13 +325,26 @@ def create_app(
         guidance_text: Annotated[str, Form()] = "",
         remove: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
-        """Set, replace or remove the run's evaluation guidance (any time; judges only)."""
+        """Set, replace or remove the run's evaluation guidance (any time; judges only). New
+        guidance is structured into verbatim items G1, G2, ... by ONE LLM call before it is
+        saved (cached by its sha256); when that fails nothing is saved."""
         state = workspace.state(check_run_id(run_id))
         upload = (
             Upload(guidance_file.filename or EVALUATION_GUIDANCE, await guidance_file.read())
             if guidance_file
             else None
         )
+        pending = workspace.pending_guidance(text=guidance_text, upload=upload, remove=remove)
+        if pending is not None:
+            run_settings = _settings_for_question_complexity(settings, state.question_complexity)
+            pipeline = SyntheticUserPipeline(
+                run_settings,
+                create_llm_client(run_settings),
+                UnavailableAdapter(),
+                store,
+                logger=get_run_logger("synthetic_user.web", run_id),
+            )
+            await pipeline.structure_guidance(run_id, pending)
         state = workspace.update_evaluation_guidance(
             state, text=guidance_text, upload=upload, remove=remove
         )

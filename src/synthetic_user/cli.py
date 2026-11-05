@@ -43,6 +43,7 @@ from synthetic_user.core.guidance import load_evaluation_guidance
 from synthetic_user.core.identifiers import RUN_ID_PATTERN, SequentialIdGenerator, new_run_id
 from synthetic_user.core.loaders import load_persona, load_product
 from synthetic_user.core.logging import get_run_logger, setup_logging
+from synthetic_user.guidance.structurer import GuidanceStructurer
 from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.fake import FakeLLMClient
@@ -589,6 +590,11 @@ async def _evaluate(
         if files.metric_config is not None
         else builtin_metric_config(list(settings.evaluation.default_metrics))
     )
+    guidance = _guidance(settings, guidance_path)
+    if guidance is not None:  # file mode has no run cache: one structuring call per evaluate
+        guidance = await GuidanceStructurer(
+            llm, logger, max_retries=settings.llm.max_validation_retries
+        ).structure(guidance, frozen.selected_metric_ids)
     evaluator = Evaluator(
         llm,
         settings,
@@ -596,7 +602,7 @@ async def _evaluate(
         reference=reference,
         metric_config=frozen,
         id_generator=SequentialIdGenerator(),
-        evaluation_guidance=_guidance(settings, guidance_path),
+        evaluation_guidance=guidance,
     )
     results = await evaluator.evaluate_many(cases, product)
     bugs = consolidate_bugs(results)  # one entry per root cause (D244)

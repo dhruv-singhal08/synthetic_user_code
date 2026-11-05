@@ -119,7 +119,7 @@ def checks_for(
     references = [r["id"] for r in entry.get("reference_requirements", [])]
     return [
         {
-            "requirement_id": rid,
+            "requirement_ids": [rid],
             "source": "success_criteria" if rid in criteria else "reference_spec",
             "status": status,
             "evidence_ids": [evidence],
@@ -132,7 +132,7 @@ def checks_for(
 def failed_check(metric: str, evidence: str = "RESPONSE") -> dict[str, Any]:
     """A derived failed check naming the metric's rubric (for a scripted score below 1)."""
     return {
-        "requirement_id": f"METRIC:{metric}",
+        "requirement_ids": [f"METRIC:{metric}"],
         "source": "derived",
         "status": "failed",
         "evidence_ids": [evidence],

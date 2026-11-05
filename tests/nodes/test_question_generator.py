@@ -411,7 +411,7 @@ async def test_failed_scenario_call_is_isolated(env: Env) -> None:
 def with_metric_expectations(
     question: dict[str, Any],
     entries: dict[str, Any],
-    criteria_metrics: tuple[str, ...] = ("relevance",),
+    criteria_metrics: tuple[str, ...] = ("correctness_completeness",),
 ) -> dict[str, Any]:
     """The question with a metric_mapping: every criterion mapped to ``criteria_metrics`` and
     ``entries`` (metric id -> expectation) as the expectations."""
@@ -425,38 +425,35 @@ def with_metric_expectations(
 
 
 async def test_criteria_metrics_are_mapped_and_code_completes_the_mapping(env: Env) -> None:
-    mapped = with_metric_expectations(
-        q("Who spends most?"), {}, ("relevance", "correctness_completeness")
-    )
+    mapped = with_metric_expectations(q("Who spends most?"), {})
     llm = FakeLLMClient([batch(mapped)])
     result = await env.run(
         llm, count=1, metrics=("relevance", "correctness_completeness", "schema_faithfulness")
     )
     context = result.questions[0].context
+    correctness = context.metric_mapping["correctness_completeness"]
+    assert (correctness.criteria, correctness.expectation) == (["C1", "C2"], None)
+    # relevance compares the question with the response only: never success criteria
     relevance = context.metric_mapping["relevance"]
-    assert (relevance.criteria, relevance.expectation) == (["C1", "C2"], None)
+    assert (relevance.criteria, relevance.reference_requirements) == ([], [])
     assert relevance.comparison_basis == "question_vs_response"
     # schema_faithfulness takes no criteria: code maps it to the Reference Spec's schema
     schema = context.metric_mapping["schema_faithfulness"]
     assert (schema.criteria, schema.reference_requirements) == ([], ["reference_spec.schema"])
     assert schema.comparison_basis == "schema_vs_sql" and schema.evidence_types == ["sql"]
     prompt = llm.calls[0].user
-    assert "- relevance (Relevance): criteria = the ids" in prompt
-    assert (
-        "schema_faithfulness ("
-        not in prompt.split("## OUTPUT CONTRACT", 1)[0]
-        .split("metric_mapping: one entry", 1)[1]
-        .split("## PROHIBITED", 1)[0]
-    )
+    assert "- correctness_completeness (Correctness and Completeness): criteria = the" in prompt
+    rules = prompt.split("metric_mapping: one entry", 1)[1].split("## OUTPUT CONTRACT", 1)[0]
+    assert "schema_faithfulness (" not in rules and "relevance (" not in rules
 
 
 async def test_every_criterion_must_be_mapped_and_ids_must_exist(env: Env) -> None:
     bad = q(
         "Who spends most?",
-        mapping={"relevance": {"criteria": ["C1", "C9"], "expectation": None}},
+        mapping={"correctness_completeness": {"criteria": ["C1", "C9"], "expectation": None}},
     )
     llm = FakeLLMClient([batch(bad)] * 3)
-    result = await env.run(llm, count=1, metrics=("relevance",))
+    result = await env.run(llm, count=1, metrics=("correctness_completeness",))
     assert not result.questions
     reasons = " ".join(result.rejected[0].reasons)
     assert "criteria ['C9'] are not success_criteria ids" in reasons
@@ -464,18 +461,20 @@ async def test_every_criterion_must_be_mapped_and_ids_must_exist(env: Env) -> No
 
 
 async def test_criterion_ids_are_normalised_by_code(env: Env) -> None:
-    question = q("Who spends most?", mapping={"relevance": {"criteria": ["b", "a"]}})
+    question = q("Who spends most?", mapping={"correctness_completeness": {"criteria": ["b", "a"]}})
     question["evaluation_context"]["success_criteria"] = [
         {"id": "a", "requirement": "names the spenders"},
         {"id": "b", "requirement": "ranks them"},
     ]
-    result = await env.run(FakeLLMClient([batch(question)]), count=1, metrics=("relevance",))
+    result = await env.run(
+        FakeLLMClient([batch(question)]), count=1, metrics=("correctness_completeness",)
+    )
     context = result.questions[0].context
     assert [(c.id, c.requirement) for c in context.success_criteria] == [
         ("C1", "names the spenders"),
         ("C2", "ranks them"),
     ]
-    assert context.metric_mapping["relevance"].criteria == ["C2", "C1"]
+    assert context.metric_mapping["correctness_completeness"].criteria == ["C2", "C1"]
 
 
 async def test_generation_failure_is_recorded_not_fabricated(env: Env) -> None:
@@ -494,7 +493,7 @@ async def test_context_recall_checklist_generated_and_stored(env: Env) -> None:
         }
     }
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
-    result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
+    result = await env.run(llm, count=1, metrics=("correctness_completeness", "context_recall"))
     stored = result.questions[0].context.expectation("context_recall")
     assert stored is not None and stored.status == "generated"
     assert stored.value == {"required_information": ["card spend per employee", "the last quarter"]}
@@ -513,7 +512,7 @@ async def test_cannot_generate_is_recorded_and_question_kept(env: Env) -> None:
         }
     }
     llm = FakeLLMClient([batch(with_metric_expectations(q("Who spends most?"), entry))])
-    result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
+    result = await env.run(llm, count=1, metrics=("correctness_completeness", "context_recall"))
     assert len(result.questions) == 1 and not result.rejected
     stored = result.questions[0].context.expectation("context_recall")
     assert stored is not None
@@ -560,7 +559,7 @@ async def test_malformed_metric_expectations_rejected(
 ) -> None:
     bad = with_metric_expectations(q("Who spends most?"), entries)
     llm = FakeLLMClient([batch(bad)] * 3)
-    result = await env.run(llm, count=1, metrics=("relevance", "context_recall"))
+    result = await env.run(llm, count=1, metrics=("correctness_completeness", "context_recall"))
     assert not result.questions
     assert any(problem in reason for reason in result.rejected[0].reasons), result.rejected
 
@@ -568,10 +567,10 @@ async def test_malformed_metric_expectations_rejected(
 async def test_tool_expectation_cannot_generate_without_tool_definitions(env: Env) -> None:
     """No agent_context in the reference: code records cannot_generate, the LLM is not asked."""
     question = with_metric_expectations(
-        q("Who spends most?"), {}, ("relevance", "tool_correctness")
+        q("Who spends most?"), {}, ("correctness_completeness", "tool_correctness")
     )
     llm = FakeLLMClient([batch(question)])
-    result = await env.run(llm, count=1, metrics=("relevance", "tool_correctness"))
+    result = await env.run(llm, count=1, metrics=("correctness_completeness", "tool_correctness"))
     stored = result.questions[0].context.expectation("tool_correctness")
     assert stored is not None and stored.status == "cannot_generate"
     assert "no authoritative tool definitions" in (stored.reason or "")

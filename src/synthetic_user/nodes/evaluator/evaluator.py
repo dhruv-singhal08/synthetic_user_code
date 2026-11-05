@@ -574,10 +574,11 @@ class Evaluator:
         general_scores = general.draft.metrics if general and general.draft else {}
         failed_criteria = {
             metric_id: [
-                c.requirement_id.strip()
+                rid.strip()
                 for c in judged.checks
                 if c.status is RequirementStatus.FAILED
                 and c.source is RequirementSource.SUCCESS_CRITERIA
+                for rid in c.requirement_ids
             ]
             for metric_id, judged in general_scores.items()
         }
@@ -638,9 +639,14 @@ class Evaluator:
             )
         lookups = judgements.reference_checks.lookup_trace if judgements.reference_checks else []
         exemptions: dict[str, list[str]] = {}
+        by_metric: dict[str, list[tuple[str, str, bool]]] = {}
         for finding in findings:
             if finding.exempted_by_id is not None:
                 exemptions.setdefault(finding.category, []).append(finding.exempted_by_id)
+            elif finding.exempted_by is None:
+                by_metric.setdefault(finding.category, []).append(
+                    (finding.finding_id, finding.description, finding.unresolved)
+                )
         metrics = trace_metrics(
             metrics,
             TraceInputs(
@@ -651,6 +657,7 @@ class Evaluator:
                 retrieval=retrieval.draft if retrieval is not None else None,
                 rule_texts=rule_texts(lookups),
                 exemptions=exemptions,
+                findings=by_metric,
             ),
         )
         reference_checks = mark_used_lookups(judgements.reference_checks, metrics)

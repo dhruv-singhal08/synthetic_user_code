@@ -342,7 +342,9 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
             [item.as_dict() for item in trace_catalog(question, data.pack)], indent=2
         ),
         response_kind=_response_kind(data.response),
-        response=render_response(data.response, artifact_max_chars=data.artifact_max_chars),
+        response=render_response(
+            data.response, artifact_max_chars=data.artifact_max_chars, evidence_ids=True
+        ),
         metric_rules=metric_blocks(marked),
         guidance=guidance_block(data.guidance),
         builtin_guidance=json.dumps(builtin_listing(data.guidance_refs), indent=2),

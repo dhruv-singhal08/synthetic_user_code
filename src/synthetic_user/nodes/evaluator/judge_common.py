@@ -47,17 +47,38 @@ def bounded(text: str, max_chars: int) -> str:
     )
 
 
-def render_response(response: EvaluableResponse, *, artifact_max_chars: int) -> str:
-    """The judge's view of the response, every artifact bounded to ``artifact_max_chars``."""
+def render_response(
+    response: EvaluableResponse, *, artifact_max_chars: int, evidence_ids: bool = False
+) -> str:
+    """The judge's view of the response, every artifact bounded to ``artifact_max_chars``.
+    ``evidence_ids`` (General Judge): each part carries the id it is cited by (RESPONSE,
+    SQL:<k> for the k-th SQL artifact, ARTIFACT:<n> for the n-th other artifact), so the judge
+    never has to guess an id."""
     if isinstance(response, DeniedResponse):
-        return json.dumps({"denial_message": response.message}, indent=2)
+        view: dict[str, Any] = {"denial_message": response.message}
+        return json.dumps({"evidence_id": "RESPONSE", **view} if evidence_ids else view, indent=2)
     artifacts: list[dict[str, Any]] = []
+    sql = other = 0
     for artifact in response.artifacts:
         content = (
             artifact.content if isinstance(artifact.content, str) else json.dumps(artifact.content)
         )
-        artifacts.append({"kind": artifact.kind, "content": bounded(content, artifact_max_chars)})
-    return json.dumps({"text": response.text, "artifacts": artifacts}, indent=2)
+        item: dict[str, Any] = {
+            "kind": artifact.kind,
+            "content": bounded(content, artifact_max_chars),
+        }
+        if evidence_ids:
+            if artifact.kind.casefold() == "sql" and isinstance(artifact.content, str):
+                sql += 1
+                item = {"evidence_id": f"SQL:{sql}", **item}
+            elif artifact.kind.casefold() != "sql":
+                other += 1
+                item = {"evidence_id": f"ARTIFACT:{other}", **item}
+        artifacts.append(item)
+    body: dict[str, Any] = {"text": response.text, "artifacts": artifacts}
+    if evidence_ids:
+        body = {"evidence_id": "RESPONSE", **body}
+    return json.dumps(body, indent=2)
 
 
 def missing_finding_message(metric: str, score: float) -> str:

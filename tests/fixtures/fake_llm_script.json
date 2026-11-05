@@ -264,13 +264,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -332,13 +325,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -355,8 +341,7 @@
     {
       "contains": [
         "You role-play",
-        "Top spenders by employee",
-        "- relevance (Relevance)"
+        "Top spenders by employee"
       ],
       "response": {
         "questions": [
@@ -392,15 +377,7 @@
                   "requirement": "covers the requested time period"
                 }
               ],
-              "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                }
-              }
+              "metric_mapping": {}
             }
           }
         ]
@@ -448,13 +425,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -516,13 +486,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -539,8 +502,7 @@
     {
       "contains": [
         "You role-play",
-        "Monthly spend trend by merchant category",
-        "- relevance (Relevance)"
+        "Monthly spend trend by merchant category"
       ],
       "response": {
         "questions": [
@@ -576,15 +538,7 @@
                   "requirement": "covers the requested period"
                 }
               ],
-              "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                }
-              }
+              "metric_mapping": {}
             }
           }
         ]
@@ -632,13 +586,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -700,13 +647,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -723,8 +663,7 @@
     {
       "contains": [
         "You role-play",
-        "Card spend forecast",
-        "- relevance (Relevance)"
+        "Card spend forecast"
       ],
       "response": {
         "questions": [
@@ -760,15 +699,7 @@
                   "requirement": "does not present invented future figures as facts"
                 }
               ],
-              "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                }
-              }
+              "metric_mapping": {}
             }
           }
         ]
@@ -816,13 +747,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -884,13 +808,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -907,8 +824,7 @@
     {
       "contains": [
         "You role-play",
-        "Hotel limit for a Paris trip",
-        "- relevance (Relevance)"
+        "Hotel limit for a Paris trip"
       ],
       "response": {
         "questions": [
@@ -944,15 +860,7 @@
                   "requirement": "says whether taxes are included"
                 }
               ],
-              "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                }
-              }
+              "metric_mapping": {}
             }
           }
         ]
@@ -1000,13 +908,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -1068,13 +969,6 @@
                 }
               ],
               "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                },
                 "correctness_completeness": {
                   "criteria": [
                     "C1",
@@ -1091,8 +985,7 @@
     {
       "contains": [
         "You role-play",
-        "Approve my expense report",
-        "- relevance (Relevance)"
+        "Approve my expense report"
       ],
       "response": {
         "questions": [
@@ -1128,15 +1021,7 @@
                   "requirement": "explains where approval is done"
                 }
               ],
-              "metric_mapping": {
-                "relevance": {
-                  "criteria": [
-                    "C1",
-                    "C2"
-                  ],
-                  "expectation": null
-                }
-              }
+              "metric_mapping": {}
             }
           }
         ]
@@ -1157,28 +1042,7 @@
               "states that forecasting is unsupported"
             ],
             "what_didnt": [],
-            "checks": [
-              {
-                "requirement_id": "C1",
-                "source": "success_criteria",
-                "status": "passed",
-                "evidence_ids": [
-                  "RESPONSE"
-                ],
-                "guidance_ids": [],
-                "reason": "States that forecasting is not supported."
-              },
-              {
-                "requirement_id": "C2",
-                "source": "success_criteria",
-                "status": "passed",
-                "evidence_ids": [
-                  "RESPONSE"
-                ],
-                "guidance_ids": [],
-                "reason": "No future figures are given."
-              }
-            ],
+            "checks": [],
             "guidance_applied": []
           },
           "correctness_completeness": {
@@ -1191,7 +1055,9 @@
             "factual_verification": "not_applicable",
             "checks": [
               {
-                "requirement_id": "C1",
+                "requirement_ids": [
+                  "C1"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [
@@ -1201,7 +1067,9 @@
                 "reason": "States that forecasting is not supported."
               },
               {
-                "requirement_id": "C2",
+                "requirement_ids": [
+                  "C2"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [
@@ -1238,28 +1106,7 @@
               "ranks employees by spend"
             ],
             "what_didnt": [],
-            "checks": [
-              {
-                "requirement_id": "C1",
-                "source": "success_criteria",
-                "status": "passed",
-                "evidence_ids": [
-                  "SQL:1"
-                ],
-                "guidance_ids": [],
-                "reason": "Selects full_name ordered by total spend."
-              },
-              {
-                "requirement_id": "C2",
-                "source": "success_criteria",
-                "status": "passed",
-                "evidence_ids": [
-                  "SQL:1"
-                ],
-                "guidance_ids": [],
-                "reason": "Filters the last 3 months."
-              }
-            ],
+            "checks": [],
             "guidance_applied": []
           },
           "correctness_completeness": {
@@ -1272,7 +1119,9 @@
             "factual_verification": "unverified",
             "checks": [
               {
-                "requirement_id": "C1",
+                "requirement_ids": [
+                  "C1"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [
@@ -1282,7 +1131,9 @@
                 "reason": "Selects full_name ordered by total spend."
               },
               {
-                "requirement_id": "C2",
+                "requirement_ids": [
+                  "C2"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [
@@ -1303,7 +1154,9 @@
             "what_didnt": [],
             "checks": [
               {
-                "requirement_id": "C1",
+                "requirement_ids": [
+                  "C1"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [
@@ -1313,7 +1166,9 @@
                 "reason": "Selects full_name ordered by total spend."
               },
               {
-                "requirement_id": "C2",
+                "requirement_ids": [
+                  "C2"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [
@@ -1335,7 +1190,9 @@
             ],
             "checks": [
               {
-                "requirement_id": "TABLE-RULE-01.01",
+                "requirement_ids": [
+                  "TABLE-RULE-01.01"
+                ],
                 "source": "reference_spec",
                 "status": "passed",
                 "evidence_ids": [
@@ -1345,7 +1202,9 @@
                 "reason": "The table rule is not violated by the SQL."
               },
               {
-                "requirement_id": "RULE-R1",
+                "requirement_ids": [
+                  "RULE-R1"
+                ],
                 "source": "reference_spec",
                 "status": "passed",
                 "evidence_ids": [
@@ -1355,7 +1214,9 @@
                 "reason": "Amounts are not combined across currencies in one value."
               },
               {
-                "requirement_id": "JOIN-01",
+                "requirement_ids": [
+                  "JOIN-01"
+                ],
                 "source": "derived",
                 "status": "failed",
                 "evidence_ids": [
@@ -1380,7 +1241,9 @@
             ],
             "checks": [
               {
-                "requirement_id": "reference_spec.schema",
+                "requirement_ids": [
+                  "reference_spec.schema"
+                ],
                 "source": "reference_spec",
                 "status": "failed",
                 "evidence_ids": [
@@ -1446,28 +1309,7 @@
               "answers the question"
             ],
             "what_didnt": [],
-            "checks": [
-              {
-                "requirement_id": "C1",
-                "source": "success_criteria",
-                "status": "passed",
-                "evidence_ids": [
-                  "RESPONSE"
-                ],
-                "guidance_ids": [],
-                "reason": "States the limit."
-              },
-              {
-                "requirement_id": "C2",
-                "source": "success_criteria",
-                "status": "passed",
-                "evidence_ids": [
-                  "RESPONSE"
-                ],
-                "guidance_ids": [],
-                "reason": "Mentions taxes."
-              }
-            ],
+            "checks": [],
             "guidance_applied": []
           },
           "correctness_completeness": {
@@ -1480,7 +1322,9 @@
             "factual_verification": "unverified",
             "checks": [
               {
-                "requirement_id": "C1",
+                "requirement_ids": [
+                  "C1"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [
@@ -1490,7 +1334,9 @@
                 "reason": "States the limit."
               },
               {
-                "requirement_id": "C2",
+                "requirement_ids": [
+                  "C2"
+                ],
                 "source": "success_criteria",
                 "status": "passed",
                 "evidence_ids": [

@@ -95,6 +95,8 @@ class TraceInputs:
     rule_texts: Mapping[str, str] = field(default_factory=dict)
     # metric id -> guidance ids its exempted findings relied on.
     exemptions: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    # metric id -> (finding id, description, unresolved) of its non-exempted findings.
+    findings: Mapping[str, Sequence[tuple[str, str, bool]]] = field(default_factory=dict)
 
 
 def trace_metrics(
@@ -117,7 +119,9 @@ def trace_metric(
     references = list(mapping.reference_requirements) if mapping is not None else []
     judged = inputs.general_scores.get(metric_id)
     if judged is not None and result.status in _JUDGED:
-        checks = [_from_draft(c, inputs, numbering) for c in judged.checks]
+        checks = [check for c in judged.checks for check in _from_draft(c, inputs, numbering)]
+        if result.score is not None and result.score < 1:
+            checks.extend(_from_findings(metric_id, checks, inputs, numbering))
     else:
         checks = _code_checks([*criteria, *references], criteria, result, inputs, numbering)
     if (
@@ -168,18 +172,45 @@ def coverage(checks: Sequence[RequirementCheck], assigned: int) -> CheckCoverage
 
 def _from_draft(
     draft: CheckDraft, inputs: TraceInputs, numbering: CheckNumbering
-) -> RequirementCheck:
-    requirement_id = draft.requirement_id.strip()
-    return RequirementCheck(
-        check_id=numbering.next(),
-        requirement_source=draft.source,
-        requirement_id=requirement_id,
-        requirement=_requirement_text(requirement_id, inputs),
-        status=draft.status,
-        observed_evidence_ids=list(dict.fromkeys(draft.evidence_ids)),
-        guidance_ids=list(dict.fromkeys(draft.guidance_ids)),
-        reason=draft.reason,
-    )
+) -> list[RequirementCheck]:
+    """One recorded check per requirement id of a (possibly shared) decision."""
+    return [
+        RequirementCheck(
+            check_id=numbering.next(),
+            requirement_source=draft.source,
+            requirement_id=requirement_id,
+            requirement=_requirement_text(requirement_id, inputs),
+            status=draft.status,
+            observed_evidence_ids=list(dict.fromkeys(draft.evidence_ids)),
+            guidance_ids=list(dict.fromkeys(draft.guidance_ids)),
+            reason=draft.reason,
+        )
+        for requirement_id in dict.fromkeys(r.strip() for r in draft.requirement_ids)
+    ]
+
+
+def _from_findings(
+    metric_id: str,
+    checks: Sequence[RequirementCheck],
+    inputs: TraceInputs,
+    numbering: CheckNumbering,
+) -> list[RequirementCheck]:
+    """A score below 1 whose checks name no failure is explained by the metric's own findings
+    (the validation requires one): each becomes a derived check of the metric's rubric, failed
+    (unresolved for an unresolved finding). Visible, never a silent gap."""
+    if any(c.status is RequirementStatus.FAILED for c in checks):
+        return []
+    return [
+        RequirementCheck(
+            check_id=numbering.next(),
+            requirement_source=RequirementSource.DERIVED,
+            requirement_id=metric_guidance_id(metric_id),
+            requirement=_requirement_text(metric_guidance_id(metric_id), inputs),
+            status=RequirementStatus.UNRESOLVED if unresolved else RequirementStatus.FAILED,
+            reason=f"from finding {finding_id}: {description}",
+        )
+        for finding_id, description, unresolved in inputs.findings.get(metric_id, ())
+    ]
 
 
 def _code_checks(

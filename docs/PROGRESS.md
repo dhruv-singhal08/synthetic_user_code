@@ -668,3 +668,13 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   judge output: checks per metric); the UI drawer in a real browser (JS syntax-checked with
   JavaScriptCore); sqlglot on Amex Artifactory unchanged.
 - Open: stored runs must regenerate questions to be evaluated again (user decision).
+
+## Live findings on the Evaluation Context (2026-11-05, same day) - user report (D250)
+
+- Fixes: evidence ids inside the judge's response view; grouped checks (`requirement_ids`);
+  findings explain a sub-perfect score without a failed check; relevance without criteria;
+  drawer reordered (question and product response first) with empty-check and lookup labels.
+- Commands: ruff / format / mypy / pytest all pass (see below).
+- Verified: UI drawer rendered in headless Brave (CDP) for an offline run: answered SQL with
+  failures, a justified decline, a clarification; section order and content checked.
+- NOT verified: a new live Gemini / SafeChain run with the 22-rule pack that failed.

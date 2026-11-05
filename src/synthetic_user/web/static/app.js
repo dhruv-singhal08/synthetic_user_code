@@ -1165,8 +1165,9 @@ function openDrawer(row) {
   $("#drawer-eyebrow").textContent = [row.question_id, row.scenario_id, row.mode, evaluation && evaluation.legacy_evaluation_profile ? `legacy ${evaluation.legacy_evaluation_profile}` : ""].filter(Boolean).join("  ·  ");
   $("#drawer-title").textContent = row.question || row.scenario_title;
   $("#drawer-verdict").replaceChildren(...(row.final_verdict ? [verdictPill(row.final_verdict)] : []));
+  // Reading order: what was asked -> what the product did -> how it was judged -> why
+  // (findings, bugs) -> where it came from (scenario, reference pack).
   const parts = [];
-  if (evaluation) parts.push(...evaluationSections(evaluation));
   if (row.question_id && question && !question.evaluation_context) {
     parts.push(section("Question (legacy)", callout("warn", "Display only.", "Generated before the Evaluation Context: regenerate the questions step to execute or evaluate it."),
       el("pre", { text: JSON.stringify(question.legacy_expectations, null, 1) })));
@@ -1198,7 +1199,7 @@ function openDrawer(row) {
     }
     parts.push(section("Product response", ...content));
   }
-  if (evaluation) parts.push(...detailSections(evaluation));
+  if (evaluation) parts.push(...evaluationSections(evaluation), ...detailSections(evaluation));
   parts.push(section(["Scenario", pill(row.mode, row.mode === "grounded" ? "blue" : "neutral")], kvList([
     ["Title", row.scenario_title], ["Business goal", row.business_goal],
     ["Persona task", scenario ? scenario.typical_task || "" : ""],
@@ -1257,7 +1258,8 @@ function evaluationSections(ev) {
   return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")],
     ev.verdict_reason ? el("p", { class: "verdict-reason", text: ev.verdict_reason }) : null, minis,
     el("h4", { text: "Why these scores" }), why,
-    kvList([["Product outcome", human(ev.product_outcome)], ["Response kind", ev.response_classification ? `${human(ev.response_classification)} (${human(ev.classification_source)})` : ""],
+    el("h4", { text: "Verdict details" }),
+    kvList([["Response kind", ev.response_classification ? `${human(ev.response_classification)} (${human(ev.classification_source)})` : ""],
       ["Goal completion", ev.goal_completion ? `${human(ev.goal_completion.status)}: ${ev.goal_completion.reason}` : ""],
       ["Judge's own opinion", ev.llm_verdict ? verdictPill(ev.llm_verdict) : ""], ["Verdict policy", ev.verdict_policy],
       ["Failed requirements", ev.failed_requirements || []], ["Unresolved requirements", ev.unresolved_requirements || []],
@@ -1281,14 +1283,26 @@ function traceTable(m) {
         tagChips([...(ch.observed_evidence_ids || []), ...(ch.guidance_ids || [])]))));
   }
   const guidance = (m.guidance_applied || []).map((g) => `${g.guidance_id} (${human(g.guidance_type)}, ${g.source}): ${g.influence}`);
-  return el("details", { class: "raw" }, el("summary", { text: `Checks (${(m.checks || []).length})` }), list(head), table, guidance.length ? kvList([["Guidance applied", guidance]]) : null);
+  if (!(m.checks || []).length) {
+    // No mapped requirement (e.g. Relevance: question vs response only): say so, no empty table.
+    const basis = [m.comparison_basis ? `Compared: ${human(m.comparison_basis)}` : "", m.verification_method ? `Method: ${human(m.verification_method)}` : ""].filter(Boolean).join(" · ");
+    return el("div", { class: "muted", text: `${basis}${basis ? " · " : ""}no mapped requirement` });
+  }
+  return el("details", { class: "raw" }, el("summary", { text: `Checks (${m.checks.length})` }), list(head), table, guidance.length ? kvList([["Guidance applied", guidance]]) : null);
 }
 
 function lookupLines(ev) {
   const rc = ev.reference_checks;
   if (!rc) return [];
   return [`Additional lookup performed: ${rc.additional_lookup_performed ? "yes" : "no"}`,
-    ...(rc.lookup_trace || []).map((e) => `${e.evidence_id || "-"} round ${e.round} ${human(e.request.tool)}: ${human((e.result && e.result.status) || "done")}${e.used_in_judgment ? " (used)" : ""}`)];
+    ...(rc.lookup_trace || []).map((e) => `${e.evidence_id || "-"} ${e.round ? "requested by the judge" : "precomputed"} · ${human(e.request.tool)}: ${lookupStatus(e.result)}${e.used_in_judgment ? " · used in the judgment" : ""}`)];
+}
+
+function lookupStatus(r) {
+  if (r.status) return human(r.status);
+  const found = (r.rules || r.relationships || r.alternatives || []).length > 0;
+  const missing = (r.not_found || []).length > 0;
+  return found && missing ? "partly found" : found ? "found" : "not found";
 }
 
 function detailSections(ev) {

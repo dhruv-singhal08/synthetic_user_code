@@ -97,7 +97,7 @@ def _q(utterance: str) -> dict[str, Any]:
         "evaluation_context": {
             "success_criteria": [{"id": "C1", "requirement": "answers"}],
             # every selected criteria metric gets a mapping (code maps the others)
-            "metric_mapping": {m: {"criteria": ["C1"]} for m in TEST_METRICS},
+            "metric_mapping": {m: {"criteria": ["C1"]} for m in TEST_METRICS if m != "relevance"},
         },
     }
 

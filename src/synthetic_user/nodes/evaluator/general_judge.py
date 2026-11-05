@@ -10,8 +10,9 @@ Validation is structural: exactly the requested metric keys, 0 / 0.5 / 1 scores,
 found in the response / artifacts / tool trace, a check-level decision for EVERY requirement the
 question's Metric Mapping assigns to each scored metric (no silent omission), every evidence id
 and guidance id resolvable (no invented evidence or guidance), a derived check only for a
-resolvable rule / guidance / rubric id, a score of 1 without a failed check and a score below 1
-with one, a finding for every score below 1, a factual-verification state where the metric asks
+resolvable rule / guidance / rubric id, a score of 1 without a failed check (a score below 1
+without a failed check gets its findings as failed derived checks, by code), a finding for every
+score below 1, a factual-verification state where the metric asks
 for one, no schema finding that names an SQL output alias, CTE or function (from the parser,
 not a regex), and a goal-completion assessment consistent with the response kind (D243).
 Invalid output is retried (bounded); exhausted retries or a provider failure produce
@@ -139,8 +140,9 @@ def derived_ids(data: GeneralJudgeInput) -> set[str]:
 def check_problems(draft: GeneralJudgeDraft, data: GeneralJudgeInput) -> list[str]:
     """Check-level decisions (reforming, Parts 8 and 10): every requirement the Metric Mapping
     assigns to a judged metric is decided exactly once with the right source, derived checks
-    name a resolvable id, evidence and guidance ids resolve, and the score agrees with the
-    checks (a 1 never hides a failed check; a 0 / 0.5 names one). Code never sets a score."""
+    name a resolvable id, evidence and guidance ids resolve, and a score of 1 never hides a failed
+    check (a 0 / 0.5 without one is explained by its findings, traceability.py). One check may
+    decide several requirements (requirement_ids). Code never sets a score."""
     registry = data.registry()
     derivable = derived_ids(data)
     errors: list[str] = []
@@ -157,25 +159,27 @@ def check_problems(draft: GeneralJudgeDraft, data: GeneralJudgeInput) -> list[st
         )
         decided: list[str] = []
         for check in judged.checks:
-            rid = check.requirement_id.strip()
-            if check.source is RequirementSource.DERIVED:
-                if rid not in derivable:
+            for rid in (r.strip() for r in check.requirement_ids):
+                if check.source is RequirementSource.DERIVED:
+                    if rid not in derivable:
+                        errors.append(
+                            f"{metric_id}: derived check {rid!r} names no catalog rule, "
+                            "guidance id, Reference Spec id or METRIC:<id> shown above"
+                        )
+                    continue
+                decided.append(rid)
+                if rid not in assigned:
                     errors.append(
-                        f"{metric_id}: derived check {rid!r} names no catalog rule, guidance id, "
-                        "Reference Spec id or METRIC:<id> shown above"
+                        f"{metric_id}: check {rid!r} is not assigned to this metric (assigned: "
+                        f"{assigned}); use source derived only for an extra check"
                     )
-                continue
-            decided.append(rid)
-            if rid not in assigned:
-                errors.append(
-                    f"{metric_id}: check {rid!r} is not assigned to this metric (assigned: "
-                    f"{assigned}); use source derived only for an extra check"
-                )
-            elif (rid in criteria) != (check.source is RequirementSource.SUCCESS_CRITERIA):
-                errors.append(f"{metric_id}: check {rid!r} has the wrong source")
+                elif (rid in criteria) != (check.source is RequirementSource.SUCCESS_CRITERIA):
+                    errors.append(f"{metric_id}: check {rid!r} has the wrong source")
         if missing := [r for r in assigned if r not in decided]:
             errors.append(
-                f"{metric_id}: checks must decide every assigned requirement; missing {missing}"
+                f"{metric_id}: checks must decide every assigned requirement; missing {missing} "
+                "(requirements with the same decision may share one entry: list their ids in "
+                "requirement_ids)"
             )
         if repeated := sorted({r for r in decided if decided.count(r) > 1}):
             errors.append(f"{metric_id}: requirements decided more than once: {repeated}")
@@ -196,11 +200,6 @@ def check_problems(draft: GeneralJudgeDraft, data: GeneralJudgeInput) -> list[st
             errors.append(
                 f"{metric_id} is scored 1 but a check failed: score it below 1, or correct the "
                 "check (a passed check never hides a failed requirement)"
-            )
-        if judged.score is not None and judged.score < 1 and not failed:
-            errors.append(
-                f"{metric_id} is scored {judged.score:g} without a failed check: mark the "
-                "requirement that fails (or a derived check), or score it 1 if nothing fails"
             )
     return errors
 

@@ -51,7 +51,7 @@ def _mapped_question(scenario: Scenario, pack: ReferencePack) -> QuestionCase:
 
 def check(rid: str, source: str, status: str = "passed", **extra: Any) -> dict[str, Any]:
     return {
-        "requirement_id": rid,
+        "requirement_ids": [rid],
         "source": source,
         "status": status,
         "evidence_ids": ["SQL:1"],
@@ -62,7 +62,7 @@ def check(rid: str, source: str, status: str = "passed", **extra: Any) -> dict[s
 
 def good_checks() -> dict[str, list[dict[str, Any]]]:
     return {
-        "relevance": [check("C1", "success_criteria"), check("C2", "success_criteria")],
+        "relevance": [],  # question vs response only: no mapped requirement
         "semantic_correctness": [check("C1", "success_criteria"), check("C2", "success_criteria")],
         "rules_adherence": [
             check("TABLE-RULE-01.01", "reference_spec"),
@@ -128,8 +128,17 @@ async def test_every_score_is_explained_by_its_checks(
     assert rules.verification_method == "static_sql_analysis_with_catalog_lookups"
     assert rules.assigned_reference_requirements == ["TABLE-RULE-01.01", "RULE-R1"]
     assert [c.check_id for m in result.metrics.values() for c in m.checks] == [
-        f"CHECK:{n:03d}" for n in range(1, 8)
+        f"CHECK:{n:03d}" for n in range(1, 6)
     ]
+    relevance = result.metrics["relevance"]
+    assert (relevance.assigned_criteria, relevance.comparison_basis) == (
+        [],
+        "question_vs_response",
+    )
+    # every part of the response carries the evidence id the judge cites (no guessing)
+    response_view = prompt.split("Product response (", 1)[1]
+    assert '"evidence_id": "RESPONSE"' in response_view
+    assert '"evidence_id": "SQL:1",\n      "kind": "sql"' in response_view
     assert rules.checks[1].requirement == (
         "Amounts in different currency_code values must not be summed directly."
     )
@@ -161,8 +170,9 @@ async def test_omitted_or_invented_ids_and_hidden_failures_are_retried(
     sample_packs: list[ReferencePack],
 ) -> None:
     bad_checks = good_checks()
-    bad_checks["relevance"] = bad_checks["relevance"][:1]  # C2 silently omitted
-    bad_checks["semantic_correctness"][0]["evidence_ids"] = ["SQL:9"]  # invented evidence
+    bad_checks["semantic_correctness"] = bad_checks["semantic_correctness"][:1]  # C2 omitted
+    bad_checks["relevance"] = [check("C1", "success_criteria")]  # relevance has no criteria
+    bad_checks["semantic_correctness"][0]["evidence_ids"] = ["ARTIFACT:0"]  # invented evidence
     bad_checks["rules_adherence"].append(check("R99", "derived", "failed"))  # invented rule
     bad_checks["schema_faithfulness"] = [
         check("reference_spec.schema", "reference_spec", "failed", guidance_ids=["G7"])
@@ -176,8 +186,12 @@ async def test_omitted_or_invented_ids_and_hidden_failures_are_retried(
         [reply(bad_checks), reply()],
     )
     feedback = " ".join(llm.calls[1].user.split())
-    assert "relevance: checks must decide every assigned requirement; missing ['C2']" in feedback
-    assert "semantic_correctness: unknown evidence ids ['SQL:9']" in feedback
+    assert (
+        "semantic_correctness: checks must decide every assigned requirement; missing ['C2']"
+        in (feedback)
+    )
+    assert "relevance: check 'C1' is not assigned to this metric (assigned: [])" in feedback
+    assert "semantic_correctness: unknown evidence ids ['ARTIFACT:0']" in feedback
     assert "rules_adherence: derived check 'R99' names no catalog rule" in feedback
     assert "schema_faithfulness is scored 1 but a check failed" in feedback
     assert "schema_faithfulness: unknown guidance ids ['G7']" in feedback
@@ -312,10 +326,7 @@ async def test_metrics_decided_by_code_still_decide_every_mapped_requirement(
     denial = {"outcome": "denied", "message": "I cannot do that."}
     question = _mapped_question(scenario, pack)
     reply_ = all_pass("relevance", classify=False)
-    reply_["metrics"]["relevance"]["checks"] = [
-        {**check("C1", "success_criteria"), "evidence_ids": ["RESPONSE"]},
-        {**check("C2", "success_criteria"), "evidence_ids": ["RESPONSE"]},
-    ]
+    reply_["metrics"]["relevance"]["checks"] = []  # no mapped requirement
     reply_["goal_completion"] = {"status": "justified_decline", "reason": "contract"}
     llm = FakeLLMClient([reply_])
     evaluator = Evaluator(
@@ -337,3 +348,71 @@ async def test_metrics_decided_by_code_still_decide_every_mapped_requirement(
     assert rules.checks[0].reason.startswith("decided by code (not_applicable)")
     assert rules.guidance_applied == []  # no judge decided it
     assert result.limitations == []  # nothing static about SQL was judged
+
+
+async def test_one_entry_may_decide_several_requirements(
+    app_config: AppConfig,
+    sample_product: ProductDescription,
+    sample_reference: Reference,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+) -> None:
+    """Live finding: a pack with 22 rules made the judge omit most of them. Rules with the
+    same decision share ONE entry; code still records one check per rule."""
+    checks = good_checks()
+    checks["rules_adherence"] = [
+        {
+            "requirement_ids": ["TABLE-RULE-01.01", "RULE-R1"],
+            "source": "reference_spec",
+            "status": "not_applicable",
+            "evidence_ids": ["SQL:1"],
+            "reason": "the SQL sums one currency only",
+        }
+    ]
+    result, llm = await run(
+        app_config,
+        sample_product,
+        sample_reference,
+        sample_scenarios[0],
+        sample_packs[0],
+        [reply(checks)],
+    )
+    assert len(llm.calls) == 1
+    rules = result.metrics["rules_adherence"]
+    assert [(c.requirement_id, c.status, c.reason) for c in rules.checks] == [
+        ("TABLE-RULE-01.01", "not_applicable", "the SQL sums one currency only"),
+        ("RULE-R1", "not_applicable", "the SQL sums one currency only"),
+    ]
+    assert rules.coverage is not None and rules.coverage.not_applicable == 2
+
+
+async def test_a_score_below_one_without_a_failed_check_is_explained_by_its_findings(
+    app_config: AppConfig,
+    sample_product: ProductDescription,
+    sample_reference: Reference,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+) -> None:
+    """Live finding: '0.5 without a failed check' ended the call in evaluation_error. The
+    metric's own finding (required anyway) becomes its failed derived check - no retry."""
+    out = reply(findings=[finding("semantic_correctness", "LIMIT 10")])
+    out["metrics"]["semantic_correctness"]["score"] = 0.5
+    result, llm = await run(
+        app_config,
+        sample_product,
+        sample_reference,
+        sample_scenarios[0],
+        sample_packs[0],
+        [out],
+    )
+    assert len(llm.calls) == 1
+    semantic = result.metrics["semantic_correctness"]
+    derived = semantic.checks[-1]
+    assert (derived.requirement_id, derived.requirement_source, derived.status) == (
+        "METRIC:semantic_correctness",
+        "derived",
+        "failed",
+    )
+    assert derived.reason == "from finding F_001: semantic_correctness problem"
+    assert semantic.coverage is not None and semantic.coverage.derived == 1
+    assert result.failed_requirements == ["semantic_correctness: METRIC:semantic_correctness"]

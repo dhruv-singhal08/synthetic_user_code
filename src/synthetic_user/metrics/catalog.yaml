@@ -4,7 +4,7 @@
 # grouping only; they never decide which judge runs or which product can be tested.
 # Every metric is scored 0 / 0.5 / 1 (higher is better) or reported with a non-scored status.
 
-catalog_version: "2026.11-4"
+catalog_version: "2026.11-5"
 
 category_labels:
   answer_quality: Answer Quality / Task Fulfilment
@@ -21,7 +21,8 @@ metrics:
     judge_group: general
     comparison_basis: question_vs_response
     verification_method: response_review
-    uses_success_criteria: true
+    # Relevance compares the question with the response only: no success criteria are mapped.
+    uses_success_criteria: false
     description: >-
       Does the response address the user's intended request (direct responsiveness, not
       factual correctness)?

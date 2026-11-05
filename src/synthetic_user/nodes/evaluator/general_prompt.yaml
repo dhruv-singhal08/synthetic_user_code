@@ -26,8 +26,8 @@ user: |
   Traceability catalog (stable tags for related_tags):
   ${trace_catalog}
 
-  Product response (${response_kind}) - evidence id RESPONSE; non-SQL artifacts ARTIFACT:<n> in
-  order; SQL artifacts SQL:<k> (their parsed clauses are listed with ids above):
+  Product response (${response_kind}); each part shows the evidence_id it is cited by (an SQL
+  artifact's parsed clauses are listed with their own ids above):
   ${response}
 
   ## METRICS
@@ -40,12 +40,14 @@ user: |
   - Score each listed metric 0, 0.5 or 1 (null only when it genuinely cannot be decided from
     the evidence). Keep metrics independent: a problem belongs to the metric whose comparison
     it violates, not to every metric.
-  - checks (inside each metric): one entry for EVERY requirement the evaluation contract lists
-    for that metric, never omitting one: requirement_id copied exactly, source success_criteria
-    (a C id) or reference_spec (a Reference Spec id), status passed | failed | not_applicable |
-    unresolved, evidence_ids = the evidence ids you actually inspected (only ids shown above:
-    RESPONSE, ARTIFACT:<n>, SQL:<k>, SQL:<k>:<CLAUSE>:<i>, RECON:<k>, LOOKUP:<n>, TOOL:<n>,
-    TURN:<n>), guidance_ids = guidance that changed this decision, and the reason. Judge
+  - checks (inside each metric): EVERY requirement the evaluation contract lists for that
+    metric is decided in exactly one entry, never omitted: requirement_ids = the id(s) it
+    decides, copied exactly (requirements with the same source, status and reason - e.g. rules
+    that do not concern this SQL - share ONE entry listing all their ids), source
+    success_criteria (C ids) or reference_spec (Reference Spec ids), status passed | failed |
+    not_applicable | unresolved, evidence_ids = evidence ids you actually inspected, copied
+    exactly as shown above (never invented or renumbered), guidance_ids = guidance that changed
+    this decision, and the reason. Judge
     semantic outcomes, not exact wording; a reasonable equivalent passes. not_applicable = the
     requirement cannot concern this metric for this response (e.g. a criterion the SQL cannot
     express); unresolved = the evidence cannot settle it (never a pass, and it does not lower a
@@ -54,8 +56,8 @@ user: |
     found by a lookup or the reconciliation (requirement_id = its rule id), an extra check or
     exception an evaluation guidance item requires (its id), or a problem the metric's rubric
     covers that no listed requirement names (METRIC:<metric id>). Never invent requirements.
-  - A metric scored 1 has no failed check; a metric scored 0 or 0.5 has at least one failed
-    check. guidance_applied (inside each metric) lists every user guidance item or POLICY id
+  - A metric scored 1 has no failed check; for a metric scored 0 or 0.5 mark the requirement
+    that fails (code otherwise records its findings as failed derived checks). guidance_applied (inside each metric) lists every user guidance item or POLICY id
     that materially influenced the score (applicability = why it applies here, influence =
     what it changed); the metric's own rubric is recorded by code, do not list it.
   - Never assert factual accuracy without trusted evidence (the cheat sheet, tool results or
@@ -256,14 +258,14 @@ judge_example:
   classification_note: "<one line>"
 
 check_example:
-  requirement_id: "<a C id or Reference Spec id listed for this metric, or a derived id>"
+  requirement_ids: ["<C id(s) or Reference Spec id(s) listed for this metric, or a derived id>"]
   source: "${sources}"
   status: "${statuses}"
   evidence_ids: ["<evidence id inspected, e.g. RESPONSE or SQL:1:FILTER:1>"]
   guidance_ids: ["<guidance id that changed this decision; empty if none>"]
   reason: "<why, citing the evidence>"
 
-checks_as_above: "<one check per requirement listed for this metric, shaped as above>"
+checks_as_above: "<entries deciding every requirement listed for this metric, shaped as above>"
 guidance_as_above: "<shaped as above; empty if none>"
 
 guidance_applied_example:

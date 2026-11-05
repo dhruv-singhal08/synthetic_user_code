@@ -468,7 +468,10 @@ class FactualVerification(StrEnum):
 
 
 class CheckDraft(StrictModel):
-    requirement_id: NonEmptyStr
+    """One decision; several requirements with the same source, status and reason may share
+    it (code records one check per id)."""
+
+    requirement_ids: list[NonEmptyStr] = Field(min_length=1)
     source: RequirementSource
     status: RequirementStatus
     evidence_ids: list[NonEmptyStr] = Field(default_factory=list)

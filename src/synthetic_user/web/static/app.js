@@ -370,20 +370,62 @@ function renderGuidance() {
   $("#save-guidance").disabled = !state.runId || state.busy || !given;
   $("#remove-guidance").classList.toggle("hidden", !g);
   $("#remove-guidance").disabled = state.busy;
+  // Re-evaluate: once the product answers are recorded, judge them again with the saved
+  // guidance (only the Evaluate step runs; questions and answers are reused).
+  const canEvaluate = Boolean(state.runId) && done().has("execute");
+  const unsaved = unsavedGuidance();
+  $("#reevaluate").classList.toggle("hidden", !canEvaluate);
+  $("#reevaluate").disabled = state.busy;
+  $("#reevaluate").textContent = unsaved ? "Save and re-evaluate" : "Re-evaluate";
+  const note = !canEvaluate ? ""
+    : unsaved ? "Unsaved changes: Save and re-evaluate saves them, then judges the recorded answers again."
+      : guidanceStale() ? "The current results were judged with different guidance: re-evaluate to apply the saved guidance (questions and product answers are reused)."
+        : done().has("evaluate") ? "The current results use the saved guidance." : "Re-evaluate judges the recorded answers with the saved guidance.";
+  $("#reevaluate-note").textContent = note;
+  $("#reevaluate-note").classList.toggle("hidden", !note);
 }
 
-async function saveGuidance(remove) {
+// The run's current evaluations were judged with other guidance than the saved one.
+function guidanceStale() {
+  if (!done().has("evaluate") || !state.evaluations.length) return false;
+  const saved = state.guidance ? state.guidance.sha256 : null;
+  return state.evaluations.some((e) => (e.evaluation_guidance_sha256 || null) !== saved);
+}
+
+// Typed text or a chosen file that is not the saved guidance yet (an empty box is not a removal).
+function unsavedGuidance() {
+  const typed = $("#guidance-text").value.trim();
+  const g = state.guidance;
+  const saved = g && g.source === "typed in the UI" ? g.text.trim() : "";
+  return $("#guidance-file").files.length > 0 || (typed !== "" && typed !== saved);
+}
+
+async function postGuidance(remove) {
   const form = new FormData();
   const file = $("#guidance-file").files[0];
   if (remove) form.append("remove", "true");
   else if (file) form.append("guidance_file", file);
   else form.append("guidance_text", $("#guidance-text").value);
+  const body = await api(`/api/runs/${encodeURIComponent(state.runId)}/evaluation-guidance`, { method: "POST", body: form });
+  applyRun(body);
+  log(remove ? "Evaluation guidance removed" : `Evaluation guidance saved (${state.guidance.source})`);
+}
+
+async function saveGuidance(remove) {
   await withBusy(remove ? "Removing guidance" : "Saving guidance", async () => {
-    const body = await api(`/api/runs/${encodeURIComponent(state.runId)}/evaluation-guidance`, { method: "POST", body: form });
-    applyRun(body);
-    log(remove ? "Evaluation guidance removed" : `Evaluation guidance saved (${state.guidance.source})`);
-    toast(remove ? "Guidance removed" : "Guidance saved; the next Evaluate step uses it");
+    await postGuidance(remove);
+    toast(remove ? "Guidance removed" : done().has("execute") ? "Guidance saved; press Re-evaluate to apply it" : "Guidance saved; the next Evaluate step uses it");
   });
+}
+
+// Save pending guidance edits, then re-run only the Evaluate step and open the report.
+async function reevaluate() {
+  let ok = false;
+  await withBusy("Re-evaluating", async () => {
+    if (unsavedGuidance()) await postGuidance(false);
+    ok = await runStep("evaluate");
+  });
+  if (ok) { toast("Re-evaluation complete"); showView("report"); }
 }
 
 // Metrics whose evidence is retrieved context: the connection page then asks for its source.
@@ -432,7 +474,7 @@ function renderEvaluation() {
   if (frozen) {
     const unavailable = state.metricConfig ? state.metricConfig.definitions.filter((d) => d.availability === "unavailable") : [];
     node = callout("info", `Run ${state.run.run_id} uses this selection.`,
-      el("div", {}, scenariosDone ? "The selection is part of the run and frozen in its metric configuration. Start a new run to change it." : "The evaluation is locked. Use Edit evaluation to change it before the scenarios are generated.",
+      el("div", {}, scenariosDone ? "The metric selection is part of the run and frozen in its metric configuration (start a new run to change it). The evaluation guidance below can still be changed: Re-evaluate applies it to the recorded answers." : "The evaluation is locked. Use Edit evaluation to change it before the scenarios are generated.",
         frozen.custom_inputs.length ? list(frozen.custom_inputs.map((c) => `${c.provenance}: ${c.text}`)) : null,
         unavailable.length ? el("div", { class: "hint-warn", text: `Not compiled: ${unavailable.map((d) => `${d.metric_id} (${d.unavailable_reason})`).join("; ")}` }) : null));
   } else if (state.run && state.run.legacy_evaluation_profile) {
@@ -625,14 +667,16 @@ function updateUi() {
     const node = $(`.step[data-step="${step}"]`);
     const ready = Boolean(state.runId) && (i === 0 ? evaluationLocked() : d.has(STEPS[i - 1]));
     const btn = $(".step-btn", node);
+    // Evaluate done with other guidance than the saved one: out of date, re-run to apply it.
+    const stale = step === "evaluate" && guidanceStale();
     btn.disabled = !ready || state.busy;
-    btn.textContent = d.has(step) ? "Re-run" : "Run";
-    btn.classList.toggle("btn-primary", ready && !d.has(step));
+    btn.textContent = stale ? "Re-evaluate" : d.has(step) ? "Re-run" : "Run";
+    btn.classList.toggle("btn-primary", ready && (!d.has(step) || stale));
     if (!node.classList.contains("running") && !node.classList.contains("error")) {
-      node.classList.toggle("done", d.has(step));
-      node.classList.toggle("ready", ready && !d.has(step));
+      node.classList.toggle("done", d.has(step) && !stale);
+      node.classList.toggle("ready", ready && (!d.has(step) || stale));
       const status = $(".step-status", node);
-      status.replaceChildren(...(d.has(step) ? [icon("check"), "Done"] : [ready ? "Ready" : "Pending"]));
+      status.replaceChildren(...(stale ? [icon("warn"), "Guidance changed"] : d.has(step) ? [icon("check"), "Done"] : [ready ? "Ready" : "Pending"]));
       $(".step-dot", node).textContent = d.has(step) ? "" : String(i + 1);
       if (d.has(step)) $(".step-dot", node).append(icon("check"));
     }
@@ -1438,6 +1482,7 @@ async function boot() {
   $("#guidance-file").addEventListener("change", renderGuidance);
   $("#save-guidance").addEventListener("click", () => saveGuidance(false));
   $("#remove-guidance").addEventListener("click", () => saveGuidance(true));
+  $("#reevaluate").addEventListener("click", reevaluate);
   for (const b of $$("#context-source button")) b.addEventListener("click", () => setContextSource(b.dataset.source));
   setContextSource("response_field");
   $("#question-complexity").addEventListener("change", (e) => { state.questionComplexity = e.target.value; });

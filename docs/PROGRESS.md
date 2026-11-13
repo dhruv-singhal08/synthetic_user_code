@@ -720,3 +720,13 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   (scripted judge answers undocumented joins), fake_llm_script.json.
 - Commands: ruff / format / mypy / pytest: all pass, 851 passed.
 - NOT verified: a live run with only relevance + correctness on the commercial-card question.
+
+## Re-evaluate a finished run with new guidance (2026-11-13) - user request (D258)
+
+- Files: web/static/app.js (re-evaluate button, out-of-date marker, message wording),
+  web/static/index.html (button + note, card text). No server, pipeline or model change.
+- Commands: ruff / format / mypy / pytest: all pass (see below); JS syntax-checked.
+- Verified: headless Brave on an offline run - save guidance -> Evaluate marked "Guidance
+  changed"; Re-evaluate runs only Evaluate and opens the report; "Save and re-evaluate" with
+  unsaved edits; evaluations then carry the saved guidance's sha.
+- NOT verified: your real run (SafeChain / Gemini judge).

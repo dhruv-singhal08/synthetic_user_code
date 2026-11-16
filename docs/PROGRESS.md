@@ -730,3 +730,15 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   changed"; Re-evaluate runs only Evaluate and opens the report; "Save and re-evaluate" with
   unsaved edits; evaluations then carry the saved guidance's sha.
 - NOT verified: your real run (SafeChain / Gemini judge).
+
+## Scenario generation in batches (2026-11-16) - user request (D259)
+
+- Files: nodes/scenario/generator.py (batch loop, `batch_sizes`, failed-batch handling),
+  nodes/scenario/prompt.py + prompt.yaml (`earlier` option; new `earlier_batches` /
+  `earlier_item` entries, used from batch 2 on only), core/config.py + config/app*.yaml
+  (`scenario_batch_size: 25`), tests/nodes/test_scenario_generator.py (6 tests), README,
+  CLAUDE.md, DECISIONS.
+- Verified: single-batch prompts (grounded / ungrounded, with / without avoided signatures)
+  rendered byte-identical to the committed code; batches of 2/2/1, earlier titles in batch 2+,
+  cross-batch exact duplicates, no top-up, failed later batch kept, failed first batch raises.
+- NOT verified: a live run of more than 25 scenarios (SafeChain / Gemini).

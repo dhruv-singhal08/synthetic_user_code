@@ -15,7 +15,8 @@ Pipeline (single-turn, design v3: `docs/DESIGN_V3_REFERENCE_AND_EVALUATION.md`):
 Persona + Product [+ Reference (data_catalog | document_collection) + optional instructions]
   + run metric selection (11 built-in metrics + custom metrics; no evaluation profiles)
   -> [0] frozen metric config (compiler call only for custom metrics)
-  -> [1] Scenarios (one call; + Reference Pack only when grounded)
+  -> [1] Scenarios (one call per batch of scenario_batch_size, D259; + Reference Pack only
+     when grounded)
   -> [2] Questions (one call per scenario; each with an Evaluation Context: success criteria
      C1.., Reference Spec = the scenario's pack, Metric Mapping; no expected_behavior, D245)
   -> [3] Product Executor (ProductAdapter; + tool trace / retrieved context)

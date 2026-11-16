@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from synthetic_user.core.config import AppConfig
+from synthetic_user.core.exceptions import LLMOutputValidationError
 from synthetic_user.core.identifiers import SequentialIdGenerator
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.metrics.registry import builtin_metric_config
@@ -20,6 +21,7 @@ from synthetic_user.models.scenario import (
     TaskType,
 )
 from synthetic_user.nodes.scenario.generator import (
+    BATCH_FAILED,
     FILTERED_BY_CONFIG,
     MISSING_PACK,
     NO_VALID_ITEM,
@@ -27,6 +29,7 @@ from synthetic_user.nodes.scenario.generator import (
     UNEXPECTED_PACK,
     UNKNOWN_TYPICAL_TASK,
     ScenarioGenerator,
+    batch_sizes,
     scenario_signature,
 )
 from synthetic_user.nodes.scenario.prompt import ScenarioPromptOptions, build_scenario_prompt
@@ -545,3 +548,98 @@ async def test_typical_task_is_matched_to_the_persona_wording(
         None,
     ]
     assert result.rejected[0].reasons == [f"{UNKNOWN_TYPICAL_TASK}: 'Plan the office party'"]
+
+
+# --- sequential batches of scenario_batch_size (D259) ----------------------------------------
+
+EARLIER = "Scenarios already written in this run"
+
+
+def _variant(draft: dict[str, Any], n: int) -> dict[str, Any]:
+    """A distinct copy of ``draft`` (own title and goal, so its signature differs)."""
+    out = copy.deepcopy(draft)
+    out["title"] = f"{draft['title']} {n}"
+    out["business_goal"] = f"{draft['business_goal']} (variant {n})"
+    return out
+
+
+def test_batch_sizes() -> None:
+    assert batch_sizes(60, 25) == [25, 25, 10]
+    assert batch_sizes(25, 25) == [25]
+    assert batch_sizes(3, 25) == [3]
+    assert batch_sizes(5, 2) == [2, 2, 1]
+
+
+async def test_count_within_batch_size_is_one_unchanged_call(
+    env: Env, scenario_drafts: list[dict[str, Any]]
+) -> None:
+    llm = FakeLLMClient([_batch(*scenario_drafts)])
+    result = await env.run(llm, count=3, scenario_batch_size=3)
+    assert len(llm.calls) == 1 and len(result.accepted) == 3
+    options = ScenarioPromptOptions(
+        count=3,
+        include_unsupported_scenarios=True,
+        diversity_preference="balanced",
+        max_request_steps=env.settings.generation.question.max_deliverables,
+    )
+    _system, user = build_scenario_prompt(env.persona, env.product, env.reference, options)
+    assert llm.calls[0].user == user and EARLIER not in user
+
+
+async def test_larger_count_runs_sequential_batches_with_earlier_titles(
+    env: Env, scenario_drafts: list[dict[str, Any]]
+) -> None:
+    ranking, trend, forecast = scenario_drafts
+    llm = FakeLLMClient(
+        [
+            _batch(_variant(ranking, 1), _variant(trend, 1)),
+            _batch(_variant(ranking, 1), _variant(ranking, 2), _variant(trend, 2)),
+            _batch(forecast),
+        ]
+    )
+    result = await env.run(llm, count=5, scenario_batch_size=2)
+    assert len(llm.calls) == 3
+    first, second, third = (c.user for c in llm.calls)
+    assert "Write 2 distinct scenario(s)" in first and EARLIER not in first
+    assert "Write 2 distinct scenario(s)" in second and "Write 1 distinct scenario(s)" in third
+    assert EARLIER in second
+    assert f"- {ranking['title']} 1 (ranking)\n- {trend['title']} 1 (trend)" in second
+    assert f"- {ranking['title']} 2 (ranking)" in third
+    # A repeat of an earlier batch's scenario is an exact duplicate; the surplus is per batch.
+    assert [s.id for s in result.accepted] == [
+        "SCN_001",
+        "SCN_002",
+        "SCN_003",
+        "SCN_004",
+        "SCN_005",
+    ]
+    assert "exact duplicate of SCN_001" in result.duplicates[0].reasons[0]
+    assert not result.rejected
+
+
+async def test_batch_rejections_are_not_topped_up(
+    env: Env, scenario_drafts: list[dict[str, Any]]
+) -> None:
+    ranking, trend, _forecast = scenario_drafts
+    bad = {k: v for k, v in ranking.items() if k != "business_goal"}
+    llm = FakeLLMClient([_batch(bad, _variant(trend, 1)), _batch(_variant(ranking, 1))])
+    result = await env.run(llm, count=3, scenario_batch_size=2)
+    assert len(llm.calls) == 2 and "Write 1 distinct scenario(s)" in llm.calls[1].user
+    assert len(result.accepted) == 2 and len(result.rejected) == 1  # partial, not padded
+
+
+async def test_failed_later_batch_keeps_earlier_scenarios(
+    env: Env, scenario_drafts: list[dict[str, Any]]
+) -> None:
+    invalid = {"scenarios": "not a list"}
+    llm = FakeLLMClient([_batch(*scenario_drafts[:2]), invalid, invalid, invalid])
+    result = await env.run(llm, count=4, scenario_batch_size=2)
+    assert [s.id for s in result.accepted] == ["SCN_001", "SCN_002"]
+    assert result.rejected[-1].payload == {"batch": "2/2", "requested": 2}
+    assert result.rejected[-1].reasons[0].startswith(BATCH_FAILED)
+
+
+async def test_failed_first_batch_raises(env: Env) -> None:
+    invalid = {"scenarios": "not a list"}
+    with pytest.raises(LLMOutputValidationError):
+        await env.run(FakeLLMClient([invalid] * 3), count=4, scenario_batch_size=2)

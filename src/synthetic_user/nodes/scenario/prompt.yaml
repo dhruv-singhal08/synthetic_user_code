@@ -94,6 +94,14 @@ unsupported_excluded: Only produce scenarios the product supports.
 
 no_signatures_to_avoid: "- (none)"
 
+# Batched generation (D259): the scenarios accepted in this run's earlier batches (batch 2 on).
+earlier_batches: |-
+  Scenarios already written in this run (earlier batches). Write NEW scenarios: do not repeat
+  or rephrase any of these, and vary task types across the whole run:
+  ${titles}
+
+earlier_item: "- ${title} (${task_type})"
+
 # Selected run metrics: coverage guidance only (never a profile, never utterances).
 metrics_block: |
   Evaluation metrics selected for this run (coverage guidance only):

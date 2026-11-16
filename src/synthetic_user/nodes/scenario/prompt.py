@@ -54,6 +54,8 @@ class ScenarioPromptOptions:
     include_unsupported_scenarios: bool
     diversity_preference: str
     max_request_steps: int = 3
+    # (title, task type) of the scenarios accepted in earlier batches of this run (D259).
+    earlier: tuple[tuple[str, str], ...] = ()
 
 
 def scenario_example(kind: ReferenceKind | None) -> dict[str, Any]:
@@ -170,6 +172,12 @@ def _core(
         "unsupported_included" if options.include_unsupported_scenarios else "unsupported_excluded"
     )
     avoid = "\n".join(f"- {s}" for s in avoid_signatures) or PROMPTS.text("no_signatures_to_avoid")
+    if options.earlier:
+        titles = "\n".join(
+            PROMPTS.text("earlier_item", title=title, task_type=task_type)
+            for title, task_type in options.earlier
+        )
+        avoid = "\n\n".join([avoid, PROMPTS.text("earlier_batches", titles=titles)])
     metrics_block = (
         PROMPTS.text(
             "metrics_block",

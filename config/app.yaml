@@ -74,6 +74,7 @@ web:
 generation:
   scenario:
     scenario_count: 10                  # scenarios per run
+    scenario_batch_size: 25             # scenarios per LLM call; more = sequential batches
     include_unsupported_scenarios: true # include scenarios the product should refuse
     diversity_preference: balanced      # free text hint to the scenario generator
   question:

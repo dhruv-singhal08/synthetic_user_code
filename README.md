@@ -16,7 +16,7 @@ the reference and checked by code, and answers are checked against it. Without o
 ```
 Persona + Product [+ Reference + instructions] + run metric selection (built-in + custom)
   ──> [reference check] ──> [metric config: frozen once; compiler only for custom metrics]
-  ──> [2] Scenarios (+ Reference Pack when grounded; ONE call) ──> [3] Questions (one call
+  ──> [2] Scenarios (+ Reference Pack when grounded; one call per batch of 25) ──> [3] Questions (one call
   per scenario, max 5 in parallel) ──> [4] Product Executor (+ tool trace / retrieved context)
   ──> [5] Evaluator (General Judge + Retrieval/Grounding Judge) ──> Bug Candidates
 ```
@@ -168,6 +168,7 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `reference.max_chars` | `200000` | Size limit of the reference as sent to prompts (the whole file goes in); larger files are refused |
 | `trace.enabled` | `true` | Write `runs/<run_id>/run.log` (every LLM / product call, prompt + output) |
 | `generation.scenario.scenario_count` | `10` | Scenarios requested per run |
+| `generation.scenario.scenario_batch_size` | `25` | Scenarios per LLM call; a larger count runs as sequential batches, each later batch told the titles accepted so far (D259) |
 | `generation.scenario.include_unsupported_scenarios` | `true` | Keep scenarios the product should refuse |
 | `generation.scenario.diversity_preference` | `balanced` | Free-text hint to the scenario generator |
 | `generation.question.question_count` | `1` | Questions per scenario (the UI run selection wins) |

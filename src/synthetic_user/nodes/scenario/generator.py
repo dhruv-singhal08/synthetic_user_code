@@ -1,11 +1,14 @@
-"""Node 2: generate scenarios in ONE LLM call for the whole requested batch.
+"""Node 2: generate scenarios in one LLM call per batch of at most ``scenario_batch_size``.
 
 Grounded scenarios carry a validated Reference Pack (cheat sheet); ungrounded ones have neither
 a reference nor a pack. No top-up rounds and no separate validation call: each returned item is
 validated individually (schema, persona task, pack integrity, config filter) and rejected with
-its reasons, never fixed. Duplicates are only EXACT structural duplicates (identical signature:
-task type | capability | cheat-sheet items | hash of the normalized business goal); there is no
-keyword or similarity-based duplicate detection. The run's selected metrics reach the prompt as
+its reasons, never fixed. A larger count runs as sequential batches (D259): each later batch is
+told the titles accepted so far; a batch's rejections are not topped up, and a failed later batch
+keeps the earlier batches' scenarios (the failure is recorded as a rejection). Duplicates are
+only EXACT structural duplicates (identical signature: task type | capability | cheat-sheet
+items | hash of the normalized business goal), across all batches; there is no keyword or
+similarity-based duplicate detection. The run's selected metrics reach the prompt as
 coverage guidance only; the generation mode never depends on them.
 """
 
@@ -19,7 +22,11 @@ from typing import Any
 from pydantic import Field, ValidationError
 
 from synthetic_user.core.config import AppConfig
-from synthetic_user.core.exceptions import format_validation_error
+from synthetic_user.core.exceptions import (
+    LLMOutputValidationError,
+    LLMProviderError,
+    format_validation_error,
+)
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
 from synthetic_user.core.trace import trace_subject
 from synthetic_user.llm.base import LLMClient
@@ -48,6 +55,7 @@ SURPLUS = "surplus: more scenarios returned than requested"
 MISSING_PACK = "mode grounded requires a reference_pack"
 UNEXPECTED_PACK = "mode ungrounded must not have a reference_pack"
 UNKNOWN_TYPICAL_TASK = "typical_task is not one of the persona's typical_tasks"
+BATCH_FAILED = "scenario batch failed; the earlier batches' scenarios are kept"
 
 
 class _RawScenarioBatch(StrictModel):
@@ -99,47 +107,75 @@ class ScenarioGenerator:
         existing_signatures: Sequence[str] = (),
         metrics: Sequence[MetricDefinition] = (),
     ) -> ScenarioGenerationResult:
-        """mode = grounded if ``reference`` else ungrounded. Exactly one LLM call (+ bounded
-        validation retries of that call)."""
+        """mode = grounded if ``reference`` else ungrounded. One LLM call per batch of at most
+        ``scenario_batch_size`` scenarios (+ bounded validation retries of each call)."""
         cfg = self._settings.generation.scenario
         requested = count if count is not None else cfg.scenario_count
         if requested < 1:
             raise ValueError("scenario count must be >= 1")
 
         mode = GenerationMode.GROUNDED if reference is not None else GenerationMode.UNGROUNDED
-        self._log.info("Generating %d scenario(s) in one call, mode %s", requested, mode)
+        sizes = batch_sizes(requested, cfg.scenario_batch_size)
+        self._log.info(
+            "Generating %d scenario(s) in %d call(s), mode %s", requested, len(sizes), mode
+        )
         seen: dict[str, str] = dict.fromkeys(existing_signatures, "existing scenario")
         result = ScenarioGenerationResult()
-        options = ScenarioPromptOptions(
-            count=requested,
-            include_unsupported_scenarios=cfg.include_unsupported_scenarios,
-            diversity_preference=cfg.diversity_preference,
-            max_request_steps=self._settings.generation.question.max_deliverables,
-        )
-        system, user = build_scenario_prompt(
-            persona,
-            product,
-            reference,
-            options,
-            avoid_signatures=list(existing_signatures),
-            metrics=metrics,
-        )
-        with trace_subject("scenario batch"):
-            batch = await generate_structured(
-                self._llm,
-                system,
-                user,
-                _RawScenarioBatch,
-                max_retries=self._settings.llm.max_validation_retries,
+        returned = 0
+        for number, size in enumerate(sizes, start=1):
+            options = ScenarioPromptOptions(
+                count=size,
+                include_unsupported_scenarios=cfg.include_unsupported_scenarios,
+                diversity_preference=cfg.diversity_preference,
+                max_request_steps=self._settings.generation.question.max_deliverables,
+                earlier=tuple((sc.title, sc.task_type.value) for sc in result.accepted),
             )
-        for raw in batch.scenarios:
-            if len(result.accepted) >= requested:
-                result.rejected.append(RejectedScenario(payload=raw, reasons=[SURPLUS]))
-                continue
-            self._process(raw, persona, product, reference, seen, result)
+            system, user = build_scenario_prompt(
+                persona,
+                product,
+                reference,
+                options,
+                avoid_signatures=list(existing_signatures),
+                metrics=metrics,
+            )
+            label = f"{number}/{len(sizes)}"
+            try:
+                with trace_subject(
+                    "scenario batch" if len(sizes) == 1 else f"scenario batch {label}"
+                ):
+                    batch = await generate_structured(
+                        self._llm,
+                        system,
+                        user,
+                        _RawScenarioBatch,
+                        max_retries=self._settings.llm.max_validation_retries,
+                    )
+            except (LLMOutputValidationError, LLMProviderError) as exc:
+                if number == 1:
+                    raise
+                self._log.warning(
+                    "Scenario batch %s failed; keeping %d scenario(s) of earlier batches: %s",
+                    label,
+                    len(result.accepted),
+                    exc,
+                )
+                result.rejected.append(
+                    RejectedScenario(
+                        payload={"batch": label, "requested": size},
+                        reasons=[f"{BATCH_FAILED}: {exc}"],
+                    )
+                )
+                break
+            returned += len(batch.scenarios)
+            before = len(result.accepted)
+            for raw in batch.scenarios:
+                if len(result.accepted) - before >= size:
+                    result.rejected.append(RejectedScenario(payload=raw, reasons=[SURPLUS]))
+                    continue
+                self._process(raw, persona, product, reference, seen, result)
         self._log.info(
             "Scenarios: %d returned; accepted=%d rejected=%d duplicates=%d",
-            len(batch.scenarios),
+            returned,
             len(result.accepted),
             len(result.rejected),
             len(result.duplicates),
@@ -227,6 +263,12 @@ class ScenarioGenerator:
         result.accepted.append(scenario)
         if pack is not None:
             result.packs.append(pack)
+
+
+def batch_sizes(requested: int, batch_size: int) -> list[int]:
+    """The per-call counts: full batches of ``batch_size``, then the remainder (60, 25 -> 25,
+    25, 10)."""
+    return [min(batch_size, requested - start) for start in range(0, requested, batch_size)]
 
 
 def persona_task(persona: Persona, text: str | None) -> str | None:

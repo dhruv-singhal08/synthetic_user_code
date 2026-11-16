@@ -38,6 +38,7 @@ evaluation:
 generation:
   scenario:
     scenario_count: 3
+    scenario_batch_size: 25
     include_unsupported_scenarios: true
     diversity_preference: balanced
   question:

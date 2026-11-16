@@ -225,6 +225,8 @@ class WebSettings(_Section):
 
 class ScenarioGenerationSettings(_Section):
     scenario_count: int = Field(default=10, ge=1)
+    # Scenarios asked for per LLM call; a larger count is generated in sequential batches (D259).
+    scenario_batch_size: int = Field(default=25, ge=1)
     include_unsupported_scenarios: bool = True
     diversity_preference: str = Field(default="balanced", min_length=1)
 
@@ -234,7 +236,7 @@ class ScenarioGenerationSettings(_Section):
         return _refuse_removed(
             data,
             {
-                "max_topup_rounds": "scenario generation is one LLM call (no top-up rounds)",
+                "max_topup_rounds": "no top-up rounds (one LLM call per scenario batch)",
                 "agent_golden_examples": "the golden set was removed",
             },
             "generation.scenario",

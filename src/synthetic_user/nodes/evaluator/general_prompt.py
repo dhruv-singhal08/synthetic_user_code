@@ -186,6 +186,9 @@ def cheat_sheet_view(
             {
                 "tag": f"TABLE-{ti:02d}",
                 table_key: table.name,
+                # The catalog's own table description, when it has one (a table's documented
+                # scope can implement a requested restriction, D260).
+                **({"description": table.description} if table.description else {}),
                 columns_key: [
                     {"tag": f"COLUMN-{ti:02d}.{ci:02d}", "name": column.name}
                     for ci, column in enumerate(table.columns, start=1)

@@ -597,3 +597,23 @@ async def test_sql_artifact_id_is_citable_without_sql_metrics(
     assert '"evidence_id": "SQL:1"' in llm.calls[0].user  # what the judge is shown ...
     assert result.metrics["correctness"].status is MetricStatus.SCORED  # ... resolves
     assert "SQL:1" in result.metrics["correctness"].observed_evidence_ids
+
+
+# --- D260: a table's documented scope can implement a requested restriction -----------------
+
+
+def test_judge_sees_the_table_description_and_the_scope_rule(grounded: Fixture) -> None:
+    from synthetic_user.metrics.catalog import builtin
+    from synthetic_user.nodes.evaluator.general_prompt import cheat_sheet_view
+
+    _settings, _product, reference, _scenario, pack = grounded
+    tables = cheat_sheet_view(pack, reference, expected=True)["tables"]
+    assert tables[0]["description"] == pack.tables[0].description
+    bare = pack.model_copy(
+        update={"tables": [pack.tables[0].model_copy(update={"description": None})]}
+    )
+    assert "description" not in cheat_sheet_view(bare, reference)["tables"][0]
+    for metric_id in ("semantic_correctness", "correctness"):
+        rubric = builtin(metric_id).rubric  # type: ignore[union-attr]
+        assert "catalog description or table rules state" in rubric
+        assert "A table name alone does not document its scope" in rubric

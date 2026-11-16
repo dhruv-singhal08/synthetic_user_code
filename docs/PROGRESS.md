@@ -742,3 +742,11 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   rendered byte-identical to the committed code; batches of 2/2/1, earlier titles in batch 2+,
   cross-batch exact duplicates, no top-up, failed later batch kept, failed first batch raises.
 - NOT verified: a live run of more than 25 scenarios (SafeChain / Gemini).
+
+## Documented table scope counts as the filter (2026-11-16) - user report (D260)
+
+- Files: nodes/evaluator/general_prompt.py (table description in the judge's cheat sheet view),
+  metrics/catalog.yaml (one rubric sentence in semantic_correctness and correctness;
+  catalog_version 2026.11-7), tests/nodes/test_targeted_fixes.py (1 test), DECISIONS.
+- Commands: ruff / format / mypy / pytest: all pass, 858 passed.
+- NOT verified: the user's real run (SafeChain judge). Existing runs keep their frozen rubric.

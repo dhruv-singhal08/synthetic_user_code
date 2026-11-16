@@ -4,7 +4,7 @@
 # grouping only; they never decide which judge runs or which product can be tested.
 # Every metric is scored 0 / 0.5 / 1 (higher is better) or reported with a non-scored status.
 
-catalog_version: "2026.11-6"
+catalog_version: "2026.11-7"
 
 category_labels:
   answer_quality: Answer Quality / Task Fulfilment
@@ -58,7 +58,11 @@ metrics:
       applicable rule), as far as trusted evidence can verify it?
     rubric: >-
       Check every success criterion listed for this metric against the delivered response and
-      artifacts: every requested part is delivered and nothing delivered contradicts it. When the
+      artifacts: every requested part is delivered and nothing delivered contradicts it. A
+      requested restriction (population, category, segment or period) is delivered without an
+      explicit filter when the SQL reads a table whose catalog description or table rules state
+      that it holds only that population; cite the table in the SQL and quote the documented
+      scope in the reason. A table name alone does not document its scope. When the
       contract lists reference_spec.schema, check that the tables, columns and joins the
       response / SQL uses are valid against the catalog reconciliation and the cheat sheet; when
       it lists available rules, decide which apply and check each applicable one (a violation
@@ -252,7 +256,11 @@ metrics:
       valid columns that do not change the answer are correct. The cheat sheet is expected
       evidence, not a required implementation; using a column or table whose meaning differs
       from what was asked (e.g. a gross amount where a net amount was asked) is wrong even when
-      the identifier exists. A filter the question did not request that neither the product
+      the identifier exists. A requested restriction (population, category, segment or period)
+      is implemented without an explicit filter when the SQL reads a table whose catalog
+      description or table rules state that it holds only that population; cite the table in
+      the SQL and quote the documented scope in the reason. A table name alone does not document
+      its scope. A filter the question did not request that neither the product
       contract, the success criteria nor an applicable rule establishes is an unresolved finding,
       never assumed authorised or wrong. Do not judge identifier existence (schema_faithfulness)
       or rule compliance (rules_adherence) here, unless a rule violation also changes the

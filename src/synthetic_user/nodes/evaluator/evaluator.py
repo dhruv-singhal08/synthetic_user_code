@@ -117,6 +117,7 @@ from synthetic_user.nodes.evaluator.general_prompt import (
 )
 from synthetic_user.nodes.evaluator.guidance import guidance_registry
 from synthetic_user.nodes.evaluator.judge_common import (
+    collect_cuts,
     evidence_texts,
     matches_known_gap,
     normalise,
@@ -158,6 +159,12 @@ CONTEXT_RECALL_DISCLOSURE = (
     "Expectation-based coverage of the question's required-information checklist; "
     "not exhaustive recall over the full corpus."
 )
+# Evidence the judges saw only in part (D262): first line of the limitations, and the UI warning.
+EVIDENCE_CUT = (
+    "Evidence cut for the judge (limit {limit:,} characters, evaluation.artifact_max_chars): "
+    "{cuts}. The judge saw only the first part; check this verdict."
+)
+CONTEXT_CUT = "retrieved context (cut by the product or the configured context limits)"
 # A metric of a failed judge call: the error itself is recorded ONCE in the notes (D251).
 SHARED_ERROR = (
     "Not scored: the {judge} call failed - one shared error for {metrics}, recorded in the "
@@ -199,6 +206,8 @@ class _Judgements:
     reference_checks: ReferenceCheckRecord | None = None
     sql: list[SqlEvidence] = field(default_factory=list)
     general_input: GeneralJudgeInput | None = None
+    # Parts of the judges' evidence cut to evaluation.artifact_max_chars (D262).
+    cuts: list[str] = field(default_factory=list)
 
 
 class Evaluator:
@@ -368,8 +377,11 @@ class Evaluator:
             calls.append(self._run_retrieval(case, retrieval_input, semaphore, result))
         started = time.perf_counter()
         if calls:
-            # The two judge groups are independent calls; they may run concurrently.
-            await asyncio.gather(*calls)
+            # The two judge groups are independent calls; they may run concurrently. Both
+            # record their evidence cuts in this question's collector (D262).
+            with collect_cuts() as cuts:
+                await asyncio.gather(*calls)
+            result.cuts = list(cuts)
         self._log.info(
             "%s: judged in %.0f ms (general calls %d, lookup requests %d)",
             case.question.question_id,
@@ -707,6 +719,7 @@ class Evaluator:
             ),
         )
         reference_checks = mark_used_lookups(judgements.reference_checks, metrics)
+        cuts = self._evidence_cuts(case, judgements)
         summary = summarise(
             metrics,
             self._definitions,
@@ -738,9 +751,10 @@ class Evaluator:
             goal_completion=goal,
             notes=list(dict.fromkeys(notes)),
             reference_checks=reference_checks,
-            limitations=summary.limitations,
+            limitations=_with_cut_warning(summary.limitations, cuts, self._artifact_max_chars),
             failed_requirements=summary.failed,
             unresolved_requirements=summary.unresolved,
+            evidence_cuts=cuts,
         )
         log_evaluation(
             result,
@@ -750,6 +764,26 @@ class Evaluator:
             invocations=self._invocations(case, judgements),
         )
         return result, groups
+
+    @property
+    def _artifact_max_chars(self) -> int:
+        return self._settings.evaluation.artifact_max_chars
+
+    def _evidence_cuts(self, case: EvaluationCase, judgements: _Judgements) -> list[str]:
+        """The judges' cut evidence, plus retrieved context cut before it reached the
+        Retrieval Judge (the only judge that reads chunks); logged as a warning."""
+        cuts = list(judgements.cuts)
+        context = case.execution.context
+        if judgements.retrieval is not None and context is not None and context.truncated:
+            cuts.append(CONTEXT_CUT)
+        if cuts:
+            self._log.warning(
+                "%s: evidence cut for the judge (evaluation.artifact_max_chars = %d): %s",
+                case.question.question_id,
+                self._artifact_max_chars,
+                "; ".join(cuts),
+            )
+        return cuts
 
     def _invocations(self, case: EvaluationCase, judgements: _Judgements) -> list[InvocationRecord]:
         records: list[InvocationRecord] = []
@@ -1052,6 +1086,13 @@ def _check_links(case: EvaluationCase, reference: Reference | None) -> None:
             )
     if problems:
         raise ArtifactIntegrityError("Mismatched evaluation inputs: " + "; ".join(problems))
+
+
+def _with_cut_warning(limitations: list[str], cuts: list[str], limit: int) -> list[str]:
+    """The evidence-cut warning first (D262), then the limitations as before."""
+    if not cuts:
+        return limitations
+    return [EVIDENCE_CUT.format(limit=limit, cuts=", ".join(cuts)), *limitations]
 
 
 def _with_unresolved(reason: str, unresolved: list[str]) -> str:

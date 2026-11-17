@@ -42,6 +42,7 @@ from synthetic_user.models.lookup import (
     JoinStatus,
     LookupTool,
     LookupTraceEntry,
+    SchemaLookup,
 )
 from synthetic_user.models.metrics import MetricDefinition
 from synthetic_user.models.product import ProductDescription
@@ -190,7 +191,13 @@ def cheat_sheet_view(
                 # scope can implement a requested restriction, D260).
                 **({"description": table.description} if table.description else {}),
                 columns_key: [
-                    {"tag": f"COLUMN-{ti:02d}.{ci:02d}", "name": column.name}
+                    {
+                        "tag": f"COLUMN-{ti:02d}.{ci:02d}",
+                        "name": column.name,
+                        # The catalog's column description (D261); values are not shown here:
+                        # a column the SQL compares with a value is looked up by code.
+                        **({"description": column.description} if column.description else {}),
+                    }
                     for ci, column in enumerate(table.columns, start=1)
                 ],
                 "table_rules": [
@@ -317,7 +324,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
             PROMPTS.text(
                 "section_sql",
                 dialect=dialect,
-                sql=bounded(json.dumps(sql_view, indent=2), data.artifact_max_chars),
+                sql=bounded(json.dumps(sql_view, indent=2), data.artifact_max_chars, "parsed SQL"),
             )
         )
         sections.extend(_catalog_sections(data))
@@ -329,7 +336,7 @@ def build_general_prompt(data: GeneralJudgeInput) -> tuple[str, str]:
         sections.append(
             PROMPTS.text(
                 "section_tool_trace",
-                trace=bounded(json.dumps(trace, indent=2), data.artifact_max_chars),
+                trace=bounded(json.dumps(trace, indent=2), data.artifact_max_chars, "tool trace"),
             )
         )
     factual = any(d.asks_factual_verification for d in definitions)
@@ -475,20 +482,25 @@ def _catalog_sections(data: GeneralJudgeInput) -> list[str]:
     views = [_reconciliation_view(i.reconciliation) for i in data.sql if i.reconciliation]
     sections = [
         PROMPTS.text(
-            "section_reconciliation", reconciliation=bounded(json.dumps(views, indent=2), limit)
+            "section_reconciliation",
+            reconciliation=bounded(json.dumps(views, indent=2), limit, "catalog reconciliation"),
         )
     ]
     if data.catalog_lookups:
         sections.append(
             PROMPTS.text(
-                "section_catalog_evidence", lookups=bounded(_lookups(data.catalog_lookups), limit)
+                "section_catalog_evidence",
+                values_note=PROMPTS.text("values_note")
+                if any(_lists_values(e) for e in data.catalog_lookups)
+                else "",
+                lookups=bounded(_lookups(data.catalog_lookups), limit, "catalog lookups"),
             )
         )
     if data.requested_lookups is not None:
         sections.append(
             PROMPTS.text(
                 "section_requested_evidence",
-                results=bounded(_lookups(data.requested_lookups), limit),
+                results=bounded(_lookups(data.requested_lookups), limit, "requested lookups"),
             )
         )
     elif data.max_lookup_requests > 0:
@@ -502,6 +514,16 @@ def _catalog_sections(data: GeneralJudgeInput) -> list[str]:
             )
         )
     return sections
+
+
+def _lists_values(entry: LookupTraceEntry) -> bool:
+    """A schema lookup that found a column with catalog values (D261)."""
+    result = entry.result
+    return (
+        isinstance(result, SchemaLookup)
+        and result.column is not None
+        and bool(result.column.values)
+    )
 
 
 def _lookups(entries: Sequence[LookupTraceEntry]) -> str:

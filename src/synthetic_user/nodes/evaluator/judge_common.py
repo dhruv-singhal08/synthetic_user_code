@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from synthetic_user.models.evaluation import (
@@ -41,10 +43,32 @@ def response_text(response: EvaluableResponse) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def bounded(text: str, max_chars: int) -> str:
-    return (
-        text if len(text) <= max_chars else text[:max_chars] + PROMPTS.text("artifact_cut_marker")
-    )
+# The evidence cut for the judges of the evaluation being prepared (D262): label -> its record.
+# Set per question by the evaluator around its judge calls; None elsewhere (nothing recorded).
+_CUTS: ContextVar[dict[str, None] | None] = ContextVar("evidence_cuts", default=None)
+
+
+@contextmanager
+def collect_cuts() -> Iterator[dict[str, None]]:
+    """Record every ``bounded`` cut made inside this block (judge calls of one question),
+    each once (a prompt built again for a second call or the other judge is not repeated)."""
+    cuts: dict[str, None] = {}
+    token = _CUTS.set(cuts)
+    try:
+        yield cuts
+    finally:
+        _CUTS.reset(token)
+
+
+def bounded(text: str, max_chars: int, label: str | None = None) -> str:
+    """``text`` cut to ``max_chars`` with the cut marker; a cut of a labelled part is recorded
+    for the evaluation's evidence-cut warning (the judge's view itself is unchanged)."""
+    if len(text) <= max_chars:
+        return text
+    cuts = _CUTS.get()
+    if cuts is not None and label is not None:
+        cuts[f"{label} ({len(text):,} chars)"] = None
+    return text[:max_chars] + PROMPTS.text("artifact_cut_marker")
 
 
 def render_response(
@@ -59,21 +83,25 @@ def render_response(
         return json.dumps({"evidence_id": "RESPONSE", **view} if evidence_ids else view, indent=2)
     artifacts: list[dict[str, Any]] = []
     sql = other = 0
-    for artifact in response.artifacts:
+    for position, artifact in enumerate(response.artifacts, start=1):
         content = (
             artifact.content if isinstance(artifact.content, str) else json.dumps(artifact.content)
         )
+        evidence_id: str | None = None
+        if artifact.kind.casefold() == "sql" and isinstance(artifact.content, str):
+            sql += 1
+            evidence_id = f"SQL:{sql}"
+        elif artifact.kind.casefold() != "sql":
+            other += 1
+            evidence_id = f"ARTIFACT:{other}"
         item: dict[str, Any] = {
             "kind": artifact.kind,
-            "content": bounded(content, artifact_max_chars),
+            "content": bounded(
+                content, artifact_max_chars, evidence_id or f"{artifact.kind} artifact {position}"
+            ),
         }
-        if evidence_ids:
-            if artifact.kind.casefold() == "sql" and isinstance(artifact.content, str):
-                sql += 1
-                item = {"evidence_id": f"SQL:{sql}", **item}
-            elif artifact.kind.casefold() != "sql":
-                other += 1
-                item = {"evidence_id": f"ARTIFACT:{other}", **item}
+        if evidence_ids and evidence_id is not None:
+            item = {"evidence_id": evidence_id, **item}
         artifacts.append(item)
     body: dict[str, Any] = {"text": response.text, "artifacts": artifacts}
     if evidence_ids:

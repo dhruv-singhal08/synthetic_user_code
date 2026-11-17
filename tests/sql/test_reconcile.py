@@ -278,3 +278,45 @@ def test_schema_qualified_catalog_tables_resolve_by_exact_name_parts() -> None:
         pack=None,
     )
     assert unclear.identifiers[0].status is IdentifierStatus.UNRESOLVED
+
+
+# --- D261: columns the SQL compares with a value get their catalog values looked up -----------
+
+
+def test_value_filter_columns_are_looked_up_once(sample_reference: Reference) -> None:
+    from synthetic_user.models.lookup import LookupOrigin
+    from synthetic_user.references.catalog_index import LookupSession
+
+    card_index = CatalogIndex.for_reference(sample_reference)
+    assert card_index is not None
+    draft = CatalogPackDraft.model_validate(
+        {"tables": [{"table": "card_transactions", "columns": ["amount"], "why": "spend"}]}
+    )
+    card_pack, _ = build_pack(draft, sample_reference, "SCN_001")
+    assert card_pack is not None
+    rec = run(
+        "SELECT SUM(amount) FROM card_transactions WHERE merchant_category = 'dining' "
+        "AND currency_code IN ('USD') AND transaction_id = 'T1' AND amount > 10",
+        card_index,
+        card_pack,
+    )
+    # transaction_id lists no values in the catalog: nothing to compare against.
+    assert sorted(rec.value_filter_columns) == [
+        "card_transactions.currency_code",
+        "card_transactions.merchant_category",
+    ]
+    session = LookupSession(card_index)
+    entries = session.run_all(evidence_requests([rec], card_index), LookupOrigin.DETERMINISTIC)
+    looked_up = [
+        (e.request.table, e.request.column) for e in entries if e.request.tool == "lookup_schema"
+    ]
+    # Both are valid_extra columns too: the identical schema lookup runs once each.
+    columns = [c for _, c in looked_up]
+    assert columns.count("currency_code") == 1 and columns.count("merchant_category") == 1
+    values = {e.request.column: e.result.column.values for e in entries if e.request.column}  # type: ignore[union-attr]
+    assert values["merchant_category"][:2] == ["travel", "dining"]
+
+
+def test_no_value_filter_no_value_lookup(index: CatalogIndex, pack: ReferencePack) -> None:
+    rec = run("SELECT SUM(net_lpc_charge_usd_am) FROM v_lpc_details", index, pack)
+    assert rec.value_filter_columns == []

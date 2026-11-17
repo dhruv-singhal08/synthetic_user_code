@@ -3,7 +3,8 @@
 ``SqlParser`` is the interface; ``SqlglotParser`` is the default implementation. The parser
 extracts base tables, base columns (aliases resolved per scope), CTE names, output aliases,
 functions, joins with predicates and their equality join keys (resolved to base tables),
-filters, projections, aggregations, grouping, ordering and limits, and keeps the raw SQL. Base
+filters, projections, aggregations, grouping, ordering and limits, the columns compared with a
+text value (D261), and keeps the raw SQL. Base
 database identifiers are kept apart from CTE names, output aliases and functions so Schema
 Faithfulness never compares those. Identifier validity is decided elsewhere, against the
 catalog (``sql/reconcile.py``); the parser never compares with a reference.
@@ -34,6 +35,14 @@ class SqlColumnRef(StrictModel):
     column: NonEmptyStr
     table: str | None = None  # the resolved BASE table; None when it cannot be resolved
     qualifier: str | None = None  # the qualifier as written (alias or table name)
+
+
+class SqlValueFilter(StrictModel):
+    """A column compared with text values (=, <>, IN, LIKE / ILIKE, also inside a function such
+    as UPPER(col)), anywhere in the statement: its catalog values are looked up (D261)."""
+
+    column: SqlColumnRef
+    values: list[NonEmptyStr] = Field(default_factory=list)  # the literals as written
 
 
 class SqlJoin(StrictModel):
@@ -70,6 +79,7 @@ class SqlStructure(StrictModel):
     group_by: list[NonEmptyStr] = Field(default_factory=list)
     order_by: list[NonEmptyStr] = Field(default_factory=list)
     limits: list[NonEmptyStr] = Field(default_factory=list)
+    value_filters: list[SqlValueFilter] = Field(default_factory=list)
 
 
 class SqlParser(Protocol):
@@ -127,6 +137,17 @@ def _qualified(table: Any) -> str:
     return ".".join(p for p in (table.catalog, table.db, table.name) if p)
 
 
+def _single_column(side: Any, exp: Any) -> Any:
+    """The column of a comparison side: the column itself, or the only column inside a function
+    (``UPPER(col)``, ``TRIM(col)``, ``CAST(col AS ...)``); None otherwise."""
+    if isinstance(side, exp.Column):
+        return side
+    if isinstance(side, exp.Func):
+        columns = list(side.find_all(exp.Column))
+        return columns[0] if len(columns) == 1 else None
+    return None
+
+
 class _Collector:
     def __init__(self, dialect: str | None) -> None:
         self.dialect = dialect
@@ -144,6 +165,7 @@ class _Collector:
         self.group_by: list[str] = []
         self.order_by: list[str] = []
         self.limits: list[str] = []
+        self.value_filters: dict[tuple[str, str | None], SqlValueFilter] = {}
         self.diagnostics: list[str] = []
         self.normalized: list[str] = []
 
@@ -195,6 +217,7 @@ class _Collector:
             if isinstance(func, exp.AggFunc):
                 self.aggregations[self.sql(func)] = None
         self._resolve_columns(statement, exp)
+        self._value_filters(statement, exp)
 
     def _join_keys(self, on: Any, exp: Any) -> None:
         """``a.x = b.y`` equalities between columns of base tables (CTE / derived sides and
@@ -288,6 +311,33 @@ class _Collector:
                     SqlColumnRef(column=column.name, table=table, qualifier=qualifier)
                 )
 
+    def _value_filters(self, statement: Any, exp: Any) -> None:
+        """Columns compared with text literals; an unqualified column takes the base table its
+        scope resolved it to when that is unambiguous. CTE / derived columns are skipped."""
+        for node in statement.find_all(exp.EQ, exp.NEQ, exp.Like, exp.ILike, exp.In):
+            if isinstance(node, exp.In):
+                sides = [(node.this, list(node.expressions))]
+            else:
+                sides = [(node.this, [node.expression]), (node.expression, [node.this])]
+            for side, others in sides:
+                column = _single_column(side, exp)
+                texts = [
+                    str(o.this)
+                    for o in others
+                    if isinstance(o, exp.Literal) and o.is_string and str(o.this).strip()
+                ]
+                ref = self._base_ref(column) if column is not None and texts else None
+                if ref is None:
+                    continue
+                if ref.table is None:
+                    name = ref.column.casefold()
+                    tables = {c.table for c in self.columns if c.column.casefold() == name}
+                    if len(tables) == 1:
+                        ref = ref.model_copy(update={"table": tables.pop()})
+                key = (ref.column.casefold(), ref.table.casefold() if ref.table else None)
+                found = self.value_filters.setdefault(key, SqlValueFilter(column=ref))
+                found.values.extend(t for t in texts if t not in found.values)
+
     def result(self, sql: str, count: int) -> SqlStructure:
         return SqlStructure(
             raw_sql=sql,
@@ -310,4 +360,5 @@ class _Collector:
             group_by=self.group_by,
             order_by=self.order_by,
             limits=self.limits,
+            value_filters=list(self.value_filters.values()),
         )

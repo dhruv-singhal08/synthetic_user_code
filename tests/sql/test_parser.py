@@ -71,3 +71,25 @@ def test_parse_failure_is_explicit_and_never_raises() -> None:
 def test_dialect_is_only_what_is_configured() -> None:
     s = PARSER.parse("SELECT `a` FROM `t`", dialect="bigquery")
     assert s.parsed and s.dialect == "bigquery" and s.base_tables == ["t"]
+
+
+def test_columns_compared_with_text_values_are_recorded() -> None:
+    """D261: =, <>, IN, LIKE, a function around the column, CASE WHEN and ON conditions; numbers
+    and CTE columns are not value filters."""
+    s = PARSER.parse(
+        """WITH x AS (SELECT merchant_category AS c FROM card_transactions)
+        SELECT SUM(CASE WHEN t.currency_code = 'USD' THEN t.amount END)
+        FROM card_transactions t JOIN employees e ON e.employee_id = t.employee_id
+          AND e.status <> 'inactive'
+        WHERE UPPER(t.merchant_category) IN ('DINING', 'TRAVEL') AND t.amount > 2500
+          AND t.merchant_id LIKE 'M%' AND t.merchant_category = 'dining'
+          AND t.transaction_id IN (SELECT c FROM x WHERE x.c = 'ignored')""",
+        dialect=None,
+    )
+    found = {f"{v.column.table}.{v.column.column}": sorted(v.values) for v in s.value_filters}
+    assert found == {
+        "card_transactions.currency_code": ["USD"],
+        "employees.status": ["inactive"],
+        "card_transactions.merchant_category": ["DINING", "TRAVEL", "dining"],
+        "card_transactions.merchant_id": ["M%"],
+    }

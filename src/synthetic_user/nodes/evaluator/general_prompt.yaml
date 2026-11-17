@@ -172,7 +172,12 @@ section_catalog_evidence: |
   instructions). Retrieved rules are candidates: decide from the question and the SQL whether
   each applies, cite its rule_id and original wording, and never rewrite rules or choose
   between contradictory ones.
-  ${lookups}
+  ${values_note}${lookups}
+
+# D261: added to the code lookups when a looked-up column lists catalog values.
+values_note: |
+  A column's catalog values may be examples rather than a complete list: a value in the SQL that
+  the list does not contain is unresolved, not wrong.
 
 section_lookup_tools: |
 

@@ -617,3 +617,175 @@ def test_judge_sees_the_table_description_and_the_scope_rule(grounded: Fixture) 
         rubric = builtin(metric_id).rubric  # type: ignore[union-attr]
         assert "catalog description or table rules state" in rubric
         assert "A table name alone does not document its scope" in rubric
+
+
+# --- D261: column descriptions always; values only for columns the SQL compares with a value --
+
+
+def test_judge_sees_column_descriptions_but_no_values(grounded: Fixture) -> None:
+    from synthetic_user.nodes.evaluator.general_prompt import cheat_sheet_view
+
+    _settings, _product, reference, _scenario, pack = grounded
+    columns = {
+        c["name"]: c
+        for t in cheat_sheet_view(pack, reference, expected=True)["tables"]
+        for c in t["columns"]
+    }
+    currency = next(c for t in pack.tables for c in t.columns if c.name == "currency_code")
+    assert currency.values  # the cheat sheet carries values ...
+    assert columns["currency_code"]["description"] == currency.description
+    assert "values" not in columns["currency_code"]  # ... the judge view does not
+
+
+@pytest.mark.parametrize(
+    ("where", "noted"),
+    [("WHERE t.merchant_category = 'dining'", True), ("WHERE t.amount > 2500", False)],
+)
+async def test_value_note_only_when_a_filtered_column_lists_values(
+    app_config: AppConfig,
+    sample_product: ProductDescription,
+    sample_reference: Reference,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+    where: str,
+    noted: bool,
+) -> None:
+    from nodes.test_evaluator import _execution, _question, all_pass
+    from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+    from synthetic_user.nodes.evaluator.general_prompt import PROMPTS
+
+    note = PROMPTS.text("values_note")
+    sql = f"SELECT e.full_name, SUM(t.amount) FROM card_transactions t {where} GROUP BY 1"
+    llm = FakeLLMClient([all_pass("relevance", "correctness")] * 3)
+    evaluator = Evaluator(
+        llm,
+        app_config,
+        logging.getLogger("t"),
+        reference=sample_reference,
+        metric_config=builtin_metric_config(["relevance", "correctness"]),
+    )
+    response = {
+        "outcome": "answered",
+        "text": "Here.",
+        "artifacts": [{"kind": "sql", "content": sql}],
+    }
+    case = EvaluationCase(
+        _question(sample_scenarios[0], sample_packs[0]),
+        sample_scenarios[0],
+        _execution(response),
+    )
+    await evaluator.evaluate(case, sample_product)
+    user = llm.calls[0].user
+    assert (note in user) is noted
+    assert ('"travel"' in user) is noted  # values only through the lookup of the filtered column
+
+
+# --- D262: evidence cut for the judge is recorded and shown, the verdict is unchanged ---------
+
+
+def test_bounded_records_a_labelled_cut_only_inside_a_collector() -> None:
+    from synthetic_user.nodes.evaluator.judge_common import bounded, collect_cuts
+
+    assert bounded("x" * 50, 10, "SQL:1") == bounded("x" * 50, 10)  # the judge's view is the same
+    with collect_cuts() as cuts:
+        bounded("short", 10, "SQL:1")
+        bounded("x" * 12_345, 10, "SQL:2")
+        bounded("x" * 12_345, 10, "SQL:2")  # rebuilt prompt / other judge: recorded once
+        bounded("x" * 50, 10)  # unlabelled: not recorded
+    assert list(cuts) == ["SQL:2 (12,345 chars)"]
+    with collect_cuts() as cuts:
+        pass
+    assert bounded("x" * 50, 10, "SQL:3") and not cuts  # outside a collector: nothing recorded
+
+
+async def _cut_case(
+    settings: AppConfig,
+    product: ProductDescription,
+    scenario: Scenario,
+    pack: ReferencePack,
+    reference: Reference,
+    sql: str,
+) -> Any:
+    from nodes.test_evaluator import _execution, _question, all_pass
+    from synthetic_user.nodes.evaluator import EvaluationCase, Evaluator
+
+    evaluator = Evaluator(
+        FakeLLMClient([all_pass("relevance", "correctness")] * 3),
+        settings,
+        logging.getLogger("t"),
+        reference=reference,
+        metric_config=builtin_metric_config(["relevance", "correctness"]),
+    )
+    response = {
+        "outcome": "answered",
+        "text": "Here.",
+        "artifacts": [{"kind": "sql", "content": sql}],
+    }
+    case = EvaluationCase(_question(scenario, pack), scenario, _execution(response))
+    return await evaluator.evaluate(case, product)
+
+
+async def test_a_cut_sql_artifact_is_a_warning_and_the_verdict_is_unchanged(
+    app_config: AppConfig,
+    sample_product: ProductDescription,
+    sample_reference: Reference,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+) -> None:
+    from synthetic_user.nodes.evaluator.evaluator import EVIDENCE_CUT
+
+    sql = "SELECT e.full_name, SUM(t.amount) AS total FROM card_transactions t " + " ".join(
+        f"/* padding {i} */" for i in range(40)
+    )
+    args = (sample_product, sample_scenarios[0], sample_packs[0], sample_reference, sql)
+    full = await _cut_case(app_config, *args)
+    small = app_config.model_copy(
+        update={"evaluation": app_config.evaluation.model_copy(update={"artifact_max_chars": 200})}
+    )
+    cut = await _cut_case(small, *args)
+    assert full.evidence_cuts == []
+    assert f"SQL:1 ({len(sql):,} chars)" in cut.evidence_cuts
+    assert cut.limitations[0] == EVIDENCE_CUT.format(limit=200, cuts=", ".join(cut.evidence_cuts))
+    assert cut.limitations[1:] == full.limitations  # the other limitations as before
+    assert (cut.verdict, cut.verdict_reason) == (full.verdict, full.verdict_reason)
+
+
+async def test_cut_retrieved_context_is_reported_only_when_retrieval_is_judged(
+    app_config: AppConfig,
+    sample_product: ProductDescription,
+    sample_reference: Reference,
+    sample_scenarios: list[Scenario],
+    sample_packs: list[ReferencePack],
+) -> None:
+    from nodes.test_evaluator import _context, _question, all_pass, dispatch, evaluate
+    from synthetic_user.nodes.evaluator.evaluator import CONTEXT_CUT
+    from tests_support import scripted_retrieval_reply
+
+    case = (
+        sample_scenarios[0],
+        _question(sample_scenarios[0], sample_packs[0]),
+        sample_packs[0],
+    )
+    answer = {"outcome": "answered", "text": "January had 120 complaints."}
+    retrieval, _llm = await evaluate(
+        app_config,
+        sample_product,
+        case,
+        sample_reference,
+        answer,
+        [dispatch(None, lambda s, u: scripted_retrieval_reply(u))],
+        metrics=("context_precision", "faithfulness"),
+        context=_context(truncated=True),
+    )
+    assert retrieval.evidence_cuts == [CONTEXT_CUT]
+    general, _llm = await evaluate(
+        app_config,
+        sample_product,
+        case,
+        sample_reference,
+        answer,
+        [all_pass("relevance")] * 3,
+        metrics=("relevance",),
+        context=_context(truncated=True),
+    )
+    assert general.evidence_cuts == []  # no judge read the chunks

@@ -121,7 +121,7 @@ def build_retrieval_prompt(data: RetrievalJudgeInput) -> tuple[str, str]:
         sections.append(
             PROMPTS.text(
                 "section_tool_results",
-                tools=bounded(json.dumps(results, indent=2), data.artifact_max_chars),
+                tools=bounded(json.dumps(results, indent=2), data.artifact_max_chars, "tool trace"),
             )
         )
     chunks = [
@@ -129,7 +129,7 @@ def build_retrieval_prompt(data: RetrievalJudgeInput) -> tuple[str, str]:
             "chunk_id": chunk.chunk_id,
             "rank": chunk.rank,
             "source_id": chunk.source_id,
-            "text": bounded(chunk.text, data.artifact_max_chars),
+            "text": bounded(chunk.text, data.artifact_max_chars, f"chunk {chunk.chunk_id}"),
         }
         for chunk in data.context.chunks
     ]

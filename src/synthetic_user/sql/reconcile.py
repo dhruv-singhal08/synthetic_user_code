@@ -12,11 +12,12 @@ Runs BEFORE the judge, from the parser output only (never a regex, never executi
 - cheat-sheet tables / columns the SQL does not use (listed; never a failure by itself);
 - equality join keys -> documented (verified / not verified), undocumented or unresolved;
 - rule ids the judge may need that the cheat sheet did not carry (rules of extra tables and
-  unselected catalog-wide rules): candidates only, applicability is the judge's call.
+  unselected catalog-wide rules): candidates only, applicability is the judge's call;
+- catalog columns the SQL compares with a text value whose catalog lists values (D261).
 
 ``evidence_requests`` turns the obvious gaps into exact lookups so the judge does not have to
 discover them (extra columns, extra tables, unselected rules, alternatives for invalid columns,
-relationships between the joined tables).
+relationships between the joined tables, the values of columns the SQL filters on a value).
 """
 
 from __future__ import annotations
@@ -129,7 +130,35 @@ def reconcile(
             [_join_check(key.left, key.right, index) for key in structure.join_keys]
         ),
         rules_not_in_pack=rules_not_in_pack,
+        value_filter_columns=_value_filter_columns(
+            structure, index, sql_tables, pack_columns, unresolved=unresolved_tables
+        ),
     )
+
+
+def _value_filter_columns(
+    structure: SqlStructure,
+    index: CatalogIndex,
+    sql_tables: dict[str, CatalogTable],
+    pack_columns: dict[tuple[str, str], tuple[str, str]],
+    *,
+    unresolved: bool,
+) -> list[str]:
+    """``table.column`` of each catalog column compared with a text value that lists values in
+    the catalog, resolved like any other column of the SQL (unresolved ones are skipped)."""
+    found: dict[str, None] = {}
+    for value_filter in structure.value_filters:
+        check = _column_check(
+            value_filter.column, index, sql_tables, pack_columns, unresolved=unresolved
+        )
+        if check.canonical is None:
+            continue
+        table_name, _, column_name = check.canonical.rpartition(".")
+        table = index.resolve_table(table_name)[0]
+        column = index.column(table, column_name) if table is not None else None
+        if column is not None and column.values:
+            found[check.canonical] = None
+    return list(found)
 
 
 def evidence_requests(
@@ -185,6 +214,17 @@ def evidence_requests(
                     reason="documented relationships between tables the SQL combines",
                 )
                 for a, b in combinations(joined, 2)
+            )
+        for canonical in rec.value_filter_columns:
+            table, _, column = canonical.rpartition(".")
+            requests.append(
+                LookupRequest(
+                    tool=LookupTool.LOOKUP_SCHEMA,
+                    table=table,
+                    column=column,
+                    reason="column the SQL compares with a value: its catalog description and "
+                    "values",
+                )
             )
     return requests
 

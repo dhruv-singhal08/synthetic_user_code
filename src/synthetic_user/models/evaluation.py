@@ -385,6 +385,10 @@ class EvaluationResult(StrictModel):
     # Requirements whose check failed / stayed unresolved, as "<metric>: <requirement id>".
     failed_requirements: list[NonEmptyStr] = Field(default_factory=list)
     unresolved_requirements: list[NonEmptyStr] = Field(default_factory=list)
+    # Evidence the judges saw only in part (D262): each cut part with its original length, e.g.
+    # "SQL:1 (12,430 chars)", and retrieved context cut by the product or its limits. A
+    # warning only - the verdict is decided as before. Empty in earlier artifacts.
+    evidence_cuts: list[NonEmptyStr] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod

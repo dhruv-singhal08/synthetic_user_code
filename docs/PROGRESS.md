@@ -750,3 +750,26 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   catalog_version 2026.11-7), tests/nodes/test_targeted_fixes.py (1 test), DECISIONS.
 - Commands: ruff / format / mypy / pytest: all pass, 858 passed.
 - NOT verified: the user's real run (SafeChain judge). Existing runs keep their frozen rubric.
+
+## Column descriptions + value lookups for filtered columns (2026-11-17) - user decision (D261)
+
+- Files: sql/parser.py (`SqlValueFilter`, `value_filters`), models/lookup.py
+  (`value_filter_columns`), sql/reconcile.py (resolution + round-0 lookup_schema trigger),
+  nodes/evaluator/general_prompt.py + .yaml (column description in the judge view;
+  `values_note` only when a looked-up column lists values), tests (parser, reconcile, judge
+  view, prompt note with / without a value filter), DECISIONS.
+- Commands: ruff / format / mypy / pytest: all pass, 864 passed.
+- NOT verified: the user's real run (SafeChain judge), catalogs with very long value lists.
+
+## Evidence-cut warning (2026-11-17) - user request (D262)
+
+- Files: nodes/evaluator/judge_common.py (`collect_cuts`, labelled `bounded`), general_prompt.py
+  + retrieval_prompt.py (labels at every cut site), evaluator.py (collector around the judge
+  calls, context cut, first limitation, WARNING line), models/evaluation.py (`evidence_cuts`),
+  web/static/app.js (badge + callout), tests/nodes/test_targeted_fixes.py (3 tests), DECISIONS.
+- Commands: ruff / format / mypy / pytest: all pass, 867 passed; app.js syntax-checked.
+- Verified: offline run with artifact_max_chars 1000 - Q_001 records "parsed SQL (1,768 chars),
+  catalog lookups (...)", first limitation + run.log WARNING; headless Brave: badge in the table
+  row and drawer header, warning callout on top of Evaluation; uncut questions unchanged;
+  cut and uncut evaluations of the same answer have the same verdict (test).
+- NOT verified: the user's real run (SafeChain judge).

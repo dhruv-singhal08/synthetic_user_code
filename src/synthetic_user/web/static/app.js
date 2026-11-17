@@ -48,6 +48,14 @@ function icon(name) {
 const human = (v) => String(v || "").replaceAll("_", " ");
 const pill = (text, cls) => el("span", { class: `pill pill-${cls}`, text: human(text) });
 const verdictPill = (v) => pill(v === "recorded_only" ? "not judged" : v || "—", v || "none");
+// Evidence the judges saw only in part (D262): a badge next to the verdict and a warning on top
+// of the evaluation. Warning only; the verdict is unchanged. Earlier evaluations have none.
+const evidenceCuts = (ev) => (ev && ev.evidence_cuts) || [];
+const cutBadge = (ev) => (evidenceCuts(ev).length ? pill("evidence cut", "warn") : null);
+const cutCallout = (ev) => (evidenceCuts(ev).length
+  ? callout("warn", "Evidence was cut before judging.", `The judge saw only the first part of: ${evidenceCuts(ev).join(", ")}. Check this verdict; the limit is evaluation.artifact_max_chars.`)
+  : null);
+const rowEvaluation = (row) => state.evaluations.find((e) => e.question_id === row.question_id);
 const pct = (v) => (v == null ? "—" : `${Math.round(v * 100)}%`);
 const ms = (v) => (v == null ? "—" : v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`);
 const when = (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); } catch (err) { return iso; } };
@@ -1146,7 +1154,7 @@ function renderTable() {
     const cells = columns.map(([key]) => {
       const value = row[key] || "";
       if (all) {
-        if (key === "final_verdict" && value) return el("td", { class: "nowrap" }, verdictPill(value));
+        if (key === "final_verdict" && value) return el("td", { class: "nowrap" }, verdictPill(value), " ", cutBadge(rowEvaluation(row)));
         if (value.length <= 40 && !value.includes("\n")) return el("td", { class: "nowrap", text: value });
         return el("td", { class: "wide" }, el("div", { class: "clamp", text: value }));
       }
@@ -1155,7 +1163,7 @@ function renderTable() {
       }
       if (key === "success_criteria") return el("td", { class: "wide" }, el("div", { class: "clamp", text: split(value).join("\n") }));
       if (key === "response_classification") return el("td", { class: "nowrap", text: human(value) });
-      if (key === "final_verdict") return el("td", { class: "nowrap" }, value ? verdictPill(value) : "");
+      if (key === "final_verdict") return el("td", { class: "nowrap" }, value ? verdictPill(value) : "", value ? " " : "", cutBadge(rowEvaluation(row)));
       if (key === "product_outcome") return el("td", { class: "nowrap" }, value ? el("span", { class: `outcome ${value}`, text: OUTCOME_LABELS[value] || value }) : "");
       if (key === "question_id" || key === "bug_ids") return el("td", { class: "id", text: split(value).join(", ") });
       if (metrics.includes(key)) return el("td", { class: "num" }, scoreChip(value, judged, row[`${key}_status`]));
@@ -1209,7 +1217,7 @@ function openDrawer(row) {
   const execution = state.executions.find((e) => e.question_id === row.question_id);
   $("#drawer-eyebrow").textContent = [row.question_id, row.scenario_id, row.mode, evaluation && evaluation.legacy_evaluation_profile ? `legacy ${evaluation.legacy_evaluation_profile}` : ""].filter(Boolean).join("  ·  ");
   $("#drawer-title").textContent = row.question || row.scenario_title;
-  $("#drawer-verdict").replaceChildren(...(row.final_verdict ? [verdictPill(row.final_verdict)] : []));
+  $("#drawer-verdict").replaceChildren(...[row.final_verdict ? verdictPill(row.final_verdict) : null, cutBadge(evaluation)].filter(Boolean).flatMap((p, i) => (i ? [" ", p] : [p])));
   // Reading order: what was asked -> what the product did -> how it was judged -> why
   // (findings, bugs) -> where it came from (scenario, reference pack).
   const parts = [];
@@ -1283,7 +1291,7 @@ function metricDetails(m) {
 function evaluationSections(ev) {
   const names = activeMetrics().filter((m) => ev.metrics[m]).concat(Object.keys(ev.metrics).filter((m) => !activeMetrics().includes(m)));
   if (!names.length) {
-    return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")],
+    return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")], cutCallout(ev),
       ev.verdict ? callout("warn", "No scores.", "No selected metric produced a result; see the notes.")
         : callout("info", "Not judged.", `The product ${OUTCOME_LABELS[ev.product_outcome] || ev.product_outcome}. Unresolved clarifications, errors and timeouts are recorded but not scored.`),
       ev.notes.length ? kvList([["Notes", ev.notes]]) : null)];
@@ -1307,7 +1315,7 @@ function evaluationSections(ev) {
       traceTable(m)));
   }
   return [section(["Evaluation", verdictPill(ev.verdict || "recorded_only")],
-    ev.verdict_reason ? el("p", { class: "verdict-reason", text: ev.verdict_reason }) : null, minis,
+    ev.verdict_reason ? el("p", { class: "verdict-reason", text: ev.verdict_reason }) : null, cutCallout(ev), minis,
     el("h4", { text: "Why these scores" }), why,
     el("h4", { text: "Verdict details" }),
     kvList([["Response kind", ev.response_classification ? `${human(ev.response_classification)} (${human(ev.classification_source)})` : ""],

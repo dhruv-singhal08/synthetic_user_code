@@ -247,6 +247,9 @@ class ArtifactReconciliation(StrictModel):
     # Rules of tables the artifact reads that the cheat sheet did not carry, plus catalog-wide
     # rules the cheat sheet did not select: candidates for the judge, never auto-applied.
     rules_not_in_pack: list[NonEmptyStr] = Field(default_factory=list)
+    # Catalog columns (table.column) the artifact compares with a text value and whose catalog
+    # lists values: their description and values are looked up for the judge (D261).
+    value_filter_columns: list[NonEmptyStr] = Field(default_factory=list)
 
     def with_status(self, status: IdentifierStatus) -> list[IdentifierCheck]:
         return [i for i in self.identifiers if i.status is status]

@@ -9,6 +9,8 @@ llm:
   timeout_seconds: 120
   max_validation_retries: 2
   max_concurrency: 4
+  provider_retries: 2         # failed LLM call (timeout, connection, 429/5xx): wait, retry
+  provider_retry_wait_seconds: 90  # wait before each retry (real providers only; 0 retries = off)
   fake_script_path: null
 product:
   timeout_seconds: 300       # per question; the contract `timeout` must not be lower

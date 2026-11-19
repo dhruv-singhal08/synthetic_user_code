@@ -45,6 +45,14 @@ from typing import Any, Self
 
 from pydantic import ValidationError
 
+from synthetic_user.adapters.auth import (
+    FormLoginAuth,
+    LoginTransport,
+    TokenProvider,
+    env_with_token,
+    send_with_auth,
+    urllib_login,
+)
 from synthetic_user.adapters.base import ContextRequest, ProductRequest
 from synthetic_user.adapters.http_common import (
     ERROR_SNIPPET_CHARS,
@@ -89,7 +97,8 @@ __all__ = [
 
 
 class HttpJsonOptions(HttpOptionsBase):
-    pass
+    # Optional product login (D263): the token fills ${token_variable} in the headers.
+    auth: FormLoginAuth | None = None
 
 
 # --- transport ------------------------------------------------------------------------------
@@ -143,12 +152,24 @@ class HttpJsonAdapter:
         env: Mapping[str, str],
         ssl_verify: bool = True,
         transport: Transport = urllib_transport,
+        login_transport: LoginTransport = urllib_login,
     ) -> None:
         self._options = options
         self._env = env
         self._ssl_verify, self._tls_ca_bundle = tls_settings(options, env, ssl_verify=ssl_verify)
         self._transport = transport
         self._mapper = ResponseMapper(options.response_mapping)
+        self._auth = (
+            TokenProvider(
+                options.auth,
+                env,
+                ssl_verify=self._ssl_verify,
+                tls_ca_bundle=self._tls_ca_bundle,
+                transport=login_transport,
+            )
+            if options.auth is not None
+            else None
+        )
 
     @classmethod
     def from_options(
@@ -158,6 +179,7 @@ class HttpJsonAdapter:
         env: Mapping[str, str],
         ssl_verify: bool = True,
         transport: Transport = urllib_transport,
+        login_transport: LoginTransport = urllib_login,
     ) -> Self:
         try:
             parsed = HttpJsonOptions.model_validate(options)
@@ -165,15 +187,27 @@ class HttpJsonAdapter:
             raise ConfigError(
                 f"Invalid product_adapter options for http_json: {format_validation_error(exc)}"
             ) from exc
-        return cls(parsed, env=env, ssl_verify=ssl_verify, transport=transport)
+        return cls(
+            parsed,
+            env=env,
+            ssl_verify=ssl_verify,
+            transport=transport,
+            login_transport=login_transport,
+        )
 
     def __repr__(self) -> str:
         count = len(self._options.headers)
         return f"HttpJsonAdapter(url={self._options.url!r}, headers=<{count} hidden>)"
 
     async def send(self, req: ProductRequest) -> ProductResponse:
+        return await send_with_auth(self._auth, self._env, lambda env: self._send_once(req, env))
+
+    async def _send_once(
+        self, req: ProductRequest, env: Mapping[str, str]
+    ) -> tuple[ProductResponse, int | None]:
+        """One HTTP call: the response and the HTTP status (None when there was none)."""
         options = self._options
-        resolved = resolve_headers(options.headers, self._env)
+        resolved = resolve_headers(options.headers, env)
         request_uuid = str(uuid.uuid4())
         rendered = render_template(options.request_template, req, request_uuid=request_uuid)
         body = None
@@ -203,7 +237,7 @@ class HttpJsonAdapter:
         except TimeoutError:
             message = f"HTTP request timed out after {options.timeout:g} seconds"
             record_product_http(request=trace_request, response=None, error=message)
-            return TimeoutResponse(timeout_seconds=options.timeout)
+            return TimeoutResponse(timeout_seconds=options.timeout), None
         except ProductAdapterError as exc:
             message = scrub_text(str(exc), resolved.secrets)
             record_product_http(request=trace_request, response=None, error=message)
@@ -218,7 +252,7 @@ class HttpJsonAdapter:
             error=None,
         )
         response = self._to_response(result, resolved.secrets)
-        return correlation_for(response, options, req, request_uuid)
+        return correlation_for(response, options, req, request_uuid), result.status
 
     async def fetch_context(self, req: ContextRequest) -> RetrievedContext:
         options = self._options.context_api
@@ -233,7 +267,7 @@ class HttpJsonAdapter:
                 "utterance": req.utterance,
                 "uuid": req.correlation_id,
             },
-            self._env,
+            await env_with_token(self._auth, self._env),
             self._transport,
             tls_ca_bundle=self._tls_ca_bundle,
             ssl_verify=self._ssl_verify,

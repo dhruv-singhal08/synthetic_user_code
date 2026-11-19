@@ -13,6 +13,14 @@ from typing import Any, Self
 import aiohttp
 from pydantic import ValidationError
 
+from synthetic_user.adapters.auth import (
+    FormLoginAuth,
+    LoginTransport,
+    TokenProvider,
+    env_with_token,
+    send_with_auth,
+    urllib_login,
+)
 from synthetic_user.adapters.base import ContextRequest, ProductRequest
 from synthetic_user.adapters.http_common import (
     ERROR_SNIPPET_CHARS,
@@ -53,6 +61,8 @@ class SseStreamOptions(StrictModel):
 
 class HttpSseOptions(HttpOptionsBase):
     stream: SseStreamOptions
+    # Optional product login (D263): the token fills ${token_variable} in the headers.
+    auth: FormLoginAuth | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +116,7 @@ class HttpSseAdapter:
         ssl_verify: bool = True,
         transport: SseTransport = aiohttp_sse_transport,
         context_transport: JsonTransport | None = None,
+        login_transport: LoginTransport = urllib_login,
     ) -> None:
         self._options = options
         self._env = env
@@ -114,6 +125,17 @@ class HttpSseAdapter:
         # The context API is plain JSON over HTTP, even when the answer is streamed.
         self._context_transport = context_transport
         self._mapper = ResponseMapper(options.response_mapping)
+        self._auth = (
+            TokenProvider(
+                options.auth,
+                env,
+                ssl_verify=self._ssl_verify,
+                tls_ca_bundle=self._tls_ca_bundle,
+                transport=login_transport,
+            )
+            if options.auth is not None
+            else None
+        )
 
     @classmethod
     def from_options(
@@ -123,6 +145,7 @@ class HttpSseAdapter:
         env: Mapping[str, str],
         ssl_verify: bool = True,
         transport: SseTransport = aiohttp_sse_transport,
+        login_transport: LoginTransport = urllib_login,
     ) -> Self:
         try:
             parsed = HttpSseOptions.model_validate(options)
@@ -130,15 +153,27 @@ class HttpSseAdapter:
             raise ConfigError(
                 f"Invalid product_adapter options for http_sse: {format_validation_error(exc)}"
             ) from exc
-        return cls(parsed, env=env, ssl_verify=ssl_verify, transport=transport)
+        return cls(
+            parsed,
+            env=env,
+            ssl_verify=ssl_verify,
+            transport=transport,
+            login_transport=login_transport,
+        )
 
     def __repr__(self) -> str:
         count = len(self._options.headers)
         return f"HttpSseAdapter(url={self._options.url!r}, headers=<{count} hidden>)"
 
     async def send(self, req: ProductRequest) -> ProductResponse:
+        return await send_with_auth(self._auth, self._env, lambda env: self._send_once(req, env))
+
+    async def _send_once(
+        self, req: ProductRequest, env: Mapping[str, str]
+    ) -> tuple[ProductResponse, int | None]:
+        """One streamed call: the response and the HTTP status (None when there was none)."""
         options = self._options
-        resolved = resolve_headers(options.headers, self._env)
+        resolved = resolve_headers(options.headers, env)
         request_uuid = str(uuid.uuid4())
         rendered = render_template(options.request_template, req, request_uuid=request_uuid)
         body = None if options.method == "GET" else json.dumps(rendered).encode("utf-8")
@@ -166,7 +201,7 @@ class HttpSseAdapter:
         except TimeoutError:
             message = f"SSE stream timed out after {options.timeout:g} seconds"
             record_product_http(request=trace_request, response=None, error=message)
-            return TimeoutResponse(timeout_seconds=options.timeout)
+            return TimeoutResponse(timeout_seconds=options.timeout), None
         except ProductAdapterError as exc:
             message = scrub_text(str(exc), resolved.secrets)
             record_product_http(request=trace_request, response=None, error=message)
@@ -180,7 +215,7 @@ class HttpSseAdapter:
                 response={"status": result.status, "body": message},
                 error=None,
             )
-            return ErrorResponse(error_type="AuthenticationError", message=message)
+            return ErrorResponse(error_type="AuthenticationError", message=message), result.status
         if result.status >= 400:
             snippet = "\n".join(result.lines)[:ERROR_SNIPPET_CHARS]
             message = scrub_text(f"HTTP {result.status}: {snippet}", resolved.secrets)
@@ -189,7 +224,7 @@ class HttpSseAdapter:
                 response={"status": result.status, "body": message},
                 error=None,
             )
-            return ErrorResponse(error_type="HttpError", message=message)
+            return ErrorResponse(error_type="HttpError", message=message), result.status
 
         events = parse_sse_events(result.lines, options.stream)
         # Map from the scrubbed events as well as storing them. This prevents a product that
@@ -212,7 +247,7 @@ class HttpSseAdapter:
             require_mapped_text=True,
         )
         response = correlation_for(response, options, req, request_uuid)
-        return response.model_copy(update={"raw_response": redacted_events})
+        return response.model_copy(update={"raw_response": redacted_events}), result.status
 
     async def fetch_context(self, req: ContextRequest) -> RetrievedContext:
         options = self._options.context_api
@@ -228,7 +263,7 @@ class HttpSseAdapter:
                 "utterance": req.utterance,
                 "uuid": req.correlation_id,
             },
-            self._env,
+            await env_with_token(self._auth, self._env),
             transport,
             tls_ca_bundle=self._tls_ca_bundle,
             ssl_verify=self._ssl_verify,

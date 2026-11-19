@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -16,8 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from synthetic_user.adapters.auth import LoginTransport, TokenProvider, urllib_login
 from synthetic_user.adapters.base import ProductAdapter, UnavailableAdapter
 from synthetic_user.adapters.contract import ProductContract, request_contract
+from synthetic_user.adapters.http_common import tls_settings
 from synthetic_user.adapters.http_json import (
     HttpJsonAdapter,
     Transport,
@@ -35,6 +38,7 @@ from synthetic_user.core.config import AppConfig
 from synthetic_user.core.exceptions import (
     ArtifactNotFoundError,
     ConfigError,
+    ProductAuthError,
     SyntheticUserError,
 )
 from synthetic_user.core.identifiers import RUN_ID_PATTERN
@@ -62,6 +66,7 @@ from synthetic_user.web.workspace import (
     RESULTS_CSV,
     ParsedHttpConnection,
     ProductConnection,
+    UiRunState,
     Upload,
     Workspace,
     custom_input_limits,
@@ -107,16 +112,42 @@ class ContractRequest(BaseModel):
     url: str = Field(min_length=1)
 
 
+class ProductLoginRequest(BaseModel):
+    """Product login (D263): kept in server memory only, never written or logged."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = ""  # empty = the contract's login URL
+    user: str = Field(min_length=1)
+    password: str = Field(min_length=1, repr=False)
+
+
 def create_app(
     settings: AppConfig,
     *,
     env: Mapping[str, str] | None = None,
     transport: Transport = urllib_transport,
     sse_transport: SseTransport = aiohttp_sse_transport,
+    login_transport: LoginTransport = urllib_login,
 ) -> FastAPI:
     """``env`` fills ``${VAR}`` contract headers (default: the process environment);
     ``transport`` is replaceable for tests."""
     environ: Mapping[str, str] = os.environ if env is None else env
+    # Product logins per run (D263): {credential env var: value}, in memory only - never written
+    # to the run folder or a log; gone when the server stops.
+    logins: dict[str, dict[str, str]] = {}
+
+    def login_view(run_id: str, state: UiRunState) -> dict[str, str] | None:
+        connection = workspace.connection_options(state) if state.connection else None
+        auth = connection.options.auth if connection is not None else None
+        overlay = logins.get(run_id)
+        if auth is None or overlay is None:
+            return None
+        return {
+            "user": overlay[auth.user_env],
+            "url": overlay.get(auth.url_env) or auth.url,
+        }
+
     store = JsonArtifactStore(settings.paths.artifacts_dir)
     workspace = Workspace(settings, store)
     app = FastAPI(title="Synthetic User", docs_url="/api/docs")
@@ -284,7 +315,11 @@ def create_app(
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str) -> dict[str, Any]:
         state = workspace.state(check_run_id(run_id))
-        return {"state": state.model_dump(mode="json"), **workspace.results(run_id)}
+        return {
+            "state": state.model_dump(mode="json"),
+            **workspace.results(run_id),
+            "product_login": login_view(run_id, state),
+        }
 
     @app.post("/api/runs/{run_id}/evaluation")
     async def save_evaluation(
@@ -372,6 +407,7 @@ def create_app(
         state = workspace.state(check_run_id(run_id))
         upload = Upload(contract.filename or "contract.yaml", await contract.read())
         state = workspace.connect(state, url, upload, context_source)
+        logins.pop(run_id, None)  # a new contract needs its own login
         return {"state": state.model_dump(mode="json")}
 
     @app.delete("/api/runs/{run_id}/connection")
@@ -379,7 +415,44 @@ def create_app(
         state = workspace.state(check_run_id(run_id))
         state = state.model_copy(update={"connection": None, "contract": None})
         workspace.save_state(state)
+        logins.pop(run_id, None)
         return {"state": state.model_dump(mode="json")}
+
+    @app.post("/api/runs/{run_id}/product-login")
+    async def product_login(run_id: str, body: ProductLoginRequest) -> dict[str, Any]:
+        """Sign in once now (wrong credentials are reported here, before any question is
+        sent); on success the credentials are kept in memory for this run's execute steps."""
+        state = workspace.state(check_run_id(run_id))
+        connection = workspace.connection_options(state)
+        auth = connection.options.auth if connection is not None else None
+        if connection is None or auth is None:
+            raise ConfigError("The connected contract has no auth section: no login is needed")
+        overlay = {auth.user_env: body.user.strip(), auth.password_env: body.password}
+        if body.url.strip():
+            overlay[auth.url_env] = body.url.strip()
+        login_env = {**environ, **overlay}
+        verify, bundle = tls_settings(
+            connection.options, login_env, ssl_verify=settings.product.ssl_verify
+        )
+        provider = TokenProvider(
+            auth, login_env, ssl_verify=verify, tls_ca_bundle=bundle, transport=login_transport
+        )
+        try:
+            await provider.token()
+        except ProductAuthError as exc:
+            raise ConfigError(str(exc)) from None
+        logins[run_id] = overlay
+        return {
+            "product_login": {
+                **(login_view(run_id, state) or {}),
+                "valid_until": datetime.fromtimestamp(provider.expires_at, UTC).isoformat(),
+            }
+        }
+
+    @app.delete("/api/runs/{run_id}/product-login")
+    async def product_logout(run_id: str) -> dict[str, Any]:
+        logins.pop(check_run_id(run_id), None)
+        return {"product_login": None}
 
     @app.post("/api/runs/{run_id}/contract")
     async def mock_contract(run_id: str, body: ContractRequest) -> dict[str, Any]:
@@ -428,9 +501,10 @@ def create_app(
                 state.contract,
                 workspace.connection_options(state),
                 inputs,
-                env=environ,
+                env={**environ, **logins.get(run_id, {})},
                 transport=transport,
                 sse_transport=sse_transport,
+                login_transport=login_transport,
             )
             if step is Step.EXECUTE
             else UnavailableAdapter()
@@ -563,20 +637,35 @@ def _product_adapter(
     env: Mapping[str, str],
     transport: Transport,
     sse_transport: SseTransport,
+    login_transport: LoginTransport = urllib_login,
 ) -> ProductAdapter:
     """Uploaded HTTP contract -> real product; mock contract -> mock; else configured adapter."""
     if connection is not None:
         ssl_verify = settings.product.ssl_verify
         if isinstance(connection.options, HttpSseOptions):
             return HttpSseAdapter(
-                connection.options, env=env, ssl_verify=ssl_verify, transport=sse_transport
+                connection.options,
+                env=env,
+                ssl_verify=ssl_verify,
+                transport=sse_transport,
+                login_transport=login_transport,
             )
         return HttpJsonAdapter(
-            connection.options, env=env, ssl_verify=ssl_verify, transport=transport
+            connection.options,
+            env=env,
+            ssl_verify=ssl_verify,
+            transport=transport,
+            login_transport=login_transport,
         )
     if contract is not None:
         return MockLLMAdapter(llm, contract, inputs.product, inputs.reference)
-    return create_adapter(settings, env=env, transport=transport, sse_transport=sse_transport)
+    return create_adapter(
+        settings,
+        env=env,
+        transport=transport,
+        sse_transport=sse_transport,
+        login_transport=login_transport,
+    )
 
 
 def _settings_for_question_complexity(

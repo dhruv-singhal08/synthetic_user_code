@@ -87,6 +87,10 @@ class LLMSettings(_Section):
     timeout_seconds: float = Field(default=60.0, gt=0)
     max_validation_retries: int = Field(default=2, ge=0)
     max_concurrency: int = Field(default=4, ge=1)
+    # A failed provider call (timeout, connection, 429 / 5xx) is tried again after a wait
+    # (D264); 0 = off. Real providers only; a setup error is never retried.
+    provider_retries: int = Field(default=2, ge=0, le=10)
+    provider_retry_wait_seconds: float = Field(default=90.0, ge=0, le=900)
     # provider "fake" only: JSON rule script so the full pipeline runs offline.
     fake_script_path: Path | None = None
     # provider "safechain" only: SafeChain's own YAML (idaas + models).

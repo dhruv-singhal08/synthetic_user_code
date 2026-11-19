@@ -10,6 +10,8 @@ llm:
   timeout_seconds: 60         # per LLM call
   max_validation_retries: 2   # bounded retries in llm/structured.py
   max_concurrency: 4          # max in-flight LLM calls
+  provider_retries: 2         # failed LLM call (timeout, connection, 429/5xx): wait, retry
+  provider_retry_wait_seconds: 90  # wait before each retry (real providers only; 0 retries = off)
   fake_script_path: null      # provider fake only: JSON rule script (see config/app.fake.yaml)
   safechain_config_path: null # provider safechain only: SafeChain's YAML (idaas + models)
 # Env overrides: LLM_PROVIDER (provider), GEMINI_MODEL / SAFECHAIN_MODEL_ID (model of the active

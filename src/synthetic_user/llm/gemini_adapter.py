@@ -57,7 +57,8 @@ class GeminiClient:
                 from langchain_google_genai import ChatGoogleGenerativeAI
             except ImportError as exc:
                 raise LLMProviderError(
-                    f"langchain-google-genai is not installed; run `{INSTALL_HINT}`"
+                    f"langchain-google-genai is not installed; run `{INSTALL_HINT}`",
+                    retryable=False,
                 ) from exc
             kwargs: dict[str, Any] = {
                 "model": self._model,

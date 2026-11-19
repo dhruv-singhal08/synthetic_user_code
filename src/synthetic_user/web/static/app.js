@@ -602,6 +602,7 @@ async function connect() {
       if (needsContext()) form.append("context_source", state.contextSource);
       const body = await api(`/api/runs/${state.runId}/connection`, { method: "POST", body: form });
       state.run = body.state;
+      state.productLogin = null; // a new contract needs its own login
       log(`Connected to ${state.run.connection.product_url} (${state.contractFile.name})`);
       toast("Product connected");
     }
@@ -613,6 +614,7 @@ async function disconnect() {
   await withBusy("Disconnecting", async () => {
     const body = await api(`/api/runs/${state.runId}/connection`, { method: "DELETE" });
     state.run = body.state;
+    state.productLogin = null;
     renderConnection();
     log("Product disconnected - the configured adapter answers");
   });
@@ -646,6 +648,7 @@ function renderConnection() {
         fact("Retrieved context", c.context_source === "context_api" ? `context API ${c.context_api_url}` : c.context_source === "response_field" ? "in the product response" : "not available")),
       el("details", { class: "raw" }, el("summary", { text: "View request template and response mapping" }),
         el("pre", { text: JSON.stringify({ timeout: c.timeout, request_template: c.request_template, response_mapping: mapping, stream: c.stream || undefined }, null, 2) })),
+      c.auth_url ? loginBlock(c) : null,
     );
     return;
   }
@@ -663,6 +666,49 @@ function renderConnection() {
     return;
   }
   status.className = "pill pill-neutral"; status.textContent = "Not connected";
+}
+
+// Product login (D263): the contract's auth section signs in for the product calls and renews
+// the token during the run. The user ID and password stay in the server's memory only.
+function loginBlock(c) {
+  const login = state.productLogin;
+  const field = (id, label, attrs) => el("div", {}, el("label", { class: "label", for: id, text: label }), el("input", { id, autocomplete: "off", ...attrs }));
+  const until = login && login.valid_until ? ` · token valid until ${when(login.valid_until)}` : "";
+  const actions = el("div", { class: "form-actions" },
+    el("button", { id: "login-btn", class: "btn btn-primary", type: "button", text: login ? "Log in again" : "Log in" }),
+    login ? el("button", { id: "logout-btn", class: "btn", type: "button", text: "Log out" }) : null,
+    el("span", { class: "hint", text: login ? `Logged in as ${login.user}${until}.` : "Not logged in." }));
+  const node = el("div", { class: "sub-input" },
+    el("span", { class: "label", text: "Product login" }),
+    el("p", { class: "help", text: "The contract signs in to get the product token and renews it during the run (before it expires, or after a rejected call). Kept in the server's memory only: log in again after a server restart." }),
+    el("div", { class: "conn-grid" },
+      field("login-url", "Login URL", { type: "url", value: (login && login.url) || c.auth_url }),
+      field("login-user", "User ID", { type: "text", value: (login && login.user) || "" })),
+    field("login-password", "Password", { type: "password", autocomplete: "new-password" }),
+    actions);
+  $("#login-btn", node).addEventListener("click", productLogin);
+  if (login) $("#logout-btn", node).addEventListener("click", productLogout);
+  return node;
+}
+
+async function productLogin() {
+  const data = { url: $("#login-url").value.trim(), user: $("#login-user").value.trim(), password: $("#login-password").value };
+  if (!data.user || !data.password) { toast("Enter the user ID and password", "error"); return; }
+  await withBusy("Product login", async () => {
+    const body = await postJson(`/api/runs/${state.runId}/product-login`, data);
+    state.productLogin = body.product_login;
+    log(`Product login as ${data.user} succeeded`);
+    toast("Logged in");
+    renderConnection();
+  });
+}
+
+async function productLogout() {
+  await withBusy("Product logout", async () => {
+    await api(`/api/runs/${state.runId}/product-login`, { method: "DELETE" });
+    state.productLogin = null;
+    renderConnection();
+  });
 }
 
 // --- pipeline ---------------------------------------------------------------------------------
@@ -867,6 +913,8 @@ function applyRun(body) {
   state.metricConfig = body.metric_config || null;
   state.metricIds = body.metric_ids || [];
   state.guidance = body.evaluation_guidance || null;
+  // Only the run endpoint reports the product login (memory-only); other replies keep it.
+  if ("product_login" in body) state.productLogin = body.product_login || null;
   fillGuidance();
   if (state.run && state.run.metric_selection) state.selectedMetrics = new Set(state.run.metric_selection.selected_metrics);
   renderConnection();

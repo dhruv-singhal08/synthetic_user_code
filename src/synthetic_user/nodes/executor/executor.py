@@ -45,7 +45,11 @@ from synthetic_user.adapters.base import (
     ProductRequest,
 )
 from synthetic_user.core.config import AppConfig, ClarificationPolicy
-from synthetic_user.core.exceptions import ProductAdapterError, format_validation_error
+from synthetic_user.core.exceptions import (
+    ProductAdapterError,
+    ProductAuthError,
+    format_validation_error,
+)
 from synthetic_user.core.identifiers import IdKind, SequentialIdGenerator
 from synthetic_user.core.trace import record_product_call, trace_redactions, trace_subject
 from synthetic_user.llm.base import LLMClient
@@ -82,6 +86,13 @@ Logger = logging.Logger | logging.LoggerAdapter[logging.Logger]
 INVALID_ADAPTER_RESPONSE = "invalid_adapter_response"
 # Longest error message stored in an ErrorResponse.
 MAX_ERROR_MESSAGE_CHARS = 1_000
+# After a failed product login (D263) the remaining questions are not sent: each would fail the
+# same way, and repeated logins with a wrong password could lock the account.
+NOT_SENT = (
+    "Not sent: the product login failed at {first}. Fix the login (Product connection, or the "
+    "credential environment variables) and run Execute again from the first question with this "
+    "error."
+)
 # (execution_id, raw JSON) -> path recorded as ExecutionRecord.raw_response_path
 RawWriter = Callable[[str, JsonValue], str]
 
@@ -105,6 +116,8 @@ class ProductExecutor:
         self._log = logger
         self._llm = llm
         self._ids = id_generator or SequentialIdGenerator()
+        # The first product-login failure of this execute step ("<question id>: <reason>").
+        self._auth_stop: str | None = None
 
     async def execute_many(
         self,
@@ -119,6 +132,7 @@ class ProductExecutor:
         """One ExecutionRecord per question, in question order. ``product_id`` comes from the
         product description. The adapter is always closed, even if something fails."""
         semaphore = asyncio.Semaphore(self._settings.product.max_concurrency)
+        self._auth_stop = None
         try:
             raw = await asyncio.gather(
                 *(
@@ -216,6 +230,12 @@ class ProductExecutor:
                         response = TimeoutResponse(timeout_seconds=timeout)
                         turns.append(_response_turn(response, None))
                         break
+                    if self._auth_stop is not None:
+                        response = ErrorResponse(
+                            error_type="NotSent", message=NOT_SENT.format(first=self._auth_stop)
+                        )
+                        turns.append(_response_turn(response, None))
+                        break
                     request = ProductRequest(
                         question_id=question.question_id,
                         utterance=next_utterance,
@@ -251,6 +271,14 @@ class ProductExecutor:
                         response = ErrorResponse(
                             error_type=type(exc).__name__, message=message[:MAX_ERROR_MESSAGE_CHARS]
                         )
+                        if isinstance(exc, ProductAuthError) and self._auth_stop is None:
+                            self._auth_stop = f"{question.question_id} ({message})"
+                            self._log.warning(
+                                "%s: product login failed - the remaining questions are not "
+                                "sent: %s",
+                                question.question_id,
+                                message,
+                            )
                     # Adapter boundary: one adapter bug must not sink the run.
                     except Exception as exc:
                         self._log.exception(

@@ -17,6 +17,7 @@ from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.factory import create_llm_client
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.llm.gemini_adapter import GeminiClient
+from synthetic_user.llm.retrying import RetryingLLMClient
 from synthetic_user.llm.safechain_adapter import SafeChainClient
 
 REPO_CONFIG = Path(__file__).resolve().parents[2] / "config" / "app.yaml"
@@ -56,7 +57,9 @@ def test_factory_gemini_builds_client_without_importing_sdk(
 ) -> None:
     _packages_present(monkeypatch, {"langchain_google_genai"})
     client = create_llm_client(_config("gemini", env={"GOOGLE_API_KEY": "k"}))
-    assert isinstance(client, GeminiClient)
+    # A real provider is wrapped to wait and retry a failed call (D264).
+    assert isinstance(client, RetryingLLMClient)
+    assert isinstance(client._llm, GeminiClient)
     assert isinstance(client, LLMClient)
     assert (client.provider_name, client.model_name) == ("gemini", "test-model")
 
@@ -89,7 +92,8 @@ def test_factory_safechain_builds_client_without_importing_sdk(
 ) -> None:
     _packages_present(monkeypatch, {"safechain"})
     client = create_llm_client(_safechain_config(tmp_path))
-    assert isinstance(client, SafeChainClient)
+    assert isinstance(client, RetryingLLMClient)
+    assert isinstance(client._llm, SafeChainClient)
     assert isinstance(client, LLMClient)
     assert (client.provider_name, client.model_name) == ("safechain", "1")
 

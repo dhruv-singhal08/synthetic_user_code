@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from synthetic_user.adapters.auth import LoginRequest, LoginResult
 from synthetic_user.adapters.base import ProductRequest
 from synthetic_user.adapters.http_common import HttpRequest, HttpResult
 from synthetic_user.adapters.http_json import HttpJsonAdapter
@@ -151,10 +152,21 @@ class ScriptedTransport:
         return HttpResult(200, json.dumps(body).encode())
 
 
+async def _stub_login(request: LoginRequest) -> LoginResult:
+    """The QA sign-in, stubbed: any user gets the token cookie the contract reads."""
+    return LoginResult(200, {"bluetoken": "STUB-BLUE-TOKEN"})
+
+
 def _insight(transport: ScriptedTransport) -> HttpJsonAdapter:
-    """The shipped Insight Agent (generate_sql) contract, unchanged, over a stub transport."""
+    """The shipped Insight Agent (generate_sql) contract, unchanged, over a stub transport;
+    its product login (D263) is stubbed too."""
     options = yaml.safe_load(INSIGHT_ADAPTER.read_text(encoding="utf-8"))["options"]
-    return HttpJsonAdapter.from_options(options, env={}, transport=transport)  # token in file
+    return HttpJsonAdapter.from_options(
+        options,
+        env={"BLUE_USER": "tester", "BLUE_PASSWORD": "secret"},
+        transport=transport,
+        login_transport=_stub_login,
+    )
 
 
 async def test_insight_clarification_options_are_answered_on_the_same_session(
@@ -172,9 +184,9 @@ async def test_insight_clarification_options_are_answered_on_the_same_session(
     bodies = [json.loads(r.body or b"{}") for r in transport.requests]
     assert [b["input"] for b in bodies] == ["Who spent most?", "Top 10 routes"]
     assert bodies[0]["session_id"] == bodies[1]["session_id"] == record.session_id
-    # SSL off and the token written in the contract itself (no environment variable)
+    # SSL off and the token from the contract's product login (no environment variable)
     assert all(not r.ssl_verify for r in transport.requests)
-    assert transport.requests[0].headers["Authorization"] == "Bearer PASTE_YOUR_BLUE_TOKEN_HERE"
+    assert transport.requests[0].headers["Authorization"] == "Bearer STUB-BLUE-TOKEN"
     assert record.outcome == "answered"
     assert record.response.first_artifact("sql").content == INSIGHT_SQL["result"]
     clarification = record.turns[1]

@@ -21,6 +21,7 @@ from typing import Any, TypeVar
 
 from pydantic import Field, ValidationError
 
+from synthetic_user.adapters.auth import LoginTransport, urllib_login
 from synthetic_user.adapters.base import ProductAdapter
 from synthetic_user.adapters.fixture import FixtureAdapter
 from synthetic_user.adapters.http_json import HttpJsonAdapter, Transport, urllib_transport
@@ -51,6 +52,7 @@ def create_adapter(
     env: Mapping[str, str] | None = None,
     transport: Transport = urllib_transport,
     sse_transport: SseTransport = aiohttp_sse_transport,
+    login_transport: LoginTransport = urllib_login,
 ) -> ProductAdapter:
     """Unknown type, invalid options or a bad import -> ConfigError."""
     config = settings.product_adapter
@@ -59,7 +61,11 @@ def create_adapter(
         return FixtureAdapter.from_file(_options(FixtureOptions, config.options, config.type).path)
     if config.type is ProductAdapterType.HTTP_JSON:
         return HttpJsonAdapter.from_options(
-            config.options, env=environ, ssl_verify=settings.product.ssl_verify, transport=transport
+            config.options,
+            env=environ,
+            ssl_verify=settings.product.ssl_verify,
+            transport=transport,
+            login_transport=login_transport,
         )
     if config.type is ProductAdapterType.HTTP_SSE:
         return HttpSseAdapter.from_options(
@@ -67,6 +73,7 @@ def create_adapter(
             env=environ,
             ssl_verify=settings.product.ssl_verify,
             transport=sse_transport,
+            login_transport=login_transport,
         )
     if config.type is ProductAdapterType.PYTHON:
         return _python_adapter(_options(PythonOptions, config.options, config.type))

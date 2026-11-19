@@ -10,12 +10,15 @@ from synthetic_user.llm.base import LLMClient
 from synthetic_user.llm.fake import FakeLLMClient
 from synthetic_user.llm.gemini_adapter import INSTALL_HINT as GEMINI_INSTALL_HINT
 from synthetic_user.llm.gemini_adapter import GeminiClient
+from synthetic_user.llm.retrying import RetryingLLMClient
 from synthetic_user.llm.safechain_adapter import INSTALL_HINT as SAFECHAIN_INSTALL_HINT
 from synthetic_user.llm.safechain_adapter import SafeChainClient
 from synthetic_user.llm.scripted import ScriptedLLMClient
 
 
 def create_llm_client(settings: AppConfig) -> LLMClient:
+    """The configured client; a real provider (Gemini, SafeChain) waits and retries a failed
+    call (llm.provider_retries / provider_retry_wait_seconds, D264), the offline ones do not."""
     llm = settings.llm
     if llm.provider == LLMProvider.FAKE:
         if llm.fake_script_path is not None:
@@ -28,11 +31,14 @@ def create_llm_client(settings: AppConfig) -> LLMClient:
             raise ConfigError(
                 "GOOGLE_API_KEY (or GEMINI_API_KEY) must be set when llm.provider is 'gemini'"
             )
-        return GeminiClient(
-            model=llm.model,
-            api_key=api_key,
-            timeout_seconds=llm.timeout_seconds,
-            temperature=llm.temperature,
+        return _retrying(
+            GeminiClient(
+                model=llm.model,
+                api_key=api_key,
+                timeout_seconds=llm.timeout_seconds,
+                temperature=llm.temperature,
+            ),
+            settings,
         )
     if llm.provider == LLMProvider.SAFECHAIN:
         _require_package("safechain", "safechain", SAFECHAIN_INSTALL_HINT)
@@ -42,10 +48,21 @@ def create_llm_client(settings: AppConfig) -> LLMClient:
                 f"SafeChain config file not found: {config_path} "
                 f"(set llm.safechain_config_path or {SAFECHAIN_CONFIG_ENV})"
             )
-        return SafeChainClient(
-            model=llm.model, config_path=config_path, timeout_seconds=llm.timeout_seconds
+        return _retrying(
+            SafeChainClient(
+                model=llm.model, config_path=config_path, timeout_seconds=llm.timeout_seconds
+            ),
+            settings,
         )
     raise ConfigError(f"Unknown llm.provider: {llm.provider!r}")
+
+
+def _retrying(client: LLMClient, settings: AppConfig) -> LLMClient:
+    return RetryingLLMClient.wrap(
+        client,
+        retries=settings.llm.provider_retries,
+        wait_seconds=settings.llm.provider_retry_wait_seconds,
+    )
 
 
 def _require_package(module: str, provider: str, install_hint: str) -> None:

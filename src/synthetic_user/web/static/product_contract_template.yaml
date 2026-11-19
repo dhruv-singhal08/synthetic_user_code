@@ -10,6 +10,16 @@
 method: POST                          # GET sends no body
 headers:
   Authorization: "Bearer ${PRODUCT_API_TOKEN}"   # or the token itself: "Bearer abc123..."
+# Optional product login (token that expires, renewed during the run): sign in with a form and
+# take the token from a cookie; it then fills ${BLUE_TOKEN} in the headers. User ID and password
+# are entered under Product connection (never in this file). See README "Product login".
+# auth:
+#   type: form_login
+#   url: https://login.example.com/signin
+#   user_field: userid
+#   password_field: pwd
+#   token_cookie: bluetoken
+#   token_variable: BLUE_TOKEN
 timeout: 300                          # HTTP seconds per question (product.timeout_seconds in
                                       # the app config also applies; the lower one wins)
 # Optional TLS trust bundle: `amexcerts`, a PEM file path, or `${PRODUCT_CA_BUNDLE}`.

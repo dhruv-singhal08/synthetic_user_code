@@ -13,11 +13,13 @@
 #   options.url below).
 # CLI:    product_adapter: ./config/products/generate_sql.adapter.yaml
 #
-# Token (valid ~1 hour): paste it into the Authorization header below, replacing
-#   PASTE_YOUR_BLUE_TOKEN_HERE. It is masked in logs, traces and stored results, but this file
-#   is tracked by git: do not commit it with the token in it. To keep the token out of the
-#   file instead, use  Authorization: "Bearer ${BLUE_TOKEN}"  and  export BLUE_TOKEN='...'.
-# SSL: certificate checking is OFF for this QA endpoint (ssl_verify: false below).
+# Token (valid ~1 hour): obtained by the product login below (auth) and renewed during the run,
+#   so long runs keep working. Log in with your user ID and password under "Product connection"
+#   (UI; kept in server memory only), or for the CLI:  export BLUE_USER='...' BLUE_PASSWORD='...'
+#   Never write the password in this file (it is tracked by git and stored with each run).
+#   Without the auth section, ${BLUE_TOKEN} comes from the environment (export BLUE_TOKEN='...').
+# SSL: certificate checking is OFF for this QA endpoint (ssl_verify: false below; the login
+#   call uses the same setting).
 type: http_json
 options:
   url: https://gcsgenaiconvbi-qa.aexp.com/generate/sql/?timeout=300   # ?timeout = the product's own limit
@@ -25,8 +27,16 @@ options:
   ssl_verify: false                   # SSL off: the endpoint's certificate is NOT checked
   timeout: 320                        # HTTP wait per question; a bit above the product's 300s
                                       # (the app config's product.timeout_seconds is also a limit; lower wins)
+  auth:                               # product login (D263): fills ${BLUE_TOKEN} below
+    type: form_login
+    url: https://authbluesvcqa-vip.phx.aexp.com/ssoi/signin   # QA sign-in (UI can change it)
+    user_field: userid                # form fields of the sign-in request
+    password_field: pwd
+    token_cookie: bluetoken           # the token comes back in this cookie
+    token_variable: BLUE_TOKEN
+    refresh_before_seconds: 300       # renew 5 minutes before the token expires
   headers:
-    Authorization: "Bearer PASTE_YOUR_BLUE_TOKEN_HERE"   # or "Bearer ${BLUE_TOKEN}" (from env)
+    Authorization: "Bearer ${BLUE_TOKEN}"   # filled by the login above
     accept: "*/*"
     Content-Type: application/json
   request_template:

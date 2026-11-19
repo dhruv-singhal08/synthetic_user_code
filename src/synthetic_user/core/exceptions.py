@@ -20,7 +20,14 @@ class InputAssetError(SyntheticUserError):
 
 
 class LLMProviderError(SyntheticUserError):
-    """The LLM provider call failed (transport, auth, timeout, provider-side error)."""
+    """The LLM provider call failed (transport, auth, timeout, provider-side error).
+
+    ``retryable=False`` marks a setup problem (package missing, config file not found) that a
+    later attempt cannot fix: it is not retried after a wait (D264)."""
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class LLMOutputValidationError(SyntheticUserError):
@@ -62,6 +69,11 @@ class ArtifactIntegrityError(SyntheticUserError):
 
 class ProductAdapterError(SyntheticUserError):
     """A product adapter failed to produce a response (transport, connection, bad setup)."""
+
+
+class ProductAuthError(ProductAdapterError):
+    """The product login failed, or the product rejected a fresh token (D263): the executor
+    stops sending further questions instead of spending each one on the same failure."""
 
 
 class UnsupportedModeError(SyntheticUserError):

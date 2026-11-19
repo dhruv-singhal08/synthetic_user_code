@@ -158,6 +158,8 @@ Secrets are read **only** from the environment; a `secrets:` key in YAML is an e
 | `llm.timeout_seconds` | `60` | Per LLM call |
 | `llm.max_validation_retries` | `2` | Retries when LLM output fails JSON/schema/integrity checks |
 | `llm.max_concurrency` | `4` | Max concurrent LLM / product calls |
+| `llm.provider_retries` | `2` | A failed real-provider call (timeout, connection, 429 / 5xx) is tried again this many times after a wait; 0 = off; setup errors (package / config file missing) are never retried (D264) |
+| `llm.provider_retry_wait_seconds` | `90` | Wait before each such retry (other calls keep running) |
 | `llm.fake_script_path` | `null` | `fake` only: JSON rule script for offline runs |
 | `product_adapter.type` | `fixture` | `fixture` \| `http_json` \| `python` (see "Product adapters") |
 | `product_adapter.options` | `{path: ./data/fixtures/product_responses/sample_responses.json}` | Per type; or set `product_adapter: <path to .adapter.yaml>` |
@@ -425,6 +427,27 @@ Examples: `config/products/sample_nl2sql.adapter.yaml` (fixture),
 custom adapter: `examples/adapters/my_product_adapter.py`. HTTP errors and non-JSON bodies
 become `error` outcomes with the status code; header secrets are never logged and are
 written to the run manifest only as their `${ENV_VAR}` template (literal values show `***`).
+
+### Product login: a token that renews itself (D263)
+
+For a product whose token expires (e.g. after 1 hour), an `http_json` / `http_sse` contract can
+add `options.auth` (`type: form_login`): the adapter POSTs `user_field` / `password_field` as a
+form to `url`, takes the token from the `token_cookie` response cookie (redirects followed) and
+fills `${token_variable}` (default `BLUE_TOKEN`) in the headers instead of the environment
+variable. Example: `config/products/generate_sql.adapter.yaml`.
+
+- **Renewal:** `refresh_before_seconds` (default 300) before the token's `exp` (when it is a
+  JWT; else after `fallback_lifetime_seconds`, default 3000). A product 401 / 403 renews it
+  once and retries that question. Concurrent calls share one token and one renewal.
+- **Credentials, never in the contract:** UI -> Product connection -> "Product login" (user ID,
+  password, login URL prefilled from the contract; checked at once, kept in server memory only,
+  gone after a server restart). CLI -> the env vars `user_env` / `password_env` (default
+  `BLUE_USER` / `BLUE_PASSWORD`; `url_env` = `BLUE_LOGIN_URL` overrides the URL). Password and
+  token are never written to the run folder, the log or results.
+- **Failure:** a failed login is not retried (a wrong password, retried per question, could
+  lock the account), and a fresh token the product still rejects stops too: the remaining
+  questions are recorded as `NotSent` errors; fix the login and run Execute again from the first
+  question with that error. Without `options.auth` nothing changes.
 
 ## Evaluation guidance (optional, D237)
 

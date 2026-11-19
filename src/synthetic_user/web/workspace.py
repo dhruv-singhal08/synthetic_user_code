@@ -102,6 +102,9 @@ class ProductConnection(StrictModel):
     # contract): the product response itself, a separate context API, or none.
     context_source: ContextSourceMode = ContextSourceMode.NONE
     context_api_url: str | None = None
+    # The contract's product-login URL (options.auth, D263); None = no login. The user id and
+    # password are never stored: the server keeps them in memory only.
+    auth_url: str | None = None
 
 
 HttpConnectionOptions = HttpJsonOptions | HttpSseOptions
@@ -726,6 +729,7 @@ class Workspace:
             ),
             context_source=options.context_source,
             context_api_url=options.context_api.url if options.context_api else None,
+            auth_url=options.auth.url if options.auth else None,
         )
         updated = state.model_copy(update={"connection": connection, "contract": None})
         self.save_state(updated)

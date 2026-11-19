@@ -64,7 +64,8 @@ class SafeChainClient:
             )
             raise LLMProviderError(
                 f"SafeChain call failed (model id {self._model_id}): "
-                f"{type(exc).__name__}: {exc}{hint}"
+                f"{type(exc).__name__}: {exc}{hint}",
+                retryable=not hint,  # a config without models is not fixed by waiting
             ) from exc
 
     async def _invoke(self, system: str, user: str) -> str:
@@ -84,7 +85,7 @@ class SafeChainClient:
 
 def _import_sdk(config_path: Path) -> Any:
     if not config_path.is_file():
-        raise LLMProviderError(f"SafeChain config file not found: {config_path}")
+        raise LLMProviderError(f"SafeChain config file not found: {config_path}", retryable=False)
     os.environ[SAFECHAIN_CONFIG_ENV] = str(config_path.resolve())
     try:
         from langchain_core.output_parsers import StrOutputParser
@@ -92,7 +93,9 @@ def _import_sdk(config_path: Path) -> Any:
         from safechain.lcel.model import amodel
         from safechain.lcel.retry import LCELRetry
     except ImportError as exc:
-        raise LLMProviderError(f"safechain is not installed; run `{INSTALL_HINT}`") from exc
+        raise LLMProviderError(
+            f"safechain is not installed; run `{INSTALL_HINT}`", retryable=False
+        ) from exc
     return SimpleNamespace(
         amodel=amodel,
         LCELRetry=LCELRetry,

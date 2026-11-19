@@ -10,6 +10,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from synthetic_user.adapters.auth import LoginRequest, LoginResult
 from synthetic_user.adapters.http_json import HttpRequest, HttpResult
 from synthetic_user.core.config import load_config
 from synthetic_user.web.results_csv import columns_for
@@ -427,6 +428,75 @@ def test_execute_through_connected_product(config_path: Path) -> None:
     assert ">>> RESPONSE (HTTP 200)" in log and "Travel spend was 1.2M USD." in log
     for row in rows:
         assert f'"question": "{row["question"]}"' in log  # the request body as sent
+
+
+LOGIN_CONTRACT_YAML = CONTRACT_YAML.replace(
+    b'headers: {Authorization: "Bearer ${PRODUCT_API_TOKEN}"}',
+    b'auth: {url: "https://login.example.com/ssoi/signin"}\n'
+    b'headers: {Authorization: "Bearer ${BLUE_TOKEN}"}',
+)
+PASSWORD = "pa55-very-secret"
+
+
+def test_product_login_is_checked_kept_in_memory_and_used_for_execute(
+    config_path: Path,
+) -> None:
+    """D263: wrong credentials are reported at login; the right ones are never written to the
+    run folder or the log, and execute sends the token from the login."""
+    sent: list[HttpRequest] = []
+
+    async def transport(request: HttpRequest) -> HttpResult:
+        sent.append(request)
+        body = {"data": {"answer": "Travel spend was 1.2M USD.", "sql": "SELECT 1"}}
+        return HttpResult(200, json.dumps(body).encode())
+
+    async def login(request: LoginRequest) -> LoginResult:
+        ok = dict(request.form) == {"userid": "tester", "pwd": PASSWORD}
+        return LoginResult(200 if ok else 401, {"bluetoken": "LOGIN-TOKEN"} if ok else {})
+
+    app = create_app(
+        load_config(config_path, env={}), env={}, transport=transport, login_transport=login
+    )
+    client = TestClient(app)
+    run_id = _run(client)
+    connected = _connect(client, run_id, LOGIN_CONTRACT_YAML, "https://p.example.com/ask")
+    assert connected.status_code == 200, connected.text
+    assert connected.json()["state"]["connection"]["auth_url"] == (
+        "https://login.example.com/ssoi/signin"
+    )
+    _steps(client, run_id, "reference", "scenarios", "questions")
+    no_login = client.post(f"/api/runs/{run_id}/steps/execute", json={})
+    assert no_login.status_code == 400 and "user ID and password" in no_login.json()["detail"]
+
+    wrong = client.post(
+        f"/api/runs/{run_id}/product-login", json={"user": "tester", "password": "nope"}
+    )
+    assert wrong.status_code == 400 and "check the user ID and password" in wrong.text
+    assert client.get(f"/api/runs/{run_id}").json()["product_login"] is None
+
+    right = client.post(
+        f"/api/runs/{run_id}/product-login", json={"user": "tester", "password": PASSWORD}
+    )
+    assert right.status_code == 200, right.text
+    assert right.json()["product_login"]["user"] == "tester"
+    assert client.get(f"/api/runs/{run_id}").json()["product_login"] == {
+        "user": "tester",
+        "url": "https://login.example.com/ssoi/signin",
+    }
+    body = _steps(client, run_id, "execute")
+    assert sent and all(r.headers["Authorization"] == "Bearer LOGIN-TOKEN" for r in sent)
+    assert all(r["product_outcome"] == "answered" for r in body["rows"] if r["question_id"])
+
+    run_dir = load_config(config_path, env={}).paths.artifacts_dir / "runs" / run_id
+    for path in run_dir.rglob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            assert PASSWORD not in text and "LOGIN-TOKEN" not in text, path
+    assert PASSWORD not in client.get(f"/api/runs/{run_id}").text
+
+    out = client.delete(f"/api/runs/{run_id}/product-login")
+    assert out.status_code == 200
+    assert client.get(f"/api/runs/{run_id}").json()["product_login"] is None
 
 
 # --- pipeline through the API -------------------------------------------------------------------

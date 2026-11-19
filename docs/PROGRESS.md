@@ -773,3 +773,30 @@ tests/fixtures/fake_llm_script.json. Decisions D245-D249.
   row and drawer header, warning callout on top of Evaluation; uncut questions unchanged;
   cut and uncut evaluations of the same answer have the same verdict (test).
 - NOT verified: the user's real run (SafeChain judge).
+
+## Product login with self-renewing token (2026-11-19) - user request (D263)
+
+- Files: adapters/auth.py (new: FormLoginAuth, TokenProvider, urllib_login, send_with_auth),
+  adapters/http_json.py + http_sse.py (options.auth, send via send_with_auth), adapters/registry.py
+  (login_transport), core/exceptions.py (ProductAuthError), nodes/executor/executor.py (NotSent
+  after a login failure), web/server.py (POST/DELETE product-login, memory-only credentials, env
+  overlay for execute), web/workspace.py (connection.auth_url), web/static/app.js + app.css
+  (Product login form), product_contract_template.yaml (commented example), config/products/generate_sql.adapter.yaml
+  (auth section), README, DECISIONS; tests: tests/adapters/test_product_auth.py (9), server login
+  test, conversation tests stub the login of the shipped contract.
+- Commands: ruff / format / mypy / pytest: all pass, 877 passed (10 new); app.js syntax-checked.
+- Verified: headless Brave against a local sign-in server + local product: login form shown
+  for an auth contract, wrong password reported, login, Execute without login refused with a
+  clear message, Execute with login answered (token header), login status kept on reload,
+  password / token in no file of the run folder.
+- NOT verified: the real QA sign-in (authbluesvcqa) and product - the login is tested against a
+  local server (form POST, 302 + Set-Cookie, cookie read across the redirect).
+
+## Wait-and-retry for failed LLM calls (2026-11-19) - user request (D264)
+
+- Files: llm/retrying.py (new), llm/factory.py (wraps Gemini / SafeChain), core/config.py
+  (llm.provider_retries, provider_retry_wait_seconds), core/exceptions.py
+  (LLMProviderError.retryable), llm/safechain_adapter.py + gemini_adapter.py (setup errors not
+  retryable), config/app*.yaml (both keys under llm), tests/llm/test_retrying.py (4),
+  tests/llm/test_factory_and_adapters.py (wrapped client), README, DECISIONS.
+- NOT verified: a live SafeChain failure (the wait and retry are tested with a stub client).
